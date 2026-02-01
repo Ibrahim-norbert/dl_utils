@@ -1,7 +1,7 @@
 from sklearn.preprocessing import StandardScaler
 import pandas as pd
 import numpy as np
-from platy_nuclei_texture.model_dataset_utils import (NUCLEUS_LABEL_KEY, EMBED_DICT_EMBED,
+from . import (NUCLEUS_LABEL_KEY, EMBED_DICT_EMBED,
                                                      EMBED_DICT_TEXTUREMASK,
                                                      TOKEN_KEY, FEATURES_KEY,
                                                      AVG_TOKEN_FEATURES_KEY,
@@ -10,8 +10,11 @@ from platy_nuclei_texture.model_dataset_utils import (NUCLEUS_LABEL_KEY, EMBED_D
 
 import os
 import skimage
-import anndata as ad
-import scanpy
+
+# TODO: Do not add these packages as they are not useable for an utility package
+
+# import anndata as ad
+# import scanpy
 
 def savedataframe(dataframe, save_dir,  **kwargs):
     # Remove unnamed columns
