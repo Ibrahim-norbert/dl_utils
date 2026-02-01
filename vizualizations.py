@@ -1,9 +1,7 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
-from pandas.tests.plotting.common import Axes
-from pandas.tests.plotting.common import Axes
-from pandas.tests.plotting.common import Axes
+from matplotlib.axes import Axes
 import seaborn as sns
 from matplotlib.pyplot import cm
 from sklearn.preprocessing import MinMaxScaler
@@ -58,8 +56,7 @@ class costumMatplotlib:
         mapper = cm.ScalarMappable(cmap=colormap)
         d_colors = mapper.to_rgba(np.unique(labels))  # Initialize the mapper
         colors = []
-        for label:
-            int in labels:
+        for label in labels:
             i = np.where(np.unique(labels) == label)[0][0]
             r, g, b, a = d_colors[i]
             colors.append((r, g, b, alpha))
@@ -220,10 +217,8 @@ class costumMatplotlib:
         # fig.patch.set_facecolor('black')  # Set figure background
 
         # Plot images in the current group
-        for i:
-            int in range(rows_per_plot):
-            for j:
-                int in range(images_per_row):
+        for i in range(rows_per_plot):
+            for j in range(images_per_row):
                 if rows_per_plot == 1:
                     ax = axes[j]
                 else:

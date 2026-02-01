@@ -1,5 +1,4 @@
 from SampleLoader import SampleLoaderBioImage
-from SampleTypes import Localizations
 from torch.utils.data import Subset, Dataset
 import numpy as np
 import pandas as pd
@@ -75,7 +74,7 @@ class BaseDataset(Dataset):
         assert n <= len(
             dataset
         ), f"Parameter n specified with value {n} is larger than dataset length"
-        return [dataset[i] for i: int in range(n)]
+        return [dataset[i] for i in range(n)]
 
     # @staticmethod
     # def get_center_of_mass(df, nucl_label: int) -> np.ndarray[Any, dtype]:

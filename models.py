@@ -7,7 +7,7 @@ from typing import Union, Any
 import numpy as np
 import torch
 import torch.nn as nn
-from utils import datasets
+import datasets
 import os
 import sys
 from yamlfix import fix_files
