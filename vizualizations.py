@@ -11,7 +11,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 import os
 from ast import Tuple
-from typing import List, Literal
+from typing import List, Literal, Any
 
 
 class FeatureVizualizer:

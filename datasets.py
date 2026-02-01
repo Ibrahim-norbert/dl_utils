@@ -1,6 +1,5 @@
 from SampleLoader import SampleLoaderBioImage
 from SampleTypes import Localizations
-from PreliminaryGNN.dataset import SMLMDataset
 from torch.utils.data import Subset, Dataset
 import numpy as np
 import pandas as pd
@@ -15,9 +14,6 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from typing import Any, List, Literal
 
-ROOT: str = os.path.abspath(os.path.join(__file__, ".."))
-if ROOT not in sys.path:
-    sys.path.insert(0, ROOT)
 
 
 class BaseDataset(Dataset):
