@@ -1,6 +1,26 @@
 from sklearn.preprocessing import StandardScaler
 import pandas as pd
 import numpy as np
+import os
+import skimage
+import base64
+import numpy as np
+from io import BytesIO
+import matplotlib.pyplot as plt
+import base64
+import os
+from PIL import Image
+import numpy as np
+from io import BytesIO
+import os
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score,  confusion_matrix
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
 from . import (NUCLEUS_LABEL_KEY, EMBED_DICT_EMBED,
                                                      EMBED_DICT_TEXTUREMASK,
                                                      TOKEN_KEY, FEATURES_KEY,
@@ -8,8 +28,7 @@ from . import (NUCLEUS_LABEL_KEY, EMBED_DICT_EMBED,
                                                      MASKED_FEATURES_KEY,
                                                      MASKED_AVG_TOKEN_FEATURES_KEY)
 
-import os
-import skimage
+sns.set_context("poster")
 
 # TODO: Do not add these packages as they are not useable for an utility package
 
@@ -86,15 +105,7 @@ def save2DFcolumn(
 
     return dataframe
 
-import base64
-import numpy as np
-from io import BytesIO
-import matplotlib.pyplot as plt
-import base64
-import os
-from PIL import Image
-import numpy as np
-from io import BytesIO
+
 
 def convert_array_to_data_url(path):
     """
@@ -118,6 +129,70 @@ def convert_array_to_data_url(path):
 def get_array_from_df(df, column):
     """Extracts and converts a column from a DataFrame to a NumPy array."""
     return np.array(df[column].tolist())
+
+
+
+class Classification:
+
+    @staticmethod
+    def train_classifier(embeddings, labels, method="KNN", metric="cosine"):
+        """
+        Train a classifier based on the specified metric.
+        """
+        if method == "KNN":
+            # Information on how the classifier "trains": https://stats.stackexchange.com/questions/349842/why-do-we-need-to-fit-a-k-nearest-neighbors-classifier
+            classifier = KNeighborsClassifier(n_neighbors=5, metric=metric)
+        else:
+            classifier = LogisticRegression(max_iter=1000, random_state=42)
+        classifier.fit(embeddings, labels)
+        return classifier
+
+    @staticmethod
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None):
+        # Predict for missing cell types
+        """
+        Predict using the classifier and evaluate if ground truth labels are provided.
+        """
+        y_pred = classifier.predict(x)
+        # If label mapping is provided, map the predicted and true labels
+        ks: list[int] = classifier.classes_
+        cm = confusion_matrix(gt, y_pred, normalize="true")
+        ticks = ks
+        # Plot confusion matrix using Seaborn
+        fig, ax = plt.subplots(1, 1)
+        ax = sns.heatmap(
+            cm,
+            ax=ax,
+            annot=True,
+            cmap="Blues",
+            xticklabels=ticks,
+            yticklabels=ticks,
+            cbar=False,
+        )
+        plt.xlabel("Predicted Labels")
+        plt.ylabel("Ground Truth Labels")
+        plt.xticks(rotation=45)
+        plt.yticks()
+        plt.tight_layout()
+        if save_dir is not None:
+            plt.savefig(
+                os.path.join(save_dir, "confusion_matrix.png")
+            )  # Save the confusion matrix image
+        plt.close()
+        return fig
+
+    @staticmethod
+    def getAccuracy(x, gt, classifier):
+        y_pred = classifier.predict(x)
+        accuracy = accuracy_score(gt, y_pred)
+        # print(f"Accuracy: {accuracy:.2f}")
+        # print("\nClassification Report:")
+        # print(classification_report(y_test, y_pred))
+        # probabilities = classifier.predict_proba(X_test)
+        return accuracy
+    
+
+
 class EmbeddingAnalysis:
     def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json"):
         # json or tab ?
@@ -129,6 +204,9 @@ class EmbeddingAnalysis:
         self.embeddings = StandardScaler().fit_transform(get_array_from_df(self.data_df, self.type))
         self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
         self.clusterColumn = "cluster"
+        self.classification = Classification
+
+
 
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]
