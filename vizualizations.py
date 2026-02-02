@@ -6,10 +6,10 @@ import seaborn as sns
 from matplotlib.pyplot import cm
 from sklearn.preprocessing import MinMaxScaler
 
-
+from matplotlib.figure import Figure
 import os
 from ast import Tuple
-from typing import List, Literal, Any
+from typing import List, Literal, Any, Union
 
 
 class FeatureVizualizer:

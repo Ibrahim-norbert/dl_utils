@@ -134,11 +134,21 @@ def get_array_from_df(df, column):
 
 class Classification:
 
+
+    # Try random forest
+    
+
     @staticmethod
     def train_classifier(embeddings, labels, method="KNN", metric="cosine"):
         """
         Train a classifier based on the specified metric.
         """
+        
+
+        {"KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
+         "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
+         "RandomForest": RandomForest}
+
         if method == "KNN":
             # Information on how the classifier "trains": https://stats.stackexchange.com/questions/349842/why-do-we-need-to-fit-a-k-nearest-neighbors-classifier
             classifier = KNeighborsClassifier(n_neighbors=5, metric=metric)
@@ -190,6 +200,7 @@ class Classification:
         # print(classification_report(y_test, y_pred))
         # probabilities = classifier.predict_proba(X_test)
         return accuracy
+    
     
 
 

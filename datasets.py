@@ -1,4 +1,4 @@
-from SampleLoader import SampleLoaderBioImage
+from dl_utils.SampleLoader import SampleLoaderBioImage
 from torch.utils.data import Subset, Dataset
 import numpy as np
 import pandas as pd
@@ -20,10 +20,11 @@ class BaseDataset(Dataset):
     Calculates general properties, loads low resoltion (s3) nuclei"""
 
     def __init__(self, datasetDFPath: str, sampleColumn: str, **kwargs) -> None:
-
+        
+        self.datasetDFPath=datasetDFPath
         self.sampleColumn: str = sampleColumn
         self.datasetDF: pd.DataFrame = self.loadDataFrame(
-            datasetDFPath=datasetDFPath)
+            datasetDFPath=self.datasetDFPath)
         self.samples: np.ndarray[Literal["1"], np.dtype[np.int32]] = np.unique(
             self.get_all_labels(self.datasetDF, self.sampleColumn)
         )
