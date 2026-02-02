@@ -16,6 +16,7 @@ import os
 import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score,  confusion_matrix
@@ -128,6 +129,10 @@ def convert_array_to_data_url(path):
 
 def get_array_from_df(df, column):
     """Extracts and converts a column from a DataFrame to a NumPy array."""
+    # Try to get a column, if does not exist give null array of dataframe length
+    # if column not in df.columns:
+    #     return np.array([None] * len(df))
+    
     return np.array(df[column].tolist())
 
 
@@ -144,16 +149,17 @@ class Classification:
         Train a classifier based on the specified metric.
         """
         
-
-        {"KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
+        
+        classifiers = {
+            "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
          "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-         "RandomForest": RandomForest}
+            "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42)
+        }
 
-        if method == "KNN":
-            # Information on how the classifier "trains": https://stats.stackexchange.com/questions/349842/why-do-we-need-to-fit-a-k-nearest-neighbors-classifier
-            classifier = KNeighborsClassifier(n_neighbors=5, metric=metric)
-        else:
-            classifier = LogisticRegression(max_iter=1000, random_state=42)
+        if method not in classifiers:
+            raise ValueError(f"Unsupported classifier method: {method}. Available methods are: {list(classifiers.keys())}")
+
+        classifier = classifiers[method]
         classifier.fit(embeddings, labels)
         return classifier
 
@@ -214,6 +220,7 @@ class EmbeddingAnalysis:
         self.data_df = pd.read_json(df_path)
         self.embeddings = StandardScaler().fit_transform(get_array_from_df(self.data_df, self.type))
         self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
+
         self.clusterColumn = "cluster"
         self.classification = Classification
 
@@ -222,7 +229,13 @@ class EmbeddingAnalysis:
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]
     
-
+    def get_array_from_df(self, column):
+        """Extracts and converts a column from a DataFrame to a NumPy array."""
+        # Try to get a column, if does not exist give null array of dataframe length
+        # if column not in df.columns:
+        #     return np.array([None] * len(df))
+        
+        return np.array(self.data_df[column].tolist())
     def load_png_for_nucleus(self, nucleus_id, patches_dir):
         """
         Load a PNG file for a nucleus and convert it to a base64-encoded image tag.
