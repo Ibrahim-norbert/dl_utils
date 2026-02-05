@@ -301,9 +301,9 @@ class EmbeddingAnalysis:
                     legend_title: str="Nuclei labels", save_dir: str="./"):
         import plotly.express as px
         import os
-        from MoBie_coloring import GlasbeyARGBLut
+        from . import MoBie_coloring
 
-        color_space = GlasbeyARGBLut()
+        color_space = MoBie_coloring.GlasbeyARGBLut()
         if classColoumn not in self.data_df.columns:
             self.data_df[classColoumn] = 0
 
@@ -374,8 +374,9 @@ class EmbeddingAnalysis:
         )
 
         # Save the plot as an HTML file
-        output_path = os.path.join(save_dir, f"{classColoumn}_UMAP.html")
-        fig.write_html(output_path)
+        output_path = os.path.join(save_dir, f"{classColoumn}_UMAP.svg")
+        fig.write_image(output_path)
+        #fig.write_html(output_path)
 
         # Show plot
         fig.show()

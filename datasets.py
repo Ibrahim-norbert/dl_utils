@@ -24,7 +24,7 @@ class BaseDataset(Dataset):
         self.datasetDFPath=datasetDFPath
         self.sampleColumn: str = sampleColumn
         self.datasetDF: pd.DataFrame = self.loadDataFrame(
-            datasetDFPath=self.datasetDFPath)
+            datasetDFPath=datasetDFPath)
         self.samples: np.ndarray[Literal["1"], np.dtype[np.int32]] = np.unique(
             self.get_all_labels(self.datasetDF, self.sampleColumn)
         )
