@@ -1,5 +1,5 @@
 from . import *
-
+from . import datasets
 # Additional Configuration Variables
 RES: list[float] = [0.025, 0.01, 0.01]
 HR_SHAPE: list[int] = [11416, 25916, 27499]
@@ -46,6 +46,7 @@ NUCL_DICT = None
 CELL_DICT = None
 
 NUCLEUS_LABEL_KEY = "label_id"
+LABEL_KEY = "labels"
 EMBED_DICT_EMBED = "Embeddings"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
 

@@ -4,16 +4,10 @@ import numpy as np
 import os
 import skimage
 import base64
-import numpy as np
 from io import BytesIO
 import matplotlib.pyplot as plt
-import base64
 import os
-from PIL import Image
-import numpy as np
-from io import BytesIO
-import os
-import numpy as np
+from sklearn.model_selection import train_test_split
 import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
@@ -21,13 +15,11 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score,  confusion_matrix
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 import seaborn as sns
-from . import (NUCLEUS_LABEL_KEY, EMBED_DICT_EMBED,
-                                                     EMBED_DICT_TEXTUREMASK,
-                                                     TOKEN_KEY, FEATURES_KEY,
-                                                     AVG_TOKEN_FEATURES_KEY,
-                                                     MASKED_FEATURES_KEY,
-                                                     MASKED_AVG_TOKEN_FEATURES_KEY)
+import anndata as ad
+import scanpy
+from dl_utils import (NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY)
 
 sns.set_context("poster")
 
@@ -36,12 +28,14 @@ sns.set_context("poster")
 # import anndata as ad
 # import scanpy
 
+
 def savedataframe(dataframe, save_dir,  **kwargs):
     # Remove unnamed columns
     # Remove unnamed columns
     dataframe = dataframe.loc[:, ~dataframe.columns.str.contains('^Unnamed')]
-    dataframe.drop(columns=dataframe.columns[dataframe.columns.duplicated()], inplace=True)
-    dataframe.drop_duplicates(subset=NUCLEUS_LABEL_KEY, inplace = True)
+    dataframe.drop(
+        columns=dataframe.columns[dataframe.columns.duplicated()], inplace=True)
+    dataframe.drop_duplicates(subset=NUCLEUS_LABEL_KEY, inplace=True)
 
     dataframe.reset_index(inplace=True, drop=True)
 
@@ -53,12 +47,15 @@ def savedataframe(dataframe, save_dir,  **kwargs):
 
     dataframe.to_json(get_savedf_path(save_dir, **kwargs))
 
+
 def get_savedf_path(save_dir: str, typie=''):
 
     if typie != "":
         return os.path.join(save_dir, f"dataframe_{typie}.json")
     else:
         return os.path.join(save_dir, f"dataframe.json")
+
+
 def save2DFcolumn(
     sorted_results: list,
     sorted_nucl_labels: np.ndarray,
@@ -87,14 +84,17 @@ def save2DFcolumn(
             if len(sorted_nucl_labels) == sorted_nucl_labels.size:
                 sorted_nucl_labels = sorted_nucl_labels.flatten()
             else:
-                raise  ValueError("Sorted nucleus labels and sorted results do not match in length")
+                raise ValueError(
+                    "Sorted nucleus labels and sorted results do not match in length")
         else:
-            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
+            raise NotImplementedError(
+                "Handling for multi-column sorted_nucl_labels is not implemented.")
 
     if isinstance(sorted_results, np.ndarray):
 
         if sorted_results.ndim > 2:
-            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
+            raise NotImplementedError(
+                "Handling for multi-column sorted_nucl_labels is not implemented.")
         else:
             sorted_results = sorted_results.tolist()
 
@@ -102,10 +102,10 @@ def save2DFcolumn(
     label_to_result = dict(zip(sorted_nucl_labels, sorted_results))
 
     # Map each NUCLEUS_LABEL_KEY in the dataframe to its corresponding result, or NaN if not found
-    dataframe[column_name] = dataframe.label_id.map(label_to_result).fillna(np.nan)
+    dataframe[column_name] = dataframe.label_id.map(
+        label_to_result).fillna(np.nan)
 
     return dataframe
-
 
 
 def convert_array_to_data_url(path):
@@ -127,37 +127,35 @@ def convert_array_to_data_url(path):
     encoded_image = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/png;base64,{encoded_image}"
 
+
 def get_array_from_df(df, column):
     """Extracts and converts a column from a DataFrame to a NumPy array."""
     # Try to get a column, if does not exist give null array of dataframe length
     # if column not in df.columns:
     #     return np.array([None] * len(df))
-    
+    #return np.asarray(np.array(df[column]).tolist()).squeeze()
     return np.array(df[column].tolist())
-
 
 
 class Classification:
 
-
     # Try random forest
-    
 
     @staticmethod
     def train_classifier(embeddings, labels, method="KNN", metric="cosine"):
         """
         Train a classifier based on the specified metric.
         """
-        
-        
+
         classifiers = {
             "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
-         "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
+            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
             "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42)
         }
 
         if method not in classifiers:
-            raise ValueError(f"Unsupported classifier method: {method}. Available methods are: {list(classifiers.keys())}")
+            raise ValueError(
+                f"Unsupported classifier method: {method}. Available methods are: {list(classifiers.keys())}")
 
         classifier = classifiers[method]
         classifier.fit(embeddings, labels)
@@ -206,99 +204,49 @@ class Classification:
         # print(classification_report(y_test, y_pred))
         # probabilities = classifier.predict_proba(X_test)
         return accuracy
-    
-    
 
 
 class EmbeddingAnalysis:
-    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json"):
+    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", labelColumn=NUCLEUS_LABEL_KEY,
+                 type=MASKED_FEATURES_KEY, save_dir=None):
         # json or tab ?
         self.df_path = df_path
-        self.type = MASKED_FEATURES_KEY #TOKEN_KEY #MASKED_AVG_TOKEN_FEATURES_KEY #FEATURES_KEY #TOKEN_KEY #MASKED_FEATURES_KEY #AVG_TOKEN_FEATURES_KEY #MASKED_AVG_TOKEN_FEATURES_KEY #AVG_TOKEN_FEATURES_KEY #MASKED_AVG_TOKEN_FEATURES_KEY  #TOKEN_KEY #FEATURES_KEY
+        self.type = type  # TOKEN_KEY #MASKED_AVG_TOKEN_FEATURES_KEY #FEATURES_KEY #TOKEN_KEY #MASKED_FEATURES_KEY #AVG_TOKEN_FEATURES_KEY #MASKED_AVG_TOKEN_FEATURES_KEY #AVG_TOKEN_FEATURES_KEY #MASKED_AVG_TOKEN_FEATURES_KEY  #TOKEN_KEY #FEATURES_KEY
         # assert dfpath is json
         assert df_path.endswith('.json'), "Dataframe path must be a JSON file."
         self.data_df = pd.read_json(df_path)
-        self.embeddings = StandardScaler().fit_transform(get_array_from_df(self.data_df, self.type))
-        self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
+        self.embeddings = StandardScaler().fit_transform(
+            get_array_from_df(self.data_df, self.type))
 
-        self.clusterColumn = "cluster"
+        assert isinstance(
+            self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
+        print(f"The embeddings are of shape: {self.embeddings.shape}")
+        self.labelColumn = labelColumn
+        self.labels = get_array_from_df(self.data_df, labelColumn)
+        self.save_dir = save_dir
+        self.classColumn = "cluster"
         self.classification = Classification
 
-
+    def tailorClassColour(self, class_ids):
+        # TODO: Confirm that predLabels is generated
+        temp = self.subplots_kwargs
+        temp["c"] = costumMatplotlib.labels2colors(class_ids)
+        return temp
 
     def getRowsByLabel(self, label):
-        return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]
-    
+        return self.data_df[self.data_df[self.labelColumn] == label]
+
     def get_array_from_df(self, column):
         """Extracts and converts a column from a DataFrame to a NumPy array."""
         # Try to get a column, if does not exist give null array of dataframe length
         # if column not in df.columns:
         #     return np.array([None] * len(df))
-        
+
         return np.array(self.data_df[column].tolist())
-    def load_png_for_nucleus(self, nucleus_id, patches_dir):
-        """
-        Load a PNG file for a nucleus and convert it to a base64-encoded image tag.
-
-        Parameters:
-        - nucleus_id: The ID of the nucleus.
-        - patches_dir: Directory where the nucleus patches are stored.
-
-        Returns:
-        - HTML image tag with base64-encoded image or a message if the file doesn't exist.
-        """
-        # Define the filename for the PNG
-        png_filename = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.png")
-
-        # Check if the file exists
-        if os.path.exists(png_filename):
-            try:
-                # Open the image and resize it
-                with Image.open(png_filename) as img:
-                    img = img.resize((200, 200))  # Resize to an appropriate dimension
-                    buffered = BytesIO()
-                    img.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
-
-                # Create an HTML image tag to display the PNG in the hover
-                return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
-            except Exception as e:
-                print(f"Error loading image {png_filename}: {e}")
-                return "Error loading image"
-        else:
-            # If the PNG doesn't exist, try to create it from the NPY file
-            npy_filename = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.npy")
-            if os.path.exists(npy_filename):
-                try:
-                    # Load the NPY file and create a PNG
-                    input_vol = np.load(npy_filename)
-                    z_slice = input_vol.shape[0] // 2
-                    img_array = input_vol[z_slice]
-
-                    # Normalize the image data to 0-255
-                    img_array = ((img_array - img_array.min()) /
-                                (img_array.max() - img_array.min()) * 255).astype(np.uint8)
-
-                    # Create an image from the array
-                    img = Image.fromarray(img_array)
-                    img = img.resize((200, 200))
-
-                    # Save the image to a bytes buffer
-                    buffered = BytesIO()
-                    img.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
-
-                    # Create an HTML image tag
-                    return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
-                except Exception as e:
-                    print(f"Error creating image from {npy_filename}: {e}")
-                    return "Error creating image"
-            else:
-                return "No image available"
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
-                    yaxis_title="UMAP Dimension 2", classColoumn: str="color",
-                    legend_title: str="Nuclei labels", save_dir: str="./"):
+                       yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
+                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
         import plotly.express as px
         import os
         from . import MoBie_coloring
@@ -308,7 +256,8 @@ class EmbeddingAnalysis:
             self.data_df[classColoumn] = 0
 
         classLabels = self.data_df[classColoumn].unique().astype(int).tolist()
-        self.data_df[classColoumn] = self.data_df[classColoumn].astype(np.int16)
+        self.data_df[classColoumn] = self.data_df[classColoumn].astype(
+            np.int16)
         map_cluster_2_color = {
             k: f"rgba{color_space.rgba_tuple_by_index(k)}"
             for k in classLabels
@@ -319,24 +268,24 @@ class EmbeddingAnalysis:
         patches_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\patches"
 
         # Add image HTML tags to the DataFrame
-        self.data_df['image_html'] = self.data_df.index.map(
-            lambda idx: self.load_png_for_nucleus(idx + 1, patches_dir)  # +1 because your files are named nucleus_hr_1.npy, etc.
-        )
+        # self.data_df['image_html'] = self.data_df.index.map(
+        #     # +1 because your files are named nucleus_hr_1.npy, etc.
+        #     lambda idx: self.load_png_for_nucleus(idx + 1, patches_dir)
+        # )
 
         fig = px.scatter(
             self.data_df,
             x=xColumn,
             y=yColumn,
             color=classColoumn,
-            color_discrete_map=map_cluster_2_color,
-            custom_data=['image_html']
+            color_discrete_map=map_cluster_2_color
         )
 
         # Custom hover template to display images
         fig.update_traces(
             hovertemplate="<b>Cluster: %{color}</b><br>" +
-                        "%{customdata[0]}" +
-                        "<extra></extra>"
+            "%{customdata[0]}" +
+            "<extra></extra>"
         )
 
         # Customize layout
@@ -376,15 +325,14 @@ class EmbeddingAnalysis:
         # Save the plot as an HTML file
         output_path = os.path.join(save_dir, f"{classColoumn}_UMAP.svg")
         fig.write_image(output_path)
-        #fig.write_html(output_path)
+        # fig.write_html(output_path)
 
         # Show plot
         fig.show()
 
-        
     def UMAP(self, n_neighbors=15, min_dist=0.1,
              n_components=2, random_state=42, metric="euclidean", **kwargs):
-        
+
         import umap
 
         # Fit UMAP to reduce 1D embeddings to 2D for visualization
@@ -396,17 +344,28 @@ class EmbeddingAnalysis:
 
         umap_array = umap_reducer.transform(self.embeddings)
 
-        self.data_df = save2DFcolumn(umap_array[:,0],
-                           sorted_nucl_labels=self.labels,
-                           dataframe=self.data_df,
-                           column_name="UMAP x")
+        self.data_df = save2DFcolumn(umap_array[:, 0],
+                                     sorted_nucl_labels=self.labels,
+                                     dataframe=self.data_df,
+                                     column_name="UMAP x")
 
         self.data_df = save2DFcolumn(umap_array[:, 1],
-                           sorted_nucl_labels=self.labels,
-                           dataframe=self.data_df,
-                           column_name="UMAP y")
-    
-        savedataframe(self.data_df, os.path.dirname(self.df_path), typie="analyzed")
+                                     sorted_nucl_labels=self.labels,
+                                     dataframe=self.data_df,
+                                     column_name="UMAP y")
+
+        savedataframe(self.data_df, os.path.dirname(
+            self.df_path), typie="analyzed")
+
+    def pca(self):
+
+        # Perform PCA
+        pca_model = PCA()
+        print(f"Detected following type for emebddings: {type(self.embeddings)}")
+        # if not isinstance(self.embeddings, np.ndarray):
+        #     print(f"Detected following type for emebddings: {type(self.embeddings)}")
+        #     self.embeddings = np.array(self.embeddings)
+        return pca_model.fit_transform(self.embeddings)
 
     def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
 
@@ -415,70 +374,42 @@ class EmbeddingAnalysis:
         embedding = ad.AnnData(X=self.embeddings)
 
         scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors,
-                n_pcs=None,
-                metric=distance_metric,
-                random_state=111)
+                            n_pcs=None,
+                            metric=distance_metric,
+                            random_state=111)
 
-        adata = scanpy.tl.leiden(embedding, resolution=resolution, random_state=111, n_iterations=n_iterations, copy=True)
+        adata = scanpy.tl.leiden(embedding, resolution=resolution,
+                                 random_state=111, n_iterations=n_iterations, copy=True)
 
         # Map the subcluster labels back to the main dataframe
         for indx, sub_label in enumerate(adata.obs["leiden"].unique()):
-            indices = adata.obs[adata.obs["leiden"] == sub_label].index.astype(int)
+            indices = adata.obs[adata.obs["leiden"]
+                                == sub_label].index.astype(int)
             labels[indices] = indx
 
         self.predLabels = labels.astype(int) + 1
-        self.data_df[self.clusterColumn] = self.predLabels
-        
+        self.data_df[self.classColumn] = self.predLabels
+
         return self.predLabels
-    
-    def generateMask(self, resolution=0.5,
-                     n_iterations=10, n_neighbors=15,
-                     distance_metric: str = "euclidean"):
-        
-        maskVolumePath = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\dataset\mask\NS6_OE_06_w4SPI-405.tif"
-
-        # Get IDs and predicted classes
-        if not hasattr(self, "predLabels"):
-            self.clustering(resolution=resolution, n_iterations=n_iterations,
-                                        n_neighbors=n_neighbors, distance_metric=distance_metric)
-        # Read the mask volume
-        maskVol = skimage.io.imread(maskVolumePath)
-
-        # Create a mapping array
-        max_id = maskVol.max()  # Determine the range of IDs
-        mapping_array = np.zeros(max_id + 1, dtype=np.uint16)  # Mapping array for all IDs
-        mapping_array[self.labels] = self.predLabels  # Map IDs to predicted classes
-
-        # Apply the mapping to the volume
-        maskVol = mapping_array[maskVol]
-
-        # Create the output file name and path
-        fileName = os.path.basename(maskVolumePath).replace(".tif", "_clustered.tiff")
-        output_dir = os.path.join(os.path.dirname(maskVolumePath), "..")
-        path = os.path.join(output_dir, fileName)
-
-        # Save the result as a TIFF file
-        skimage.io.imsave(path, maskVol.astype(np.int16))
-        print(f"Result saved to: {path}")
-
 
 
 if __name__ == '__main__':
-    df_path = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\config\results\epoch_40\dataframe_analyzed.json"
+    df_path = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_masking_075_patch4 SAM masks\results\epoch_10\dataframe_analyzed.json"
     embeddingAnalysis = EmbeddingAnalysis(df_path=df_path)
 
     embeddingAnalysis.UMAP()
 
-    embeddingAnalysis.clustering(resolution=0.05, n_iterations=10, n_neighbors=5)
+    embeddingAnalysis.clustering(
+        resolution=0.05, n_iterations=10, n_neighbors=5)
 
     args = {
         "xColumn": "UMAP x",
         "yColumn": "UMAP y",
-        "classColoumn": embeddingAnalysis.clusterColumn,
+        "classColoumn": embeddingAnalysis.classColumn,
         "legend_title": "Nuclei labels",
         "save_dir": os.path.dirname(embeddingAnalysis.df_path)
     }
 
     embeddingAnalysis.specialScatter(**args)
-    
+
     embeddingAnalysis.generateMask()
