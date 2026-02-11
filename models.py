@@ -1,15 +1,14 @@
-from sqlite3.dbapi2 import Timestamp
-import torch
-import pytorch_lightning as pl
-from torch.utils.data import DataLoader
-import torch
+import os
 from typing import Union, Any
+
 import numpy as np
 import torch
 import torch.nn as nn
-import os
-from yamlfix import fix_files
+import pytorch_lightning as pl
 import yaml
+from yamlfix import fix_files
+
+from .util import save_model as _save_model, load_model as _load_model
 
 
 class BaseModelClass(pl.LightningModule):
@@ -57,103 +56,33 @@ class BaseModelClass(pl.LightningModule):
     def getConfig(path):
         with open(path, "r") as f:
             hparams = yaml.safe_load(f)
-
-        # # TODO: I put this in place to ensure old configs are compatible. Maybe, transfer to trainer baseclass ???
-
-        # modelConfig = hparams.get("modelConfig", {})
-        # datasetConfig = hparams.get("datasetConfig", {})
-
-        # keys = list(datasetConfig.keys()) + list(modelConfig.keys())
-
-        # [hparams.pop(k, None) for k in keys]
-
         return hparams
 
-    def tensor2Numpy(self, tensor: torch.tensor) -> np.ndarray:
+    def tensor2Numpy(self, tensor: torch.Tensor) -> np.ndarray:
 
         if self.device != "cpu":
             tensor = tensor.cpu()
 
         return tensor.detach().squeeze().numpy()
 
-    # TODO: Use the two methods below to save model with config to checkpoint so we ahve reduced ambiguity when loading models.
-    def save_model(
-        self, args, epoch, model, model_without_ddp, optimizer, loss_scaler, wb_run
-    ):
-
-        # TODO: Implement this: https://pytorch-lightning.readthedocs.io/en/1.6.5/common/hyperparameters.html
-        output_dir = args.output_dir
-        epoch_name = str(epoch)
-        if loss_scaler is not None:
-            checkpoint_paths = [output_dir / ("checkpoint-%s.pth" % epoch_name)]
-            for checkpoint_path in checkpoint_paths:
-                to_save = {
-                    "model": model_without_ddp.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "epoch": epoch,
-                    "scaler": loss_scaler.state_dict(),
-                    "args": args,
-                }
-                if wb_run is not None:
-                    to_save["wb_run_id"] = wb_run.id
-                    to_save["wb_run_url"] = wb_run.url
-
-                torch.save(to_save, checkpoint_path)
-        else:
-            client_state = {"epoch": epoch}
-            model.save_checkpoint(
-                save_dir=args.output_dir,
-                tag="checkpoint-%s" % epoch_name,
-                client_state=client_state,
-            )
+    def save_model(self, args, epoch, model, model_without_ddp, optimizer, loss_scaler, wb_run):
+        _save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, wb_run)
 
     def load_model(self, args, model_without_ddp, optimizer, loss_scaler):
-        if args.resume:
-            if args.resume.startswith("https"):
-                checkpoint = torch.hub.load_state_dict_from_url(
-                    args.resume, map_location="cpu", check_hash=True
-                )
-            else:
-                checkpoint = torch.load(args.resume, map_location="cpu")
-            model_without_ddp.load_state_dict(checkpoint["model"])
-            print("Resume checkpoint %s" % args.resume)
-            if (
-                "optimizer" in checkpoint
-                and "epoch" in checkpoint
-                and not (hasattr(args, "eval") and args.eval)
-            ):
-                optimizer.load_state_dict(checkpoint["optimizer"])
-                args.start_epoch = checkpoint["epoch"] + 1
-                if "scaler" in checkpoint:
-                    loss_scaler.load_state_dict(checkpoint["scaler"])
-                print("With optim & sched!")
+        _load_model(args, model_without_ddp, optimizer, loss_scaler)
 
     def saveConfig(self):
-        # Writing the data to a YAML file
-
-        # Save to yaml file
         path = os.path.join(self.save_dir, self.__class__.__name__)
-
-        # Test if each value is acceptable to yaml
         filpath = f"{path}.yaml"
         with open(filpath, "w") as file:
             yaml.dump(self.config, file)
-
         fix_files([filpath])
 
     def initialize_weights(self):
-        # initialization
-
-        # # _timm's trunc_normal_(std=.02) is effectively normal_(std=0.02) as cutoff is too big (2.)
-        # torch.nn.init.normal_(self.cls_token, std=.02)
-        # torch.nn.init.normal_(self.mask_token, std=.02)
-
-        # initialize nn.Linear and nn.LayerNorm
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            # we use xavier_uniform following official JAX ViT:
             torch.nn.init.xavier_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
@@ -167,7 +96,7 @@ class BaseModelClass(pl.LightningModule):
             total_size_bytes += param.nelement() * param.element_size()
         for buffer in self.buffers():
             total_size_bytes += buffer.nelement() * buffer.element_size()
-        total_size_gb = total_size_bytes / (1024**3)  # Convert bytes to gigabytes
+        total_size_gb = total_size_bytes / (1024**3)
         print(f"Model memory size: {total_size_gb} GB")
 
     def compute_batch_memory_usage(self, sample):
@@ -175,35 +104,19 @@ class BaseModelClass(pl.LightningModule):
         Compute the approximate memory usage of a single batch during training.
 
         Parameters:
-        - model: The PyTorch model (nn.Module).
-        - input_size: Tuple representing the size of the input batch (e.g., (batch_size, channels, height, width)).
-        - dtype: Data type of the input tensors (default: torch.float32).
+        - sample: Input batch tensors.
 
         Returns:
         - Total memory usage in gigabytes (GB).
         """
-
-        # Calculate the size of the input data
         input_memory = sum([x.element_size() * x.nelement() for x in sample])
-
-        # Calculate the size of the model parameters
         param_memory = sum(p.element_size() * p.nelement() for p in self.parameters())
-
-        # Estimate the size of intermediate activations
-        # This is a rough estimate; actual usage may vary depending on the model architecture
-        activation_memory = (
-            input_memory * 2
-        )  # Assuming activations are roughly twice the input size
-
-        # Total memory usage
+        activation_memory = input_memory * 2
         total_memory = input_memory + param_memory + activation_memory
-
         print(f"Batch in memory during training: {total_memory / (1024 ** 3)}GB")
 
     @staticmethod
     def add_model_specific_args(parent_parser):
-
-        # TODO Requires wandb account, setting output directory
 
         parent_parser.add_argument(
             "--wandb_log_project",
@@ -216,7 +129,6 @@ class BaseModelClass(pl.LightningModule):
             "--experiment_name", default="default_name_experiment", type=str
         )
 
-        # Default are ViT-Base encoder
         parent_parser.add_argument(
             "--mask_ratio",
             default=0.33,
