@@ -21,11 +21,14 @@ class FeatureVizualizer:
         pass
 
 
+
+
 class costumMatplotlib:
-    def __init__(self, style_set_context="notebook") -> None:
+    def __init__(self, style_set_context="paper") -> None:
 
         # self.figsize = (12,6)
-        sns.set_context(style_set_context)
+        self.style_set_context = style_set_context
+        
 
     @property
     def colorDataFormat() -> Tuple:
@@ -74,7 +77,7 @@ class costumMatplotlib:
         plt.close()
         if save_dir is not None:
             save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
-            fig.savefig(f"{save_path}.png")
+            fig.savefig(f"{save_path}.svg", dpi=500)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
@@ -107,6 +110,7 @@ class costumMatplotlib:
     ) -> tuple[Figure, Axes]:
         # plot = cls(style_set_context)
         # fig, ax = plt.subplots(1,1, figsize=plot.figsize)\
+        sns.set_context("paper", font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
         if labels is not None:
             ax: Axes = costumMatplotlib.subScatter(
@@ -167,8 +171,14 @@ class costumMatplotlib:
         return ax
 
     @staticmethod
-    def subScatter(ax, points: dict[str, np.ndarray], **kwargs) -> Axes:
+    def  subScatter(ax, points: dict[str, np.ndarray], **kwargs) -> Axes:
         # For KWARGS, : https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes
+        
+        # Ensure ticks are small
+        #ax.tick_params(axis='both', which='both', labelsize=3, )
+        # Set axis edges and ticks to verz small
+#
+
         return sns.scatterplot(ax=ax, **points, **kwargs)
 
     @staticmethod

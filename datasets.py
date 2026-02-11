@@ -19,18 +19,18 @@ class BaseDataset(Dataset):
     """Base class for nuclei data
     Calculates general properties, loads low resoltion (s3) nuclei"""
 
-    def __init__(self, datasetDFPath: str, sampleColumn: str, **kwargs) -> None:
+    def __init__(self, datasetPath: str, sampleColumn: str, **kwargs) -> None:
         
-        self.datasetDFPath=datasetDFPath
+        self.datasetPath=datasetPath
         self.sampleColumn: str = sampleColumn
         self.datasetDF: pd.DataFrame = self.loadDataFrame(
-            datasetDFPath=datasetDFPath)
+            datasetPath=datasetPath)
         self.samples: np.ndarray[Literal["1"], np.dtype[np.int32]] = np.unique(
             self.get_all_labels(self.datasetDF, self.sampleColumn)
         )
 
-    def loadDataFrame(self, datasetDFPath: str) -> pd.DataFrame:
-        data_df = SampleLoaderBioImage.loadData(datasetDFPath)
+    def loadDataFrame(self, datasetPath: str) -> pd.DataFrame:
+        data_df = SampleLoaderBioImage.loadData(datasetPath)
         if data_df is not None:
             assert isinstance(data_df, pd.DataFrame)
             return data_df

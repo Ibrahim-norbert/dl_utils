@@ -55,11 +55,13 @@ class Classification:
         classifiers = {
             "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
             "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
+            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
             "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42)
         }
 
         if method not in classifiers:
-            raise ValueError(f"Unsupported classifier method: {method}. Available methods are: {list(classifiers.keys())}")
+            raise ValueError(
+                f"Unsupported classifier method: {method}. Available methods are: {list(classifiers.keys())}")
 
         classifier = classifiers[method]
         classifier.fit(embeddings, labels)
@@ -106,10 +108,16 @@ class EmbeddingAnalysis:
         self.type = MASKED_FEATURES_KEY
         assert df_path.endswith('.json'), "Dataframe path must be a JSON file."
         self.data_df = pd.read_json(df_path)
-        self.embeddings = StandardScaler().fit_transform(get_array_from_df(self.data_df, self.type))
-        self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
+        self.embeddings = StandardScaler().fit_transform(
+            get_array_from_df(self.data_df, self.type))
 
-        self.clusterColumn = "cluster"
+        assert isinstance(
+            self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
+        print(f"The embeddings are of shape: {self.embeddings.shape}")
+        self.labelColumn = labelColumn
+        self.labels = get_array_from_df(self.data_df, labelColumn)
+        self.save_dir = save_dir
+        self.classColumn = "cluster"
         self.classification = Classification
 
     def getRowsByLabel(self, label):
@@ -167,6 +175,8 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        legend_title: str = "Nuclei labels", save_dir: str = "./"):
+                       yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
+                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -175,7 +185,8 @@ class EmbeddingAnalysis:
             self.data_df[classColoumn] = 0
 
         classLabels = self.data_df[classColoumn].unique().astype(int).tolist()
-        self.data_df[classColoumn] = self.data_df[classColoumn].astype(np.int16)
+        self.data_df[classColoumn] = self.data_df[classColoumn].astype(
+            np.int16)
         map_cluster_2_color = {
             k: f"rgba{color_space.rgba_tuple_by_index(k)}"
             for k in classLabels
@@ -193,8 +204,7 @@ class EmbeddingAnalysis:
             x=xColumn,
             y=yColumn,
             color=classColoumn,
-            color_discrete_map=map_cluster_2_color,
-            custom_data=['image_html']
+            color_discrete_map=map_cluster_2_color
         )
 
         fig.update_traces(
@@ -230,8 +240,10 @@ class EmbeddingAnalysis:
         fig.write_image(output_path)
         fig.show()
 
+
     def UMAP(self, n_neighbors=15, min_dist=0.1,
              n_components=2, random_state=42, metric="euclidean", **kwargs):
+
 
         import umap
 
@@ -243,6 +255,10 @@ class EmbeddingAnalysis:
 
         umap_array = umap_reducer.transform(self.embeddings)
 
+        self.data_df = save2DFcolumn(umap_array[:, 0],
+                                     sorted_nucl_labels=self.labels,
+                                     dataframe=self.data_df,
+                                     column_name="UMAP x")
         self.data_df = save2DFcolumn(umap_array[:, 0],
                                      sorted_nucl_labels=self.labels,
                                      dataframe=self.data_df,
@@ -265,11 +281,16 @@ class EmbeddingAnalysis:
                             n_pcs=None,
                             metric=distance_metric,
                             random_state=111)
+                            n_pcs=None,
+                            metric=distance_metric,
+                            random_state=111)
 
-        adata = scanpy.tl.leiden(embedding, resolution=resolution, random_state=111, n_iterations=n_iterations, copy=True)
+        adata = scanpy.tl.leiden(embedding, resolution=resolution,
+                                 random_state=111, n_iterations=n_iterations, copy=True)
 
         for indx, sub_label in enumerate(adata.obs["leiden"].unique()):
-            indices = adata.obs[adata.obs["leiden"] == sub_label].index.astype(int)
+            indices = adata.obs[adata.obs["leiden"]
+                                == sub_label].index.astype(int)
             labels[indices] = indx
 
         self.predLabels = labels.astype(int) + 1
@@ -304,21 +325,24 @@ class EmbeddingAnalysis:
 
 
 if __name__ == '__main__':
-    df_path = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\config\results\epoch_40\dataframe_analyzed.json"
+    df_path = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_masking_075_patch4 SAM masks\results\epoch_10\dataframe_analyzed.json"
     embeddingAnalysis = EmbeddingAnalysis(df_path=df_path)
 
     embeddingAnalysis.UMAP()
 
-    embeddingAnalysis.clustering(resolution=0.05, n_iterations=10, n_neighbors=5)
+    embeddingAnalysis.clustering(
+        resolution=0.05, n_iterations=10, n_neighbors=5)
 
     args = {
         "xColumn": "UMAP x",
         "yColumn": "UMAP y",
-        "classColoumn": embeddingAnalysis.clusterColumn,
+        "classColoumn": embeddingAnalysis.classColumn,
         "legend_title": "Nuclei labels",
         "save_dir": os.path.dirname(embeddingAnalysis.df_path)
     }
 
     embeddingAnalysis.specialScatter(**args)
 
+
     embeddingAnalysis.generateMask()
+
