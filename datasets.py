@@ -36,7 +36,7 @@ class BaseDataset(Dataset):
             self.get_all_labels(self.datasetDF, self.sampleColumn)
         )
 
-    def writeChunkedImage(self, n5_file: str, volume: np.ndarray, groupkey : str, key: str) -> None:
+    def writeChunkedImage(self, filePath: str, volume: np.ndarray, groupkey : str, key: str) -> None:
         """Write *volume* into an N5 file at *n5_file*.
 
         Array is stored under the group ``groupkey/`` with datasets
@@ -46,11 +46,13 @@ class BaseDataset(Dataset):
 
         Parameters
         ----------
-        n5_file : str
+        filePath : str
             Path to the target N5 file (created or appended).
         volume : If necessary, scaled to
             ``uint16`` before writing.
         """
+
+        n5_file = util.replaceFileExt(filePath, ".n5")
 
         logger.debug("Volume intensity range: [%s, %s]", volume.min(), volume.max())
         # TODO: For now ensure image is in grayscale

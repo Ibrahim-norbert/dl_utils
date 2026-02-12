@@ -444,6 +444,10 @@ def setup(args: argparse.Namespace):
     return model, dataset
 
 
+def replaceFileExt(filePath : str, newExt : str):
+    fileExt = os.path.splitext(filePath)[-1]
+    return filePath.replace(fileExt, newExt)
+
 def save2DFcolumn(
     sorted_results: list,
     sorted_nucl_labels: np.ndarray,
