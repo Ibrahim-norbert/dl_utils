@@ -177,8 +177,7 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        legend_title: str = "Nuclei labels", save_dir: str = "./"):
-                       yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
+        
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -280,9 +279,6 @@ class EmbeddingAnalysis:
         embedding = ad.AnnData(X=self.embeddings)
 
         scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors,
-                            n_pcs=None,
-                            metric=distance_metric,
-                            random_state=111)
                             n_pcs=None,
                             metric=distance_metric,
                             random_state=111)
