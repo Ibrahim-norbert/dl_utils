@@ -15,8 +15,17 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-
-from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
+from sklearn.model_selection import train_test_split
+import pandas as pd
+from matplotlib import pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score,  confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import seaborn as sns
+from . import (NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY)
 from .LM_preprocess import get_array_from_df
 from .util import save2DFcolumn, savedataframe
 
@@ -105,9 +114,9 @@ class Classification:
 
 
 class EmbeddingAnalysis:
-    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json"):
+    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", type = MASKED_FEATURES_KEY, labelColumn=NUCLEUS_LABEL_KEY, save_dir=None):
         self.df_path = df_path
-        self.type = MASKED_FEATURES_KEY
+        self.type = type
         assert df_path.endswith('.json'), "Dataframe path must be a JSON file."
         self.data_df = pd.read_json(df_path)
         self.embeddings = StandardScaler().fit_transform(
@@ -272,8 +281,19 @@ class EmbeddingAnalysis:
 
         savedataframe(self.data_df, os.path.dirname(self.df_path), typie="analyzed")
 
-    def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
+    def pca(self):
 
+        # Perform PCA
+        pca_model = PCA()
+        print(f"Detected following type for emebddings: {type(self.embeddings)}")
+        # if not isinstance(self.embeddings, np.ndarray):
+        #     print(f"Detected following type for emebddings: {type(self.embeddings)}")
+        #     self.embeddings = np.array(self.embeddings)
+        return pca_model.fit_transform(self.embeddings)
+
+    def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
+        import anndata as ad
+        import scanpy
         labels = np.zeros(self.embeddings.shape[0])
 
         embedding = ad.AnnData(X=self.embeddings)
@@ -286,13 +306,14 @@ class EmbeddingAnalysis:
         adata = scanpy.tl.leiden(embedding, resolution=resolution,
                                  random_state=111, n_iterations=n_iterations, copy=True)
 
+        # Map the subcluster labels back to the main dataframe
         for indx, sub_label in enumerate(adata.obs["leiden"].unique()):
             indices = adata.obs[adata.obs["leiden"]
                                 == sub_label].index.astype(int)
             labels[indices] = indx
 
         self.predLabels = labels.astype(int) + 1
-        self.data_df[self.clusterColumn] = self.predLabels
+        self.data_df[self.classColumn] = self.predLabels
 
         return self.predLabels
 

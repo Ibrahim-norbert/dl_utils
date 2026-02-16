@@ -7,7 +7,7 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import yaml
 from yamlfix import fix_files
-
+from torch.utils.data.dataloader import default_collate
 from .util import save_model as _save_model, load_model as _load_model
 
 
@@ -37,6 +37,9 @@ class BaseModelClass(pl.LightningModule):
         self.__dict__.update(vars(self.hparams))
 
         self.initialize_weights()
+        
+    def collate_fn(self, **kwargs):
+        return default_collate(**kwargs)
 
     def whatDevice(self):
         return next(self.parameters()).device
