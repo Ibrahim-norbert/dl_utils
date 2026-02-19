@@ -15,7 +15,6 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
 import pandas as pd
 from matplotlib import pyplot as plt
 from sklearn.ensemble import RandomForestClassifier
@@ -27,7 +26,7 @@ from sklearn.decomposition import PCA
 import seaborn as sns
 from . import (NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY)
 from .LM_preprocess import get_array_from_df
-from .util import save2DFcolumn, savedataframe
+from .util import savedataframe
 
 sns.set_context("poster")
 
@@ -65,7 +64,6 @@ class Classification:
         """
         classifiers = {
             "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
-            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
             "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
             "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42)
         }
@@ -265,22 +263,20 @@ class EmbeddingAnalysis:
 
         umap_array = umap_reducer.transform(self.embeddings)
 
-        self.data_df = save2DFcolumn(umap_array[:, 0],
-                                     sorted_nucl_labels=self.labels,
-                                     dataframe=self.data_df,
-                                     column_name="UMAP x")
-        self.data_df = save2DFcolumn(umap_array[:, 0],
-                                     sorted_nucl_labels=self.labels,
-                                     dataframe=self.data_df,
-                                     column_name="UMAP x")
-
-        self.data_df = save2DFcolumn(umap_array[:, 1],
-                                     sorted_nucl_labels=self.labels,
-                                     dataframe=self.data_df,
-                                     column_name="UMAP y")
-
-        savedataframe(self.data_df, os.path.dirname(self.df_path), typie="analyzed")
-
+        umap_df = pd.DataFrame({"UMAP x": umap_array[:, 0],
+                                "UMAP y": umap_array[:, 1]},
+                               index=self.data_df.index)
+        
+        return umap_df
+    
+    @staticmethod
+    def concatColumnDF(df1, df2):
+        return pd.concat([df1, df2], axis=1)
+    
+    def concatDF(self, df):
+        self.data_df = self.concatColumnDF(self.data_df, df)
+        return self.data_df
+    
     def pca(self):
 
         # Perform PCA

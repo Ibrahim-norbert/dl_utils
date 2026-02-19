@@ -29,7 +29,7 @@ class BaseModelClass(pl.LightningModule):
         bnm_decay=0.5,
         weight_decay=0.0,
         space_threshold=0.5,
-        **kwargs,
+        **kwargs
     ):
         super().__init__(**kwargs)
 
@@ -92,6 +92,20 @@ class BaseModelClass(pl.LightningModule):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    def get_init_params(self):
+        """Return all __init__ parameter names and their current values."""
+        import inspect
+        sig = inspect.signature(self.__class__.__init__)
+        params = {}
+        for name in sig.parameters:
+            if name == "self":
+                continue
+            if hasattr(self, name):
+                params[name] = getattr(self, name)
+            elif name in self.hparams:
+                params[name] = self.hparams[name]
+        return params
 
     def compute_model_size(self):
         total_size_bytes = 0
