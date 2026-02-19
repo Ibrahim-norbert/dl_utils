@@ -20,7 +20,7 @@ import yaml
 from torch import inf
 from torch.utils.data import DataLoader, Dataset
 
-from dl_utils import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
+from dl_utils.constants import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
 from platy_nuclei_texture.model_dataset_utils.helperfunctions import addcell_type_col, cell_type2class_column
 from platy_nuclei_texture.model_dataset_utils.nuclei_loader import LMTextureNucleiDataset, \
     EMTextureNucleiDataset

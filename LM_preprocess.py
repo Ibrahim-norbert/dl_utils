@@ -7,9 +7,9 @@ from matplotlib import pyplot as plt
 from numpy import ndarray, dtype
 from typing import Any
 
-from dl_utils import NUCLEUS_LABEL_KEY
-from dl_utils import img2patch as img2ps
-from dl_utils.util import savedataframe, save2DFcolumn
+from dl_utils.constants import NUCLEUS_LABEL_KEY
+from . import img2patch as img2ps
+from .util import savedataframe, save2DFcolumn
 from platy_nuclei_texture.model_dataset_utils.helperfunctions import DataclassTypeError
 
 

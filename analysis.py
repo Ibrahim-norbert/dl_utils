@@ -14,7 +14,7 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 
-from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
+from .constants import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
 from .LM_preprocess import get_array_from_df
 from .util import save2DFcolumn, savedataframe
 

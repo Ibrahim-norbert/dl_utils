@@ -1,28 +1,21 @@
 from dl_utils.SampleLoader import SampleLoaderBioImage
-from dl_utils import util
-from torch.utils.data import Subset, Dataset
+from dl_utils import util_base as util
 import numpy as np
 import pandas as pd
-import os
-from typing import Literal
-import numpy as np
 import os
 from typing import Any, List, Literal, Tuple
-import pandas as pd
 import sys
 from pathlib import Path
-from torch.utils.data import DataLoader
-from typing import Any, List, Literal
 import logging
 from numpy import ndarray, dtype
 from scipy.ndimage import rotate
 from skimage.transform import resize
 from sklearn import preprocessing
 from sklearn.preprocessing import minmax_scale
-import z5py
+
 logger = logging.getLogger(__name__)
 
-class BaseDataset(Dataset):
+class BaseDataset:
     """Base class for nuclei data
     Calculates general properties, loads low resoltion (s3) nuclei"""
 
@@ -51,6 +44,8 @@ class BaseDataset(Dataset):
         volume : If necessary, scaled to
             ``uint16`` before writing.
         """
+
+        import z5py
 
         n5_file = util.replaceFileExt(filePath, ".n5")
 
@@ -281,18 +276,7 @@ class BaseDataset(Dataset):
             np.save(path, array)
 
     @staticmethod
-    def getDataloader(dataset, batch_size, num_workers, persistent_workers, **kwargs):
-        # print(f"All entered parameters: {locals()}")
-        return DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            persistent_workers=persistent_workers,
-            **kwargs,
-        )
-
-    @staticmethod
-    def subset_dataset(dataset, indices) -> Subset:
+    def subset_dataset(dataset, indices) -> "SubsetDataset":
         """
         Create a subset of the dataset by selecting specific labels.
 
@@ -301,17 +285,30 @@ class BaseDataset(Dataset):
             nucl (bool, optional): Whether to use nuclear labels (`True`) or other labels (`False`). Default is `True`.
 
         Returns:
-            Subset: A PyTorch `Subset` object containing the selected data.
+            SubsetDataset: A subset object containing the selected data.
 
         Behavior:
             - Converts the input `labels` into dataset indices using `self.label2index()`.
             - Creates a new column in `self.data_df` to categorize cell types.
-            - Uses the subset indices to create a `Subset` object from the original dataset.
+            - Uses the subset indices to create a subset from the original dataset.
             - Subsets `self.data_df` to match the indices in the subset.
         """
 
-        # Create the PyTorch Subset object
-        mini_dataset: Subset = Subset(dataset, indices)
+        mini_dataset = SubsetDataset(dataset, indices)
 
         return mini_dataset
+
+
+class SubsetDataset:
+    """A lightweight subset wrapper that indexes into an existing dataset."""
+
+    def __init__(self, dataset, indices):
+        self.dataset = dataset
+        self.indices = list(indices)
+
+    def __getitem__(self, idx):
+        return self.dataset[self.indices[idx]]
+
+    def __len__(self):
+        return len(self.indices)
 
