@@ -192,14 +192,13 @@ class EmbeddingAnalysis:
         if classColoumn not in self.data_df.columns:
             self.data_df[classColoumn] = 0
 
-        classLabels = self.data_df[classColoumn].unique().astype(int).tolist()
-        self.data_df[classColoumn] = self.data_df[classColoumn].astype(
-            np.int16)
+        classLabels = sorted(self.data_df[classColoumn].unique().astype(int).tolist())
+        self.data_df[classColoumn] = self.data_df[classColoumn].astype(int).astype(str)
         map_cluster_2_color = {
-            k: f"rgba{color_space.rgba_tuple_by_index(k)}"
+            str(k): f"rgba{color_space.rgba_tuple_by_index(k)}"
             for k in classLabels
         }
-        map_cluster_2_color[0] = "rgba(128, 128, 128, 0.5)"
+        map_cluster_2_color["0"] = "rgba(128, 128, 128, 0.5)"
 
         patches_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\patches"
 
@@ -212,7 +211,8 @@ class EmbeddingAnalysis:
             x=xColumn,
             y=yColumn,
             color=classColoumn,
-            color_discrete_map=map_cluster_2_color
+            color_discrete_map=map_cluster_2_color,
+            category_orders={classColoumn: [str(k) for k in classLabels]},
         )
 
         fig.update_traces(
