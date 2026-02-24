@@ -57,7 +57,6 @@ class Classification:
         classifiers = {
             "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
             "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
             "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42)
         }
 
@@ -116,9 +115,9 @@ class EmbeddingAnalysis:
         assert isinstance(
             self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
         print(f"The embeddings are of shape: {self.embeddings.shape}")
-        self.labelColumn = labelColumn
-        self.labels = get_array_from_df(self.data_df, labelColumn)
-        self.save_dir = save_dir
+        self.labelColumn = NUCLEUS_LABEL_KEY
+        self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
+        self.save_dir = os.path.dirname(df_path)
         self.classColumn = "cluster"
         self.classification = Classification
 
@@ -176,9 +175,8 @@ class EmbeddingAnalysis:
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
-                       yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
+                       legend_title: str = "Nuclei labels", save_dir: str = ""):
+        
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -261,10 +259,6 @@ class EmbeddingAnalysis:
                                      sorted_nucl_labels=self.labels,
                                      dataframe=self.data_df,
                                      column_name="UMAP x")
-        self.data_df = save2DFcolumn(umap_array[:, 0],
-                                     sorted_nucl_labels=self.labels,
-                                     dataframe=self.data_df,
-                                     column_name="UMAP x")
 
         self.data_df = save2DFcolumn(umap_array[:, 1],
                                      sorted_nucl_labels=self.labels,
@@ -275,28 +269,28 @@ class EmbeddingAnalysis:
 
     def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
 
+        import anndata as ad
+        import scanpy
+
         labels = np.zeros(self.embeddings.shape[0])
 
         embedding = ad.AnnData(X=self.embeddings)
 
         scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors,
                             n_pcs=None,
-                            metric=distance_metric,
-                            random_state=111)
-                            n_pcs=None,
-                            metric=distance_metric,
+                            metric=distance_metric,  # type: ignore[arg-type]
                             random_state=111)
 
-        adata = scanpy.tl.leiden(embedding, resolution=resolution,
-                                 random_state=111, n_iterations=n_iterations, copy=True)
+        scanpy.tl.leiden(embedding, resolution=resolution,
+                         random_state=111, n_iterations=n_iterations)
 
-        for indx, sub_label in enumerate(adata.obs["leiden"].unique()):
-            indices = adata.obs[adata.obs["leiden"]
-                                == sub_label].index.astype(int)
+        for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
+            indices = embedding.obs[embedding.obs["leiden"]
+                                    == sub_label].index.astype(int)
             labels[indices] = indx
 
         self.predLabels = labels.astype(int) + 1
-        self.data_df[self.clusterColumn] = self.predLabels
+        self.data_df[self.classColumn] = self.predLabels
 
         return self.predLabels
 
