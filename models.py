@@ -37,7 +37,10 @@ class BaseModelClass(pl.LightningModule):
         self.__dict__.update(vars(self.hparams))
 
         self.initialize_weights()
-        
+    
+
+
+
     def collate_fn(self, **kwargs):
         return default_collate(**kwargs)
 

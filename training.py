@@ -17,7 +17,7 @@ import yaml
 from lightning.pytorch import seed_everything
 from torch.utils.data import random_split
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import WandbLogger
+from lightning.pytorch.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
@@ -25,6 +25,23 @@ import dl_utils.datasets as datasets
 if TYPE_CHECKING:
     import PreliminaryGNN.dataset
 
+
+def full_stack() -> str:
+    import traceback
+    import sys
+    from traceback import FrameSummary
+
+    exc: type[BaseException] | None = sys.exc_info()[0]
+    # last one would be full_stack()
+    stack: list[FrameSummary] = traceback.extract_stack()[:-1]
+    if exc is not None:  # i.e. an exception is present
+        del stack[-1]  # remove call of full_stack, the printed exception
+        # will contain the caught exception caller instead
+    trc = "Traceback (most recent call last):\n"
+    stackstr: str = trc + "".join(traceback.format_list(stack))
+    if exc is not None:
+        stackstr += "  " + traceback.format_exc().lstrip(trc)
+    return stackstr
 
 def _get_init_args(
     frame: types.FrameType,
@@ -54,6 +71,23 @@ def _get_init_args(
     return self_arg, local_args
 
 
+class PeakGPUMemoryCallback(pl.Callback):
+    def on_train_epoch_start(self, trainer, pl_module):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if not torch.cuda.is_available():
+            return
+        peak_mb = torch.cuda.max_memory_allocated() / 1024**2
+        reserved_mb = torch.cuda.max_memory_reserved() / 1024**2
+        print(
+            f"Epoch {trainer.current_epoch} — "
+            f"peak GPU memory: {peak_mb:.1f} MB allocated / {reserved_mb:.1f} MB reserved"
+        )
+        pl_module.log("gpu_peak_memory_MB", peak_mb, on_epoch=True, logger=True)
+
+
 class BaseClassTrainerAndPredictor(pl.Trainer):
     def __init__(
         self,
@@ -69,6 +103,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         shuffle=True,
         modelConfig: typing.Union[None, dict] = None,
         datasetConfig: typing.Union[None, dict] = None,
+        limit_val_batches=0,
         args={},
     ) -> types.NoneType:
 
@@ -84,7 +119,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         if self.hparams.fast_dev_run is True:
             # Ideally, you shoud not save config. As it causes problems for reusing
-            self.device = "cpu"
+            #self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
@@ -106,12 +141,15 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             self.epoch_start = max_epochs - self.epoch
             self.epoch_end = max_epochs
 
+        torch.set_float32_matmul_precision('medium')
+        
         super().__init__(
             accelerator=self.device,
             fast_dev_run=self.hparams.fast_dev_run,
             deterministic=True,
             max_epochs=max_epochs,
             log_every_n_steps=batch_size * 2,
+            limit_val_batches=limit_val_batches,
             **args,
         )
 
@@ -315,6 +353,62 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return peak_gb
 
 
+class DummyWandbLogger(pl.loggers.Logger):
+    """Drop-in replacement for WandbLogger that requires no W&B account or connection.
+
+    Implements the full pytorch_lightning Logger interface but silently discards
+    every metric and hyperparameter. Accepts the same constructor kwargs as
+    WandbLogger so it can be swapped in without touching call sites.
+    """
+
+    def __init__(self, *, name: str | None = None, version: str = "0", save_dir: str = ".", **kwargs):
+        super().__init__()
+        self._name = name or "dummy"
+        self._version = version
+        self._save_dir = save_dir
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def version(self) -> str:
+        return self._version
+
+    @property
+    def experiment(self):
+        """Return a no-op object so any attribute access on the experiment is safe."""
+        return self
+
+    def __getattr__(self, item: str):
+        """Absorb any attribute access (e.g. logger.experiment.log(...))."""
+        return lambda *args, **kwargs: None
+
+    def log_hyperparams(self, params, *args, **kwargs) -> None:
+        pass
+
+    def log_metrics(self, metrics: dict, step: int | None = None) -> None:
+        pass
+
+    def finalize(self, status: str) -> None:
+        pass
+
+
+class SafeEarlyStopping(EarlyStopping):
+    def _validate_condition_metric(self, logs):
+        if self.monitor not in logs:
+            available = list(logs.keys())
+            if available:
+                print(
+                    f"[EarlyStopping] '{self.monitor}' not found. "
+                    f"Falling back to '{available[0]}'"
+                )
+                self.monitor = available[0]
+            else:
+                print("[EarlyStopping] No metrics available. Skipping.")
+                return False
+        return True
+
 class BaseClassTrainer(BaseClassTrainerAndPredictor):
     def __init__(
         self,
@@ -338,6 +432,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         datasetConfig: typing.Union[dict, None] = None,
         modelConfig=None,
         wandbProjectName="",
+        limit_val_batches = 0, 
         **kwargs,
     ) -> types.NoneType:
 
@@ -361,13 +456,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             save_last=True,
         )
 
-        wandb_logger = WandbLogger(
+        wandb_logger = logger(
             save_dir=self.save_dir,
             name=self.hparams.version_name if hasattr(self.hparams, "version_name") else None,
-            project=wandbProjectName,
-            log_model=False,
-        )
-        early_stopping_callback = EarlyStopping(
+            version='')
+        
+        early_stopping_callback = SafeEarlyStopping(
             monitor=self.hparams.EarlyStopping_monitor,
             mode=self.hparams.EarlyStopping_mode,
             patience=self.hparams.EarlyStopping_patience,
@@ -392,6 +486,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             modelConfig=self.modelConfig,
             dataType=self.hparams.dataType,
             fast_dev_run=self.hparams.fast_dev_run,
+            limit_val_batches=limit_val_batches,
             args=args,
         )
 
