@@ -126,6 +126,7 @@ class EmbeddingAnalysis:
         self.labelColumn = labelColumn
         self.labels = get_array_from_df(self.data_df, labelColumn)
         self.save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
         self.classColumn = "cluster"
         self.classification = Classification
 
@@ -285,7 +286,12 @@ class EmbeddingAnalysis:
         # if not isinstance(self.embeddings, np.ndarray):
         #     print(f"Detected following type for emebddings: {type(self.embeddings)}")
         #     self.embeddings = np.array(self.embeddings)
-        return pca_model.fit_transform(self.embeddings)
+
+        fg_pcs = pca_model.fit_transform(self.embeddings)
+
+        print(f"Explained variance   : {pca_model.explained_variance_ratio_[:5].round(3)}")
+        print(f"Cumulative (first 3) : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
+        return fg_pcs
 
     def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
         import anndata as ad

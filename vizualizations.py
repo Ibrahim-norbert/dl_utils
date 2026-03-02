@@ -37,10 +37,9 @@ class costumMatplotlib:
     @staticmethod
     def array2colors(x: np.ndarray):
         """Argument for color in sns scatter is color."""
+        x = MinMaxScaler(feature_range=(0,1), clip=True).fit_transform(x)
         assert x.shape[-1] == 3, f"Axis y must be 3"
         colors = []
-        # Scale to 0-1 range
-        x = MinMaxScaler().fit_transform(x)
         for i in x:
             colors.append(tuple(i) + (1,))
         return colors
