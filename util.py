@@ -360,14 +360,14 @@ def loadcheckpoints(train_run_path: str):
 
 def getcheckpointinfoandargs(pnt: str):
     print("Predicting features for", pnt)
-    checkpoint_info = torch.load(pnt, map_location='cpu')
+    checkpoint_info = torch.load(pnt, map_location='cpu', weights_only=False)
     cpt_args = checkpoint_info['args']
     return checkpoint_info, cpt_args
 
 
-def get_model_dataset_cpt_args(cpt_args, batch_size, num_workers, pin_memory, drop_last=False):
+def get_model_dataset_cpt_args(get_dataset, cpt_args, batch_size, num_workers, pin_memory, drop_last=False):
 
-    model, dataset = setup(cpt_args)
+    model, dataset = setup(get_dataset, cpt_args)
 
     data_loader = DataLoader(dataset, batch_size=batch_size,
                              num_workers=num_workers, pin_memory=pin_memory, drop_last=drop_last)
@@ -433,7 +433,7 @@ def get_model(LightMicroscope: bool = False, mask_ratio=0.8, embed_dim=80, encod
     return model
 
 
-def setup(args: argparse.Namespace):
+def setup(get_dataset, args: argparse.Namespace):
 
     model_dataset_args = vars(args)
 
@@ -443,6 +443,28 @@ def setup(args: argparse.Namespace):
 
     return model, dataset
 
+from platy_nuclei_texture.model_dataset_utils.nuclei_loader import TrainingSampleLM
+def get_output_dict(dataset, model, save_dir, label=7685, device="cpu"):
+    model.to(device)
+    model.eval()
+
+    with torch.inference_mode():
+        input_ = [dataset.__getitem__(label)]
+
+        s = os.path.join(save_dir, f"random_masking_{label}.npy")
+        if not os.path.exists(s):
+            os.makedirs(os.path.dirname(s), exist_ok=True)
+            np.save(s, input_[0][3])
+        enc_ids = np.load(s)
+
+        if not enc_ids.shape == input_[0][3].shape:
+            enc_ids = input_[0][3]
+
+        input_ = [TrainingSampleLM(x[0], x[1], x[2], enc_ids, *x[4:]) for x in input_]
+
+        _, output_dict = model.forward_wo_dataloader(input_, device)
+
+    return output_dict
 
 def save2DFcolumn(
     sorted_results: list,

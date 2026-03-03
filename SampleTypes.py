@@ -16,7 +16,7 @@ class Data(NamedTuple):
     label: np.ndarray[Any, np.dtype[np.int32]]
 
 
-class Localizations(NamedTuple):
+class Vertices(NamedTuple):
     """Container for localization data with vertices, labels, and file paths."""
 
     data: Data
