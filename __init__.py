@@ -45,7 +45,7 @@ CELL_DICT = None
 
 NUCLEUS_LABEL_KEY = "label_id"
 LABEL_KEY = "labels"
-EMBED_DICT_EMBED = "Embeddings"
+EMBED_KEY = "Embeddings"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
 
 TOKEN_KEY = "token"

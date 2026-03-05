@@ -17,10 +17,9 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
+from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_KEY
 from . import costumMatplotlib
 from .LM_preprocess import get_array_from_df
-from .util import savedataframe
 
 sns.set_context("poster")
 
@@ -29,7 +28,7 @@ sns.set_context("poster")
 # import scanpy
 
 
-def convert_array_to_data_url(path):
+def convert_array_to_data_url(path) -> str:
     """
     Convert a 2D NumPy array to a base64-encoded image.
     Args:
@@ -45,7 +44,7 @@ def convert_array_to_data_url(path):
     plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     buf.seek(0)
-    encoded_image = base64.b64encode(buf.getvalue()).decode()
+    encoded_image: str = base64.b64encode(buf.getvalue()).decode()
     return f"data:image/png;base64,{encoded_image}"
 
 
@@ -71,7 +70,7 @@ class Classification:
         return classifier
 
     @staticmethod
-    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None):
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None) -> Figure:
         """
         Predict using the classifier and evaluate if ground truth labels are provided.
         """
@@ -80,7 +79,7 @@ class Classification:
         cm = confusion_matrix(gt, y_pred, normalize="true")
         ticks = ks
         fig, ax = plt.subplots(1, 1)
-        ax = sns.heatmap(
+        ax: plt.Axes = sns.heatmap(
             cm,
             ax=ax,
             annot=True,
@@ -106,21 +105,21 @@ class Classification:
 
 
 class EmbeddingAnalysis:
-    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", type=MASKED_FEATURES_KEY, labelColumn=NUCLEUS_LABEL_KEY, save_dir=None, binary: bool = False, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0, leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean"):
-        self.df_path = df_path
-        self.type = type
+    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", type=EMBED_KEY, labelColumn=NUCLEUS_LABEL_KEY, save_dir=None, binary: bool = False, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0, leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean") -> None:
+        self.df_path: str = df_path
+        self.type: str = type
         assert df_path.endswith('.json'), "Dataframe path must be a JSON file."
-        self.data_df = pd.read_json(df_path)
+        self.data_df: pd.DataFrame = pd.read_json(df_path)
         self.embeddings = StandardScaler().fit_transform(
             get_array_from_df(self.data_df, self.type))
-        self.subplots_kwargs = {"s": 1}
+        self.subplots_kwargs: dict[str, int] = {"s": 1}
 
-        self.dbscan = dbscan
-        self.leiden = leiden
-        self.leiden_resolution = leiden_resolution
-        self.leiden_n_iterations = leiden_n_iterations
-        self.leiden_n_neighbors = leiden_n_neighbors
-        self.leiden_distance_metric = leiden_distance_metric
+        self.dbscan: bool = dbscan
+        self.leiden: bool = leiden
+        self.leiden_resolution: float = leiden_resolution
+        self.leiden_n_iterations: int = leiden_n_iterations
+        self.leiden_n_neighbors: int = leiden_n_neighbors
+        self.leiden_distance_metric: str = leiden_distance_metric
         self.classifier_method = "LogisticRegression"
         self.predLabels = self.classify(
             binary=binary
@@ -129,12 +128,55 @@ class EmbeddingAnalysis:
         assert isinstance(
             self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
         print(f"The embeddings are of shape: {self.embeddings.shape}")
-        self.labelColumn = labelColumn
+        self.labelColumn: str = labelColumn
         self.labels = get_array_from_df(self.data_df, labelColumn)
         self.save_dir = save_dir
         os.makedirs(save_dir, exist_ok=True)
         self.classColumn = "cluster"
         self.classification = Classification
+
+    @classmethod
+    def from_dataframe(
+        cls,
+        data_df: pd.DataFrame,
+        type=MASKED_FEATURES_KEY,
+        labelColumn=NUCLEUS_LABEL_KEY,
+        save_dir=None,
+        binary: bool = False,
+        dbscan: bool = False,
+        leiden: bool = True,
+        leiden_resolution: float = 1.0,
+        leiden_n_iterations: int = 2,
+        leiden_n_neighbors: int = 15,
+        leiden_distance_metric: str = "euclidean",
+    ) -> "EmbeddingAnalysis":
+        instance: Self = cls.__new__(cls)
+        instance.df_path = None
+        instance.type = type
+        instance.data_df = data_df.copy()
+        instance.embeddings = StandardScaler().fit_transform(
+            get_array_from_df(instance.data_df, type)
+        )
+        instance.subplots_kwargs = {"s": 1}
+        instance.dbscan = dbscan
+        instance.leiden = leiden
+        instance.leiden_resolution = leiden_resolution
+        instance.leiden_n_iterations = leiden_n_iterations
+        instance.leiden_n_neighbors = leiden_n_neighbors
+        instance.leiden_distance_metric = leiden_distance_metric
+        instance.classifier_method = "LogisticRegression"
+        instance.classification = Classification
+        instance.labelColumn = labelColumn
+        instance.labels = get_array_from_df(instance.data_df, labelColumn)
+        instance.save_dir = save_dir
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+        instance.classColumn = "cluster"
+        assert isinstance(instance.embeddings, np.ndarray), \
+            f"The embeddings are instead: {type(instance.embeddings)}"
+        print(f"The embeddings are of shape: {instance.embeddings.shape}")
+        instance.predLabels = instance.classify(binary=binary)
+        return instance
 
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]
@@ -143,7 +185,7 @@ class EmbeddingAnalysis:
         """Extracts and converts a column from self.data_df to a NumPy array."""
         return np.array(self.data_df[column].tolist())
 
-    def load_png_for_nucleus(self, nucleus_id, patches_dir):
+    def load_png_for_nucleus(self, nucleus_id, patches_dir) -> str:
         """
         Load a PNG file for a nucleus and convert it to a base64-encoded image tag.
 
@@ -154,7 +196,7 @@ class EmbeddingAnalysis:
         Returns:
         - HTML image tag with base64-encoded image or a message if the file doesn't exist.
         """
-        png_filename = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.png")
+        png_filename: str = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.png")
 
         if os.path.exists(png_filename):
             try:
@@ -162,13 +204,13 @@ class EmbeddingAnalysis:
                     img = img.resize((200, 200))
                     buffered = BytesIO()
                     img.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    img_str: str = base64.b64encode(buffered.getvalue()).decode()
                 return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
-            except Exception as e:
+            except Exception as e: Exception:
                 print(f"Error loading image {png_filename}: {e}")
                 return "Error loading image"
         else:
-            npy_filename = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.npy")
+            npy_filename: str = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.npy")
             if os.path.exists(npy_filename):
                 try:
                     input_vol = np.load(npy_filename)
@@ -180,9 +222,9 @@ class EmbeddingAnalysis:
                     img = img.resize((200, 200))
                     buffered = BytesIO()
                     img.save(buffered, format="PNG")
-                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    img_str: str = base64.b64encode(buffered.getvalue()).decode()
                     return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
-                except Exception as e:
+                except Exception as e: Exception:
                     print(f"Error creating image from {npy_filename}: {e}")
                     return "Error creating image"
             else:
@@ -190,7 +232,7 @@ class EmbeddingAnalysis:
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
+                       legend_title: str = "Nuclei labels", save_dir: str = "./") -> None:
         
         import plotly.express as px
         from . import MoBie_coloring
@@ -201,7 +243,7 @@ class EmbeddingAnalysis:
 
         classLabels = sorted(self.data_df[classColoumn].unique().astype(int).tolist())
         self.data_df[classColoumn] = self.data_df[classColoumn].astype(int).astype(str)
-        map_cluster_2_color = {
+        map_cluster_2_color: dict[str, str] = {
             str(k): f"rgba{color_space.rgba_tuple_by_index(k)}"
             for k in classLabels
         }
@@ -251,13 +293,13 @@ class EmbeddingAnalysis:
             yaxis_title=yaxis_title
         )
 
-        output_path = os.path.join(save_dir, f"{classColoumn}_UMAP.svg")
+        output_path: str = os.path.join(save_dir, f"{classColoumn}_UMAP.svg")
         fig.write_image(output_path)
         fig.show()
 
 
     def UMAP(self, n_neighbors=15, min_dist=0.1,
-             n_components=2, random_state=42, metric="euclidean", **kwargs):
+             n_components=2, random_state=42, metric="euclidean", **kwargs) -> pd.DataFrame:
 
 
         import umap
@@ -275,7 +317,7 @@ class EmbeddingAnalysis:
                                index=self.data_df.index)
         
         return umap_df
-    def classify(self, binary: bool = False, train_size=0.8):
+    def classify(self, binary: bool = False, train_size=0.6, mapping: dict[str, int] = None) -> np.ndarray:
 
         if binary:
             self.traingt = (self.labels != 0).astype(int)
@@ -291,6 +333,7 @@ class EmbeddingAnalysis:
         )
 
         print(f"\n{np.unique(y_train)}, \n{np.unique(y_val)}")
+        print(f"Training samples: {len(X_train)}, Validation samples: {len(X_val)}")
 
         # self.trainEmbeddings = X_train
         self.classifier = self.classification.train_classifier(
@@ -307,10 +350,15 @@ class EmbeddingAnalysis:
 
         self.predLabels = self.classifier.predict(self.embeddings)
 
-        self.data_df[self.classifier_method] = self.predLabels
+        if mapping is not None:
+            self.data_df[self.classifier_method] = np.array([mapping.get(str(label), label) for label in self.predLabels])
+
+        else:
+            self.data_df[self.classifier_method] = self.predLabels
 
         # Predict class for remainder embeddings
         return self.predLabels
+    
     def performDBSCAN(
         self, preds, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10
     ) -> np.ndarray:
@@ -321,7 +369,7 @@ class EmbeddingAnalysis:
 
         return final_clusters.reshape(*shape)
     @staticmethod
-    def concatColumnDF(df1, df2):
+    def concatColumnDF(df1, df2) -> os.NoReturn:
         return pd.concat([df1, df2], axis=1)
     def performLeiden(
         self,
@@ -387,17 +435,17 @@ class EmbeddingAnalysis:
             labels = self.nonDiffsoftmax(preds, shape)
 
         return labels
-    def concatDF(self, df):
-        self.data_df = self.concatColumnDF(self.data_df, df)
+    def concatDF(self, df) -> os.NoReturn:
+        self.data_df: os.NoReturn = self.concatColumnDF(self.data_df, df)
         return self.data_df
-    def UMAPResults(self):
-        umap = self.UMAP()
+    def UMAPResults(self) -> os.NoReturn:
+        umap: pd.DataFrame = self.UMAP()
 
         self.concatDF(umap)
 
-        self.classColumn = self.classifier_method
+        self.classColumn: str = self.classifier_method
 
-        args = {
+        args: dict[str, str] = {
             "xColumn": "UMAP x",
             "yColumn": "UMAP y",
             "classColoumn": self.classColumn,
@@ -421,7 +469,7 @@ class EmbeddingAnalysis:
     def vizualisePCA(self, pcas, title="") -> Figure:
         points = costumMatplotlib.points2Dict(pcas[:, :2])
 
-        self.pocaDF = pd.DataFrame.from_dict(
+        self.pocaDF: pd.DataFrame = pd.DataFrame.from_dict(
             {
                 "pca_x": points["x"],
                 "pca_y": points["y"],
@@ -481,7 +529,7 @@ class EmbeddingAnalysis:
 
     def generateMask(self, resolution=0.5,
                      n_iterations=10, n_neighbors=15,
-                     distance_metric: str = "euclidean"):
+                     distance_metric: str = "euclidean") -> None:
 
         maskVolumePath = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\dataset\mask\NS6_OE_06_w4SPI-405.tif"
 
@@ -497,9 +545,9 @@ class EmbeddingAnalysis:
 
         maskVol = mapping_array[maskVol]
 
-        fileName = os.path.basename(maskVolumePath).replace(".tif", "_clustered.tiff")
-        output_dir = os.path.join(os.path.dirname(maskVolumePath), "..")
-        path = os.path.join(output_dir, fileName)
+        fileName: str = os.path.basename(maskVolumePath).replace(".tif", "_clustered.tiff")
+        output_dir: str = os.path.join(os.path.dirname(maskVolumePath), "..")
+        path: str = os.path.join(output_dir, fileName)
 
         skimage.io.imsave(path, maskVol.astype(np.int16))
         print(f"Result saved to: {path}")
@@ -514,7 +562,7 @@ if __name__ == '__main__':
     embeddingAnalysis.clustering(
         resolution=0.05, n_iterations=10, n_neighbors=5)
 
-    args = {
+    args: dict[str, str] = {
         "xColumn": "UMAP x",
         "yColumn": "UMAP y",
         "classColoumn": embeddingAnalysis.classColumn,
@@ -524,6 +572,4 @@ if __name__ == '__main__':
 
     embeddingAnalysis.specialScatter(**args)
 
-
-    embeddingAnalysis.generateMask()
 
