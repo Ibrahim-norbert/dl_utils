@@ -252,7 +252,7 @@ class VerticesDataset(BaseDataset):
         label: str = self.samples[index]
         dfindex: int = self.Sample2df_index(label)
         dir: str = self.datasetDF.loc[dfindex, self.sampleColumnCSV]
-        return os.path.join(dir, label)
+        return dir #os.path.join(dir, label)
 
     @staticmethod
     def getVertices(
@@ -268,7 +268,16 @@ class VerticesDataset(BaseDataset):
     def file2Vertices(
         file, verticesCol, verticesInstanceLabelCol
     ) -> Tuple[np.ndarray[Tuple[Any], np.dtype[Any]]]:
-        dataframe = VerticesDataset.file2Dataframe(file=file)
+        dataframe : pd.DataFrame = VerticesDataset.file2Dataframe(file=file)
+
+        if not all(isinstance(eval(col), str) for col in dataframe.columns):
+            if all(isinstance(eval(col), (int, float)) for col in dataframe.columns):
+                dataframe.loc[-1] = [eval(x) for x in dataframe.columns.tolist()]
+                dataframe.index = dataframe.index + 1
+                dataframe.sort_index(inplace=True)
+            n = len(verticesCol)
+            dataframe.rename(
+                columns=dict(zip(dataframe.columns[:n], verticesCol)), inplace=True)
 
         vertices: np.ndarray = VerticesDataset.getVertices(dataframe, verticesCol)
 
@@ -305,7 +314,7 @@ class VerticesDataset(BaseDataset):
             verticesInstanceLabelCol=verticesInstanceLabelCol,
         )
 
-        return Vertices(Data(vertices[..., :2], label), file)
+        return Vertices(Data(vertices, label), file)
     
     @staticmethod
     def arrayDFPreprocessing(array: Union[list, np.ndarray]):
@@ -378,13 +387,6 @@ class VerticesDataset(BaseDataset):
 
         return dataframe
     
-    def loadDataFrame(self, datasetPath: str) -> pd.DataFrame:
-        data_df = super().loadDataFrame(datasetPath)
-        if not all(isinstance(col, str) for col in data_df.columns):
-            verticesCol = self.config.get("verticesCol", ["x", "y"])
-            if len(verticesCol) == len(data_df.columns):
-                data_df.columns = verticesCol
-        return data_df
 
     def __getitem__(self, index: int) -> Union[None, Vertices]:
 
