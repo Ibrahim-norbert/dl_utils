@@ -21,10 +21,9 @@ from torch import inf
 from torch.utils.data import DataLoader, Dataset
 
 from dl_utils import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
-from platy_nuclei_texture.model_dataset_utils.helperfunctions import addcell_type_col, cell_type2class_column
-from platy_nuclei_texture.model_dataset_utils.nuclei_loader import LMTextureNucleiDataset, \
-    EMTextureNucleiDataset
-from platy_nuclei_texture.model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
+
+
+
 
 
 def adjust_learning_rate(optimizer, epoch, args, start_epoch):
@@ -378,6 +377,7 @@ def get_model_dataset_cpt_args(get_dataset, cpt_args, batch_size, num_workers, p
 def get_dataset(LightMicroscope: bool = False, nucl_vol_diameter=11, num_patch_per_nucl=1331, mask_ratio=0.8,
                 num_sin_cos_pos_emb=78, encoder_embed_dim=80, texture_patch_dim=4, test=False, **kwargs) -> Dataset:
 
+    from platy_nuclei_texture.model_dataset_utils.nuclei_loader import LMTextureNucleiDataset, EMTextureNucleiDataset
     if LightMicroscope is True:
         print("We are dealing with LM data")
         dset = LMTextureNucleiDataset(nucl_vol_diameter=nucl_vol_diameter,
@@ -403,6 +403,8 @@ def get_model(LightMicroscope: bool = False, mask_ratio=0.8, embed_dim=80, encod
               loss_mask_zero=False, mae_encoder=False, final_activation="None", mask_only=False, norm_pix_loss=False,
               pretrained=None, memory_efficiency=False, num_patch_per_nucl=200, **kwargs) -> torch.nn.Module:
 
+    from platy_nuclei_texture.model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
+    
     if LightMicroscope is True:
 
         model = LMAutoencoderViT(texture_patch_dim=texture_patch_dim, embed_dim=embed_dim, encoder_embed_dim=encoder_embed_dim,
@@ -565,6 +567,10 @@ def readdataframe(path: str, name='') -> pd.DataFrame:
 
 
 def getvalidationdataloader(dataset, batch_size, num_workers, pin_memory, drop_last):
+
+    # TODO: Place it here for now to avoid import conflicts
+    from platy_nuclei_texture.model_dataset_utils.helperfunctions import addcell_type_col, cell_type2class_column
+
 
     dataset.data_df = addcell_type_col(dataset.data_df)
 

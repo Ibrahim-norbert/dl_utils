@@ -15,10 +15,18 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-
-from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
+import pandas as pd
+from matplotlib import pyplot as plt
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score,  confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import seaborn as sns
+from . import (NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY)
 from .LM_preprocess import get_array_from_df
-from .util import save2DFcolumn, savedataframe
+from .util import savedataframe
 
 sns.set_context("poster")
 
@@ -104,9 +112,9 @@ class Classification:
 
 
 class EmbeddingAnalysis:
-    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json"):
+    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", type = MASKED_FEATURES_KEY, labelColumn=NUCLEUS_LABEL_KEY, save_dir=None):
         self.df_path = df_path
-        self.type = MASKED_FEATURES_KEY
+        self.type = type
         assert df_path.endswith('.json'), "Dataframe path must be a JSON file."
         self.data_df = pd.read_json(df_path)
         self.embeddings = StandardScaler().fit_transform(
@@ -115,9 +123,16 @@ class EmbeddingAnalysis:
         assert isinstance(
             self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
         print(f"The embeddings are of shape: {self.embeddings.shape}")
+<<<<<<< HEAD
         self.labelColumn = NUCLEUS_LABEL_KEY
         self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
         self.save_dir = os.path.dirname(df_path)
+=======
+        self.labelColumn = labelColumn
+        self.labels = get_array_from_df(self.data_df, labelColumn)
+        self.save_dir = save_dir
+        os.makedirs(save_dir, exist_ok=True)
+>>>>>>> origin/Project1Changes
         self.classColumn = "cluster"
         self.classification = Classification
 
@@ -175,7 +190,11 @@ class EmbeddingAnalysis:
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
+<<<<<<< HEAD
                        legend_title: str = "Nuclei labels", save_dir: str = ""):
+=======
+                       legend_title: str = "Nuclei labels", save_dir: str = "./"):
+>>>>>>> origin/Project1Changes
         
         import plotly.express as px
         from . import MoBie_coloring
@@ -184,14 +203,13 @@ class EmbeddingAnalysis:
         if classColoumn not in self.data_df.columns:
             self.data_df[classColoumn] = 0
 
-        classLabels = self.data_df[classColoumn].unique().astype(int).tolist()
-        self.data_df[classColoumn] = self.data_df[classColoumn].astype(
-            np.int16)
+        classLabels = sorted(self.data_df[classColoumn].unique().astype(int).tolist())
+        self.data_df[classColoumn] = self.data_df[classColoumn].astype(int).astype(str)
         map_cluster_2_color = {
-            k: f"rgba{color_space.rgba_tuple_by_index(k)}"
+            str(k): f"rgba{color_space.rgba_tuple_by_index(k)}"
             for k in classLabels
         }
-        map_cluster_2_color[0] = "rgba(128, 128, 128, 0.5)"
+        map_cluster_2_color["0"] = "rgba(128, 128, 128, 0.5)"
 
         patches_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\patches"
 
@@ -204,7 +222,8 @@ class EmbeddingAnalysis:
             x=xColumn,
             y=yColumn,
             color=classColoumn,
-            color_discrete_map=map_cluster_2_color
+            color_discrete_map=map_cluster_2_color,
+            category_orders={classColoumn: [str(k) for k in classLabels]},
         )
 
         fig.update_traces(
@@ -255,38 +274,78 @@ class EmbeddingAnalysis:
 
         umap_array = umap_reducer.transform(self.embeddings)
 
+<<<<<<< HEAD
         self.data_df = save2DFcolumn(umap_array[:, 0],
                                      sorted_nucl_labels=self.labels,
                                      dataframe=self.data_df,
                                      column_name="UMAP x")
+=======
+        umap_df = pd.DataFrame({"UMAP x": umap_array[:, 0],
+                                "UMAP y": umap_array[:, 1]},
+                               index=self.data_df.index)
+        
+        return umap_df
+    
+    @staticmethod
+    def concatColumnDF(df1, df2):
+        return pd.concat([df1, df2], axis=1)
+    
+    def concatDF(self, df):
+        self.data_df = self.concatColumnDF(self.data_df, df)
+        return self.data_df
+    
+    def pca(self):
+>>>>>>> origin/Project1Changes
 
-        self.data_df = save2DFcolumn(umap_array[:, 1],
-                                     sorted_nucl_labels=self.labels,
-                                     dataframe=self.data_df,
-                                     column_name="UMAP y")
+        # Perform PCA
+        pca_model = PCA()
+        print(f"Detected following type for emebddings: {type(self.embeddings)}")
+        # if not isinstance(self.embeddings, np.ndarray):
+        #     print(f"Detected following type for emebddings: {type(self.embeddings)}")
+        #     self.embeddings = np.array(self.embeddings)
 
-        savedataframe(self.data_df, os.path.dirname(self.df_path), typie="analyzed")
+        fg_pcs = pca_model.fit_transform(self.embeddings)
+
+        print(f"Explained variance   : {pca_model.explained_variance_ratio_[:5].round(3)}")
+        print(f"Cumulative (first 3) : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
+        return fg_pcs
 
     def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
+<<<<<<< HEAD
 
         import anndata as ad
         import scanpy
 
+=======
+        import anndata as ad
+        import scanpy
+>>>>>>> origin/Project1Changes
         labels = np.zeros(self.embeddings.shape[0])
 
         embedding = ad.AnnData(X=self.embeddings)
 
         scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors,
                             n_pcs=None,
+<<<<<<< HEAD
                             metric=distance_metric,  # type: ignore[arg-type]
+=======
+                            metric=distance_metric,
+>>>>>>> origin/Project1Changes
                             random_state=111)
 
         scanpy.tl.leiden(embedding, resolution=resolution,
                          random_state=111, n_iterations=n_iterations)
 
+<<<<<<< HEAD
         for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
             indices = embedding.obs[embedding.obs["leiden"]
                                     == sub_label].index.astype(int)
+=======
+        # Map the subcluster labels back to the main dataframe
+        for indx, sub_label in enumerate(adata.obs["leiden"].unique()):
+            indices = adata.obs[adata.obs["leiden"]
+                                == sub_label].index.astype(int)
+>>>>>>> origin/Project1Changes
             labels[indices] = indx
 
         self.predLabels = labels.astype(int) + 1
