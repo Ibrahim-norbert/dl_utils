@@ -9,14 +9,61 @@ from typing import Any
 
 from dl_utils import NUCLEUS_LABEL_KEY
 from dl_utils import img2patch as img2ps
-from dl_utils.util import savedataframe, save2DFcolumn
 
-class DataclassTypeError(Exception):
-    pass  # Custom error handling if needed
+# class DataclassTypeError(Exception):
+#     pass  # Custom error handling if needed
 
 # ---------------------------------------------------------------------------
 # Helper: extract a named column from a DataFrame as a NumPy array
 # ---------------------------------------------------------------------------
+
+def save2DFcolumn(
+    sorted_results: list,
+    sorted_nucl_labels: np.ndarray,
+    dataframe: pd.DataFrame,
+    column_name: str = "Embedding"
+) -> pd.DataFrame:
+    """
+    Adds a new column to the dataframe with values from sorted_results,
+    mapped according to sorted_nucl_labels.
+
+    Parameters:
+    - sorted_results: List of values to be added as the new column.
+    - sorted_nucl_labels: 1D or 2D numpy array of nucleus labels.
+    - dataframe: The DataFrame to which the new column will be added.
+    - column_name: The name of the new column (default is "Embedding").
+
+    Returns:
+    - Updated DataFrame with the new column.
+    """
+
+    if not isinstance(sorted_nucl_labels, np.ndarray):
+        sorted_nucl_labels = np.array(sorted_nucl_labels)
+    # Flatten sorted_nucl_labels if it has only one column (2D array with shape [n, 1])
+    if sorted_nucl_labels.ndim == 2:
+        if sorted_nucl_labels.shape[0] == 1 or sorted_nucl_labels.shape[1] == 1:
+            if len(sorted_nucl_labels) == sorted_nucl_labels.size:
+                sorted_nucl_labels = sorted_nucl_labels.flatten()
+            else:
+                raise  ValueError("Sorted nucleus labels and sorted results do not match in length")
+        else:
+            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
+
+    if isinstance(sorted_results, np.ndarray):
+
+        if sorted_results.ndim > 2:
+            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
+        else:
+            sorted_results = sorted_results.tolist()
+
+    # Create a dictionary for fast lookup of results by label
+    label_to_result = dict(zip(sorted_nucl_labels, sorted_results))
+
+    # Map each NUCLEUS_LABEL_KEY in the dataframe to its corresponding result, or NaN if not found
+    dataframe[column_name] = dataframe.label_id.map(label_to_result).fillna(np.nan)
+
+    return dataframe
+
 
 def get_array_from_df(df, column):
     """Extracts and converts a column from a DataFrame to a NumPy array."""
@@ -34,9 +81,10 @@ def getbboxfromdf(df: pd.DataFrame, df_indx) -> np.ndarray:
 
     # Extract and ensure numerical values
     bbox_values = [df.loc[df_indx, dim] for dim in cols]
-    if not all(isinstance(val, numbers.Number) for val in bbox_values):
-        raise DataclassTypeError("All bounding box values must be numeric. but got: "
-                                 f"{[type(val) for val in bbox_values]}")
+    # if not all(isinstance(val, numbers.Number) for val in bbox_values):
+    #     raise Exception as e:
+    #         print("All bounding box values must be numeric. but got: " + 
+    #                              f"{[type(val) for val in bbox_values]} with error {e}")
 
     return np.array(bbox_values, dtype=int).T  # Convert to NumPy float array
 
