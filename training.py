@@ -114,12 +114,11 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.modelConfig = modelConfig
         self.datasetConfig = datasetConfig
         # Print entries of modelConfig:
-        print(f"Config of model: {self.modelConfig}")
         self.device = self.modelConfig.accelerator
 
-        if self.hparams.fast_dev_run is True:
+        if self.hparams.fast_dev_run is True or self.hparams.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
-            #self.device = "cpu"
+            self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
@@ -158,6 +157,11 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         current_frame: sys.FrameType | types.NoneType = inspect.currentframe()
         if current_frame:
             frame: sys.FrameType | types.NoneType = current_frame.f_back
+            # Walk up to the outermost (leaf) __init__ so that calling
+            # save_hyperparameters() from a base-class __init__ always captures
+            # the full parameter set of the most-derived subclass.
+            while frame and frame.f_back and frame.f_back.f_code.co_name == "__init__":
+                frame = frame.f_back
             hparams: dict[str, Any] = _get_init_args(frame=frame)[-1]
 
             # Merge config file values into hparams (config file overrides defaults)
@@ -447,6 +451,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         self.kwargs = kwargs
 
+        # Allow subclasses to customise the root save directory before the
+        # timestamp is appended.  The result is also written into self.config
+        # so it ends up in the saved YAML.
+        self.save_dir = self._compute_save_dir()
+        self.config["save_dir"] = self.save_dir
+
         # save_dir needs to be declared here because of the callback classes
         # Need to timestamp in initializer as logger requires save_dir
         self.timeStampsave_dir()
@@ -496,6 +506,17 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             limit_val_batches=limit_val_batches,
             args=args,
         )
+
+    def _compute_save_dir(self) -> str:
+        """Hook for subclasses to define the root save directory.
+
+        Called inside __init__ after save_hyperparameters(), so self.modelConfig
+        and self.hparams are already available.  The default falls back to
+        hparams.save_dir (when BaseClassTrainer is used directly) and then to
+        modelConfig.save_dir.  Subclasses override this instead of computing
+        save_dir manually before calling super().__init__().
+        """
+        return getattr(self, "save_dir", "") or getattr(self.modelConfig, "save_dir", "")
 
     def fit(self, segmentor, train, val, **kwargs):
 

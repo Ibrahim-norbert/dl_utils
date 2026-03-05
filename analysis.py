@@ -18,7 +18,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
-from . import costumMatplotlib
+from .vizualizations import costumMatplotlib
 from .LM_preprocess import get_array_from_df
 from .util import savedataframe
 
