@@ -1,5 +1,6 @@
 import base64
 import os
+import warnings
 from io import BytesIO
 
 import matplotlib.pyplot as plt
@@ -18,7 +19,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_KEY
-from . import costumMatplotlib
+from .vizualizations import costumMatplotlib
 from .LM_preprocess import get_array_from_df
 
 sns.set_context("poster")
@@ -121,20 +122,32 @@ class EmbeddingAnalysis:
         self.leiden_n_neighbors: int = leiden_n_neighbors
         self.leiden_distance_metric: str = leiden_distance_metric
         self.classifier_method = "LogisticRegression"
-        self.predLabels = self.classify(
-            binary=binary
-        )  # self.getClusters(self.embeddings)  
 
         assert isinstance(
             self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
         print(f"The embeddings are of shape: {self.embeddings.shape}")
         self.labelColumn: str = labelColumn
-        self.labels = get_array_from_df(self.data_df, labelColumn)
+        self.getLabels()
+
         self.save_dir = save_dir
         os.makedirs(save_dir, exist_ok=True)
-        self.classColumn = "cluster"
+        self.classColumn = "Class"
         self.classification = Classification
-
+        self.predLabels = self.classify(
+            binary=binary
+        )  # self.getClusters(self.embeddings)  
+    
+    def getLabels(self):
+        self.labels = get_array_from_df(self.data_df, self.labelColumn)
+        nan_mask = ~pd.isna(self.labels)
+        if nan_mask.sum() < len(self.labels):
+            warnings.warn(
+                f"Labels contain {(~nan_mask).sum()} NaN value(s). "
+                f"self.labels ({nan_mask.sum()}) is a subset of self.embeddings ({len(self.embeddings)}). "
+                "Filtering both to non-NaN entries."
+            )
+            self.traingt = self.labels[nan_mask]
+            self.trainEmbeddings = self.embeddings[nan_mask]
     @classmethod
     def from_dataframe(
         cls,
@@ -167,7 +180,7 @@ class EmbeddingAnalysis:
         instance.classifier_method = "LogisticRegression"
         instance.classification = Classification
         instance.labelColumn = labelColumn
-        instance.labels = get_array_from_df(instance.data_df, labelColumn)
+        instance.getLabels()
         instance.save_dir = save_dir
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
@@ -198,37 +211,25 @@ class EmbeddingAnalysis:
         """
         png_filename: str = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.png")
 
-        if os.path.exists(png_filename):
+
+        npy_filename: str = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.npy")
+        if os.path.exists(npy_filename):
             try:
-                with Image.open(png_filename) as img:
-                    img = img.resize((200, 200))
-                    buffered = BytesIO()
-                    img.save(buffered, format="PNG")
-                    img_str: str = base64.b64encode(buffered.getvalue()).decode()
+                input_vol = np.load(npy_filename)
+                z_slice = input_vol.shape[0] // 2
+                img_array = input_vol[z_slice]
+                img_array = ((img_array - img_array.min()) /
+                                (img_array.max() - img_array.min()) * 255).astype(np.uint8)
+                img = Image.fromarray(img_array)
+                img = img.resize((200, 200))
+                buffered = BytesIO()
+                img.save(buffered, format="PNG")
+                img_str: str = base64.b64encode(buffered.getvalue()).decode()
                 return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
-            except Exception as e: Exception:
-                print(f"Error loading image {png_filename}: {e}")
-                return "Error loading image"
-        else:
-            npy_filename: str = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.npy")
-            if os.path.exists(npy_filename):
-                try:
-                    input_vol = np.load(npy_filename)
-                    z_slice = input_vol.shape[0] // 2
-                    img_array = input_vol[z_slice]
-                    img_array = ((img_array - img_array.min()) /
-                                 (img_array.max() - img_array.min()) * 255).astype(np.uint8)
-                    img = Image.fromarray(img_array)
-                    img = img.resize((200, 200))
-                    buffered = BytesIO()
-                    img.save(buffered, format="PNG")
-                    img_str: str = base64.b64encode(buffered.getvalue()).decode()
-                    return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
-                except Exception as e: Exception:
-                    print(f"Error creating image from {npy_filename}: {e}")
-                    return "Error creating image"
-            else:
-                return "No image available"
+            except Exception as e:
+                print(f"Error creating image from {npy_filename}: {e}")
+                return "Error creating image"
+   
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
@@ -319,12 +320,6 @@ class EmbeddingAnalysis:
         return umap_df
     def classify(self, binary: bool = False, train_size=0.6, mapping: dict[str, int] = None) -> np.ndarray:
 
-        if binary:
-            self.traingt = (self.labels != 0).astype(int)
-        else:
-            self.traingt = self.labels
-
-        self.trainEmbeddings = self.embeddings
 
         X_train, X_val, y_train, y_val = train_test_split(
             self.trainEmbeddings,
