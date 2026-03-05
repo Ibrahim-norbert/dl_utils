@@ -2,29 +2,23 @@ import base64
 import os
 from io import BytesIO
 
-
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import skimage
+from matplotlib.figure import Figure
 from PIL import Image
+from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-import pandas as pd
-from matplotlib import pyplot as plt
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score,  confusion_matrix
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-import seaborn as sns
-from . import (NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY)
+from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
+from . import costumMatplotlib
 from .LM_preprocess import get_array_from_df
 from .util import savedataframe
 
@@ -112,13 +106,25 @@ class Classification:
 
 
 class EmbeddingAnalysis:
-    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", type = MASKED_FEATURES_KEY, labelColumn=NUCLEUS_LABEL_KEY, save_dir=None):
+    def __init__(self, df_path=r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json", type=MASKED_FEATURES_KEY, labelColumn=NUCLEUS_LABEL_KEY, save_dir=None, binary: bool = False, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0, leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean"):
         self.df_path = df_path
         self.type = type
         assert df_path.endswith('.json'), "Dataframe path must be a JSON file."
         self.data_df = pd.read_json(df_path)
         self.embeddings = StandardScaler().fit_transform(
             get_array_from_df(self.data_df, self.type))
+        self.subplots_kwargs = {"s": 1}
+
+        self.dbscan = dbscan
+        self.leiden = leiden
+        self.leiden_resolution = leiden_resolution
+        self.leiden_n_iterations = leiden_n_iterations
+        self.leiden_n_neighbors = leiden_n_neighbors
+        self.leiden_distance_metric = leiden_distance_metric
+        self.classifier_method = "LogisticRegression"
+        self.predLabels = self.classify(
+            binary=binary
+        )  # self.getClusters(self.embeddings)  
 
         assert isinstance(
             self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
@@ -201,6 +207,11 @@ class EmbeddingAnalysis:
         }
         map_cluster_2_color["0"] = "rgba(128, 128, 128, 0.5)"
 
+        #patches_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\patches"
+
+        # self.data_df['image_html'] = self.data_df.index.map(
+        #     lambda idx: self.load_png_for_nucleus(idx + 1, patches_dir)
+        # )
 
         fig = px.scatter(
             self.data_df,
@@ -264,14 +275,168 @@ class EmbeddingAnalysis:
                                index=self.data_df.index)
         
         return umap_df
-    
+    def classify(self, binary: bool = False, train_size=0.8):
+
+        if binary:
+            self.traingt = (self.labels != 0).astype(int)
+        else:
+            self.traingt = self.labels
+
+        self.trainEmbeddings = self.embeddings
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            self.trainEmbeddings,
+            self.traingt,
+            train_size=train_size,
+        )
+
+        print(f"\n{np.unique(y_train)}, \n{np.unique(y_val)}")
+
+        # self.trainEmbeddings = X_train
+        self.classifier = self.classification.train_classifier(
+            X_train, y_train, method=self.classifier_method
+        )
+
+        # Compute accuracy on validation set
+
+        # Compute accuracy on training set
+        self.train_accuracy = self.classification.getAccuracy(
+            X_val, y_val, self.classifier
+        )
+        print(f"Validation Accuracy: {self.train_accuracy}")
+
+        self.predLabels = self.classifier.predict(self.embeddings)
+
+        self.data_df[self.classifier_method] = self.predLabels
+
+        # Predict class for remainder embeddings
+        return self.predLabels
+    def performDBSCAN(
+        self, preds, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10
+    ) -> np.ndarray:
+        clustering: DBSCAN = DBSCAN(
+            eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)
+        ).fit(preds)
+        final_clusters: np.ndarray = clustering.labels_
+
+        return final_clusters.reshape(*shape)
     @staticmethod
     def concatColumnDF(df1, df2):
         return pd.concat([df1, df2], axis=1)
+    def performLeiden(
+        self,
+        preds: np.ndarray,
+        shape: tuple,
+        resolution: float = 1.0,
+        n_iterations: int = 2,
+        n_neighbors: int = 15,
+        distance_metric: str = "euclidean",
+    ) -> np.ndarray:
+        import anndata as ad
+        import scanpy
+
+        labels = np.zeros(preds.shape[0])
+
+        embedding = ad.AnnData(X=preds)
+
+        scanpy.pp.neighbors(
+            embedding,
+            n_neighbors=n_neighbors,
+            n_pcs=None,
+            metric=distance_metric,  # type: ignore[arg-type]
+            random_state=111,
+        )
+        scanpy.tl.leiden(
+            embedding,
+            resolution=resolution,
+            random_state=111,
+            n_iterations=n_iterations,
+        )
+
+        for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
+            indices = embedding.obs[embedding.obs["leiden"] == sub_label].index.astype(
+                int
+            )
+            labels[indices] = indx
+
+        return labels.astype(int).reshape(*shape)
     
+    def getClusters(self, preds, DBSCAN_eps=0.5, DBSCAN_min_samples=10):
+
+        shape: tuple = preds.shape[:-1]
+
+        preds = StandardScaler().fit_transform(preds)
+
+        if self.leiden:
+            labels: np.ndarray = self.performLeiden(
+                preds,
+                shape,
+                resolution=self.leiden_resolution,
+                n_iterations=self.leiden_n_iterations,
+                n_neighbors=self.leiden_n_neighbors,
+                distance_metric=self.leiden_distance_metric,
+            )
+        elif self.dbscan:
+            labels = self.performDBSCAN(
+                preds=preds,
+                shape=shape,
+                DBSCAN_eps=DBSCAN_eps,
+                DBSCAN_min_samples=DBSCAN_min_samples,
+            )
+        else:
+            labels = self.nonDiffsoftmax(preds, shape)
+
+        return labels
     def concatDF(self, df):
         self.data_df = self.concatColumnDF(self.data_df, df)
         return self.data_df
+    def UMAPResults(self):
+        umap = self.UMAP()
+
+        self.concatDF(umap)
+
+        self.classColumn = self.classifier_method
+
+        args = {
+            "xColumn": "UMAP x",
+            "yColumn": "UMAP y",
+            "classColoumn": self.classColumn,
+            "legend_title": "Nuclei labels",
+            "save_dir": os.path.dirname(self.df_path),
+        }
+
+        self.specialScatter(**args)
+    @staticmethod
+    def vizualiseCoord(
+        points: dict, title="", labels=None, save_dir=None, **subplots_kwargs
+    ):
+
+        return costumMatplotlib.simpleScatter(
+            points,
+            labels,
+            title=title,
+            save_dir=save_dir,
+            **subplots_kwargs,
+        )[0]
+    def vizualisePCA(self, pcas, title="") -> Figure:
+        points = costumMatplotlib.points2Dict(pcas[:, :2])
+
+        self.pocaDF = pd.DataFrame.from_dict(
+            {
+                "pca_x": points["x"],
+                "pca_y": points["y"],
+                "predlabels": self.predLabels.tolist(),
+                "labels": self.labels.tolist(),
+            }
+        )
+
+        return costumMatplotlib.simpleScatter(
+            points,
+            self.labels,
+            title=title,
+            save_dir=self.save_dir,
+            **self.subplots_kwargs,
+        )[0]
     
     def pca(self):
 
