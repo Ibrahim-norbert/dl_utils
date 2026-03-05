@@ -160,6 +160,12 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             frame: sys.FrameType | types.NoneType = current_frame.f_back
             hparams: dict[str, Any] = _get_init_args(frame=frame)[-1]
 
+            # Merge config file values into hparams (config file overrides defaults)
+            config_file = hparams.pop("config_file", None)
+            if config_file is not None:
+                with open(config_file, "r") as _f:
+                    hparams.update(yaml.safe_load(_f) or {})
+
             # Clean config
             modelConfig = hparams.get("modelConfig", {})
             datasetConfig = hparams.get("datasetConfig", {})
@@ -432,7 +438,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         datasetConfig: typing.Union[dict, None] = None,
         modelConfig=None,
         wandbProjectName="",
-        limit_val_batches = 0, 
+        limit_val_batches=0,
+        config_file: typing.Union[str, None] = None,
         **kwargs,
     ) -> types.NoneType:
 
