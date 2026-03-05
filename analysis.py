@@ -2,29 +2,23 @@ import base64
 import os
 from io import BytesIO
 
-
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import skimage
+from matplotlib.figure import Figure
 from PIL import Image
+from sklearn.cluster import DBSCAN
+from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
+from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-import pandas as pd
-from matplotlib import pyplot as plt
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score,  confusion_matrix
-from sklearn.preprocessing import StandardScaler
-from sklearn.decomposition import PCA
-import seaborn as sns
-from . import (NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY)
+from . import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY
+from . import costumMatplotlib
 from .LM_preprocess import get_array_from_df
 from .util import savedataframe
 
