@@ -123,16 +123,10 @@ class EmbeddingAnalysis:
         assert isinstance(
             self.embeddings, np.ndarray), f"The embeddings are instead: {type(self.embeddings)}"
         print(f"The embeddings are of shape: {self.embeddings.shape}")
-<<<<<<< HEAD
-        self.labelColumn = NUCLEUS_LABEL_KEY
-        self.labels = get_array_from_df(self.data_df, NUCLEUS_LABEL_KEY)
-        self.save_dir = os.path.dirname(df_path)
-=======
         self.labelColumn = labelColumn
         self.labels = get_array_from_df(self.data_df, labelColumn)
         self.save_dir = save_dir
         os.makedirs(save_dir, exist_ok=True)
->>>>>>> origin/Project1Changes
         self.classColumn = "cluster"
         self.classification = Classification
 
@@ -190,11 +184,7 @@ class EmbeddingAnalysis:
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-<<<<<<< HEAD
-                       legend_title: str = "Nuclei labels", save_dir: str = ""):
-=======
                        legend_title: str = "Nuclei labels", save_dir: str = "./"):
->>>>>>> origin/Project1Changes
         
         import plotly.express as px
         from . import MoBie_coloring
@@ -211,11 +201,6 @@ class EmbeddingAnalysis:
         }
         map_cluster_2_color["0"] = "rgba(128, 128, 128, 0.5)"
 
-        patches_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\organoidTestData\patches"
-
-        self.data_df['image_html'] = self.data_df.index.map(
-            lambda idx: self.load_png_for_nucleus(idx + 1, patches_dir)
-        )
 
         fig = px.scatter(
             self.data_df,
@@ -274,12 +259,6 @@ class EmbeddingAnalysis:
 
         umap_array = umap_reducer.transform(self.embeddings)
 
-<<<<<<< HEAD
-        self.data_df = save2DFcolumn(umap_array[:, 0],
-                                     sorted_nucl_labels=self.labels,
-                                     dataframe=self.data_df,
-                                     column_name="UMAP x")
-=======
         umap_df = pd.DataFrame({"UMAP x": umap_array[:, 0],
                                 "UMAP y": umap_array[:, 1]},
                                index=self.data_df.index)
@@ -295,7 +274,6 @@ class EmbeddingAnalysis:
         return self.data_df
     
     def pca(self):
->>>>>>> origin/Project1Changes
 
         # Perform PCA
         pca_model = PCA()
@@ -311,41 +289,24 @@ class EmbeddingAnalysis:
         return fg_pcs
 
     def clustering(self, resolution: float, n_iterations: int, n_neighbors: int, distance_metric: str = "euclidean"):
-<<<<<<< HEAD
-
         import anndata as ad
         import scanpy
-
-=======
-        import anndata as ad
-        import scanpy
->>>>>>> origin/Project1Changes
         labels = np.zeros(self.embeddings.shape[0])
 
         embedding = ad.AnnData(X=self.embeddings)
 
         scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors,
                             n_pcs=None,
-<<<<<<< HEAD
-                            metric=distance_metric,  # type: ignore[arg-type]
-=======
                             metric=distance_metric,
->>>>>>> origin/Project1Changes
                             random_state=111)
 
         scanpy.tl.leiden(embedding, resolution=resolution,
                          random_state=111, n_iterations=n_iterations)
 
-<<<<<<< HEAD
-        for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
-            indices = embedding.obs[embedding.obs["leiden"]
-                                    == sub_label].index.astype(int)
-=======
         # Map the subcluster labels back to the main dataframe
         for indx, sub_label in enumerate(adata.obs["leiden"].unique()):
             indices = adata.obs[adata.obs["leiden"]
                                 == sub_label].index.astype(int)
->>>>>>> origin/Project1Changes
             labels[indices] = indx
 
         self.predLabels = labels.astype(int) + 1
