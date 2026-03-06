@@ -1,5 +1,6 @@
-from typing import NamedTuple, Any, Tuple, List, Optional, Literal, Union
+from typing import NamedTuple, Any, Union
 import numpy as np
+import torch
 
 
 class TrainingSampleLM(NamedTuple):
@@ -9,6 +10,17 @@ class TrainingSampleLM(NamedTuple):
     rand_ids: np.ndarray
     label: int
     map_ids: np.ndarray
+
+
+class TrainingSampleLMTensor(NamedTuple):
+    """Post-collation version of TrainingSampleLM — numpy arrays become torch.Tensor."""
+
+    features: torch.Tensor
+    positional_embedding: torch.Tensor
+    feature_mask: torch.Tensor
+    rand_ids: torch.Tensor
+    label: torch.Tensor
+    map_ids: torch.Tensor
 
 
 class Data(NamedTuple):

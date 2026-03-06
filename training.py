@@ -14,16 +14,14 @@ import pytorch_lightning as pl
 import typing
 from typing import Any, TYPE_CHECKING
 import yaml
-from lightning.pytorch import seed_everything
+from pytorch_lightning import seed_everything
 from torch.utils.data import random_split
 from pytorch_lightning.callbacks import ModelCheckpoint
-from lightning.pytorch.loggers import TensorBoardLogger as logger
+from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
 
-if TYPE_CHECKING:
-    import PreliminaryGNN.dataset
 
 
 def full_stack() -> str:
@@ -147,7 +145,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             fast_dev_run=self.hparams.fast_dev_run,
             deterministic=True,
             max_epochs=max_epochs,
-            log_every_n_steps=batch_size * 2,
+            log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
             **args,
         )
@@ -199,14 +197,38 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             self.datasetConfig = Namespace(**datasetConfig)
             return self.hparams
 
+    def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
+        """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
+
+        Handles both raw state dicts and Lightning checkpoints (nested under "state_dict").
+        Uses strict=False and reports missing/unexpected keys so shape mismatches are visible.
+        Raises FileNotFoundError if the path is set but does not exist.
+        """
+        weights_path: str = getattr(self.hparams, "weightsCkptPath", "") or ""
+        if not weights_path:
+            return module
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"[getModel] weightsCkptPath not found: {weights_path}")
+
+        checkpoint = torch.load(weights_path, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        print(f"[getModel] Loaded weights from: {weights_path}")
+        if missing:
+            print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+        if unexpected:
+            print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+        return module
+
     def getModel(self):
         # Lazy import to avoid circular dependency with PreliminaryGNN
         from PreliminaryGNN import models
         modelConfig = vars(self.modelConfig)
         modelConfig["save_dir"] = self.save_dir
-        return models.__dict__[self.modelName](
+        model = models.__dict__[self.modelName](
             **modelConfig, batch_size=self.hparams.batch_size
         )
+        return self._load_weights_if_specified(model)
 
     def getValDataloader(self, val_ds: PreliminaryGNN.dataset.SMLMDataset, **kwargs):
 
@@ -423,26 +445,29 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
     def __init__(
         self,
         modelName="SMLMSegmentation",
-        max_epochs=4,
+        max_epochs=200,
         ckptPath=None,
+        weightsCkptPath: str = "",
         save_dir="",
         reproducibility_seed=43,
         num_workers=1,
-        dataType: str = "SMLM",
-        trainFrac: float = 0.8,
+        dataType: str = "SMLMDataset",
+        trainFrac: float = 0.9,
         batch_size=1,
         shuffle=True,
-        fast_dev_run=False,
+        fast_dev_run=1,
+        devices="auto",
+        profiler: str = "advanced",
         ModelCheckpoint_save_top_k=3,
-        ModelCheckpoint_monitor="Validation F1",
-        ModelCheckpoint_mode="max",
-        EarlyStopping_monitor="Validation LOSS",
+        ModelCheckpoint_monitor="Train LOSS",
+        ModelCheckpoint_mode="min",
+        EarlyStopping_monitor="Train LOSS",
         EarlyStopping_mode="min",
-        EarlyStopping_patience=20,
+        EarlyStopping_patience=50,
         datasetConfig: typing.Union[dict, None] = None,
         modelConfig=None,
         wandbProjectName="",
-        limit_val_batches=0,
+        limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
         **kwargs,
     ) -> types.NoneType:
@@ -488,6 +513,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         args = {
             "callbacks": [checkpoint_callback, early_stopping_callback],
             "logger": wandb_logger,
+            "profiler": profiler,
         }
 
         super().__init__(
