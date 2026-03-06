@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 from argparse import Namespace
+import contextlib
 import inspect
+import io
 import types
 from pathlib import Path
 import time
@@ -95,7 +97,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         reproducibility_seed=43,
         num_workers=1,
         fast_dev_run=False,
-        dataType: str = "SMLM",
+        dataset: str = "SMLM",
         trainFrac: float = 0.8,
         batch_size=1,
         shuffle=True,
@@ -128,7 +130,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         #     warn_only=True)
 
         print("The following config was parsed:")
-        for key, value in self.config.items():
+        for key, value in vars(self.hparams).items():
             print(f"{key}: {value}")
 
         if ckptPath is not None and os.path.exists(ckptPath):
@@ -182,17 +184,16 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
             [hparams.pop(k, None) for k in keys]
 
-            self.config = self.__dict__.get("config", {})
-
-            self.config.update(hparams)
+            existing = vars(self.hparams) if hasattr(self, "hparams") and isinstance(self.hparams, Namespace) else {}
+            merged = {**existing, **hparams}
 
             # Check if saved kwargs
             self.kwargs = self.__dict__.get("kwargs", {})
             [self.kwargs.pop(k, None) for k in keys]
 
-            self.__dict__.update(self.config)
+            self.__dict__.update(merged)
             # After Namespace init, modelConfig and DatasetConfig are removed
-            self.hparams = Namespace(**self.config)
+            self.hparams = Namespace(**merged)
             self.modelConfig = Namespace(**modelConfig)
             self.datasetConfig = Namespace(**datasetConfig)
             return self.hparams
@@ -220,17 +221,9 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
         return module
 
-    def getModel(self):
-        # Lazy import to avoid circular dependency with PreliminaryGNN
-        from PreliminaryGNN import models
-        modelConfig = vars(self.modelConfig)
-        modelConfig["save_dir"] = self.save_dir
-        model = models.__dict__[self.modelName](
-            **modelConfig, batch_size=self.hparams.batch_size
-        )
-        return self._load_weights_if_specified(model)
 
-    def getValDataloader(self, val_ds: PreliminaryGNN.dataset.SMLMDataset, **kwargs):
+
+    def getValDataloader(self, val_ds: datasets.BaseDataset, **kwargs):
 
         val_ds = datasets.BaseDataset.getDataloader(
             val_ds,
@@ -241,7 +234,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         )
         return val_ds
 
-    def splitDataset(self, dataset: PreliminaryGNN.dataset.SMLMDataset, **kwargs):
+    def splitDataset(self, dataset: datasets.BaseDataset, **kwargs):
         n_total: int = len(dataset)
         n_train = int(self.trainFrac * n_total)
         n_val: int = n_total - n_train
@@ -250,7 +243,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         return train_ds, val_ds
 
-    def getTrainDataloader(self, ds: PreliminaryGNN.dataset.SMLMDataset, **kwargs):
+    def getTrainDataloader(self, ds: datasets.BaseDataset, **kwargs):
         dsdl = datasets.BaseDataset.getDataloader(
             ds,
             batch_size=self.batch_size,
@@ -261,7 +254,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return dsdl
 
     def getTrainValDataloader(
-        self, dataset: PreliminaryGNN.dataset.SMLMDataset, segmentor
+        self, dataset: datasets.BaseDataset, segmentor
     ):
         train_ds, val_ds = self.splitDataset(dataset=dataset)
 
@@ -295,10 +288,10 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         # Save to yaml file
         path: str = os.path.join(self.save_dir, self.__class__.__name__)
 
-        # Any argparse Namespaces in config are converted to dicts
-        for key, value in self.config.items():
+        # Any argparse Namespaces in hparams are converted to dicts
+        for key, value in vars(self.hparams).items():
             if isinstance(value, argparse.Namespace):
-                self.config[key] = vars(value)
+                setattr(self.hparams, key, vars(value))
 
         # TODO: Read through following for improvement:
         # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
@@ -307,7 +300,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         filpath: str = f"{path}.yaml"
         print(f"Saving config here: {filpath}")
         with open(filpath, "w") as file:
-            yaml.dump(self.config, file)
+            yaml.dump(vars(self.hparams), file)
 
     def timeStampsave_dir(self) -> types.NoneType:
 
@@ -318,17 +311,12 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         print("Timestamp:", time_string)
         self.time_string: str = time_string
 
-        self.config["time_string"] = self.time_string
+        self.hparams.time_string = self.time_string
 
         # Time stamped save_dir = training_dir
         self.save_dir: str = os.path.join(self.save_dir, self.time_string)
 
         os.makedirs(self.save_dir, exist_ok=True)
-
-    def getDataset(self, dataType: str, **kwargs):
-        # Lazy import to avoid circular dependency with PreliminaryGNN
-        import dataset as dataDS
-        return dataDS.__dict__[dataType](**kwargs)
 
     @torch.no_grad()
     def compute_peak_gpu_memory(self, model, dataloader):
@@ -451,7 +439,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         save_dir="",
         reproducibility_seed=43,
         num_workers=1,
-        dataType: str = "SMLMDataset",
+        dataset: str = "SMLMDataset",
         trainFrac: float = 0.9,
         batch_size=1,
         shuffle=True,
@@ -476,20 +464,24 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         self.kwargs = kwargs
 
-        # Allow subclasses to customise the root save directory before the
-        # timestamp is appended.  The result is also written into self.config
-        # so it ends up in the saved YAML.
-        self.save_dir = self._compute_save_dir()
-        self.config["save_dir"] = self.save_dir
+        # Allow subclasses to customise the root save directory before versioning.
+        # The result is also written into self.hparams so it ends up in the saved YAML.
+        root_save_dir = self._compute_save_dir()
 
-        # save_dir needs to be declared here because of the callback classes
-        # Need to timestamp in initializer as logger requires save_dir
-        self.timeStampsave_dir()
+        # Let TensorBoardLogger handle versioning (version_0, version_1, ...)
+        wandb_logger = logger(
+            save_dir=root_save_dir,
+            name=self.hparams.version_name if hasattr(self.hparams, "version_name") else None,
+        )
+
+        # Use the logger's versioned directory as the actual save_dir
+        self.save_dir = wandb_logger.log_dir
+        self.hparams.save_dir = self.save_dir
+        os.makedirs(self.save_dir, exist_ok=True)
+        sys.stdout = open(os.path.join(self.save_dir, "prints.txt"), "w", encoding="utf-8")
 
         self.saveConfig()
 
-        # TODO: Ensure LOSS is always specified as log key
-        # TODO: Figure out what the key strings mean
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.save_dir,
             save_top_k=self.hparams.ModelCheckpoint_save_top_k,
@@ -497,11 +489,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             mode=self.hparams.ModelCheckpoint_mode,
             save_last=True,
         )
-
-        wandb_logger = logger(
-            save_dir=self.save_dir,
-            name=self.hparams.version_name if hasattr(self.hparams, "version_name") else None,
-            version='')
         
         early_stopping_callback = SafeEarlyStopping(
             monitor=self.hparams.EarlyStopping_monitor,
@@ -527,7 +514,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             shuffle=self.hparams.shuffle,
             datasetConfig=self.hparams.datasetConfig,
             modelConfig=self.modelConfig,
-            dataType=self.hparams.dataType,
+            dataset=self.hparams.dataset,
             fast_dev_run=self.hparams.fast_dev_run,
             limit_val_batches=limit_val_batches,
             args=args,
@@ -546,15 +533,14 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
     def fit(self, segmentor, train, val, **kwargs):
 
-        self.config = self.getConfig()
-
+   
         try:
             super().fit(segmentor, train, val, **kwargs)
-            self.config["ckptPath"] = self.checkpoint_callback.best_model_path
+            self.hparams.ckptPath = self.checkpoint_callback.best_model_path
 
         except:
             print(f"Exited prematurely with exception: {full_stack()}")
-            self.config["ckptPath"] = self.checkpoint_callback.last_model_path
+            self.hparams.ckptPath = self.checkpoint_callback.last_model_path
 
         finally:
             self.saveConfig()

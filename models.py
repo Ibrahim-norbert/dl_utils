@@ -34,14 +34,14 @@ class BaseModelClass(pl.LightningModule):
         super().__init__(**kwargs)
 
         self.save_hyperparameters()
-        self.__dict__.update(vars(self.hparams))
+        self.__dict__.update(self.hparams)
 
         self.initialize_weights()
     
 
 
-
-    def collate_fn(self, **kwargs):
+    @staticmethod
+    def collate_fn(**kwargs):
         return default_collate(**kwargs)
 
     def whatDevice(self):
