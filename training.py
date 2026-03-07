@@ -133,12 +133,12 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         for key, value in vars(self.hparams).items():
             print(f"{key}: {value}")
 
-        if ckptPath is not None and os.path.exists(ckptPath):
-            self.ckpt = BaseClassTrainerAndPredictor.getcheckpointinfoandargs(ckptPath)
-            self.epoch = self.ckpt["epoch"]
-            max_epochs += self.epoch
-            self.epoch_start = max_epochs - self.epoch
-            self.epoch_end = max_epochs
+        # if ckptPath is not None and os.path.exists(ckptPath):
+        #     self.ckpt = BaseClassTrainerAndPredictor.getcheckpointinfoandargs(ckptPath)
+        #     self.epoch = self.ckpt["epoch"]
+        #     max_epochs += self.epoch
+        #     self.epoch_start = max_epochs - self.epoch
+        #     self.epoch_end = max_epochs
 
         torch.set_float32_matmul_precision('medium')
         
@@ -428,6 +428,8 @@ class SafeEarlyStopping(EarlyStopping):
                 print("[EarlyStopping] No metrics available. Skipping.")
                 return False
         return True
+    
+
 
 class BaseClassTrainer(BaseClassTrainerAndPredictor):
     def __init__(
@@ -478,8 +480,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         self.save_dir = wandb_logger.log_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
-        sys.stdout = open(os.path.join(self.save_dir, "prints.txt"), "w", encoding="utf-8")
-
+        
         self.saveConfig()
 
         checkpoint_callback = ModelCheckpoint(
@@ -488,6 +489,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             monitor=self.hparams.ModelCheckpoint_monitor,
             mode=self.hparams.ModelCheckpoint_mode,
             save_last=True,
+            save_on_train_epoch_end=True,
         )
         
         early_stopping_callback = SafeEarlyStopping(

@@ -169,7 +169,7 @@ def BBox2DF(all_boxes: object, dataset_path, datasetMask_path, key):
         "anchor_x": values[:, 3].tolist(),
         "anchor_y": values[:, 2].tolist(),
         "dataset path": [dataset_path] * len(labels),
-        "mask path": [datasetMask_path] * len(labels),
+        "mask volume path": [datasetMask_path] * len(labels),
         "dataset acronym": [key] * len(labels),
     }
 

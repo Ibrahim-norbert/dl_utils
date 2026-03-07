@@ -446,14 +446,14 @@ def setup(get_dataset, args: argparse.Namespace):
     return model, dataset
 
 from platy_nuclei_texture.model_dataset_utils.nuclei_loader import TrainingSampleLM
-def get_output_dict(dataset, model, save_dir, label=7685, device="cpu"):
+def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
     model.to(device)
     model.eval()
 
     with torch.inference_mode():
-        input_ = [dataset.__getitem__(label)]
+        input_ = [dataset.__getitem__(df_index)]
 
-        s = os.path.join(save_dir, f"random_masking_{label}.npy")
+        s = os.path.join(save_dir, f"random_masking_{df_index}.npy")
         if not os.path.exists(s):
             os.makedirs(os.path.dirname(s), exist_ok=True)
             np.save(s, input_[0][3])
@@ -462,7 +462,8 @@ def get_output_dict(dataset, model, save_dir, label=7685, device="cpu"):
         if not enc_ids.shape == input_[0][3].shape:
             enc_ids = input_[0][3]
 
-        input_ = [TrainingSampleLM(x[0], x[1], x[2], enc_ids, *x[4:]) for x in input_]
+        x = input_[0]
+        input_ = [x[0], x[1], x[2], enc_ids, np.array(x[4]), x[5]]
 
         _, output_dict = model.forward_wo_dataloader(input_, device)
 

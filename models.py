@@ -10,7 +10,23 @@ from yamlfix import fix_files
 from torch.utils.data.dataloader import default_collate
 from .util import save_model as _save_model, load_model as _load_model
 
+def _install_print_tee(save_dir: str) -> None:
+    """Mirror all print() calls to *log_path*, following the same closure
+    pattern as util.print_for_distributed."""
+    import builtins
+    import functools
+    builtin_print = builtins.print
+    log_path = os.path.join(save_dir, "print.txt")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log_file = open(log_path, "a", buffering=1)
 
+    @functools.wraps(builtin_print)
+    def _tee_print(*args, **kwargs):
+        builtin_print(*args, **kwargs)
+        builtin_print(*args, **{**kwargs, "file": log_file})
+
+    builtins.print = _tee_print
+    
 class BaseModelClass(pl.LightningModule):
     """Masked Autoencoder with VisionTransformer backbone"""
 
@@ -38,7 +54,7 @@ class BaseModelClass(pl.LightningModule):
 
         self.initialize_weights()
     
-
+        _install_print_tee(save_dir)
 
     @staticmethod
     def collate_fn(**kwargs):
