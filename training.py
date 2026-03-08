@@ -198,6 +198,16 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             self.datasetConfig = Namespace(**datasetConfig)
             return self.hparams
 
+    def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
+        checkpoint = torch.load(ckptPath, map_location="cpu")
+        state_dict = checkpoint.get("state_dict", checkpoint)
+        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        print(f"[getModel] Loaded weights from: {ckptPath}")
+        if missing:
+            print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+        if unexpected:
+            print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+        return module
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
         """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
 
@@ -210,16 +220,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             return module
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"[getModel] weightsCkptPath not found: {weights_path}")
+        return self.loadWeights(weights_path, module)
 
-        checkpoint = torch.load(weights_path, map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint)
-        missing, unexpected = module.load_state_dict(state_dict, strict=False)
-        print(f"[getModel] Loaded weights from: {weights_path}")
-        if missing:
-            print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
-        if unexpected:
-            print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
-        return module
 
 
 

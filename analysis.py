@@ -103,6 +103,7 @@ class EmbeddingAnalysis:
         leiden_n_iterations: int = 2,
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
+        metadDataFramePath: str = None,
     ) -> None:
         assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
         self.df_path: str = df_path
@@ -124,6 +125,7 @@ class EmbeddingAnalysis:
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
             default_class_column="Class",
+            metadDataFramePath=metadDataFramePath
         )
         self.predLabels = (
             self.classify(binary=binary, mapping=classMapping)
@@ -147,6 +149,7 @@ class EmbeddingAnalysis:
         leiden_n_iterations: int = 2,
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
+        metadDataFramePath: str = None,
     ) -> "EmbeddingAnalysis":
         instance = cls.__new__(cls)
         instance.df_path = None
@@ -167,6 +170,7 @@ class EmbeddingAnalysis:
             leiden_n_iterations=leiden_n_iterations,
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
+            metadDataFramePath=metadDataFramePath,
             default_class_column="cluster",
             subplots_kwargs={"s": 1},
         )
@@ -237,13 +241,22 @@ class EmbeddingAnalysis:
         leiden_distance_metric,
         default_class_column: str = "Class",
         subplots_kwargs: dict = None,
+        metadDataFramePath: str = None,
     ) -> None:
         instance.gtColumn = gtColumn
         instance.instancelabelColumn = instancelabelColumn
         instance.classMapping = classMapping
-        instance.save_dir = save_dir
+        instance.save_dir = os.path.join(save_dir, "EmbeddingAnalysis") if save_dir is not None else None
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
+        instance.metadDataFramePath = metadDataFramePath
+        if metadDataFramePath is not None and os.path.exists(metadDataFramePath) and metadDataFramePath.endswith((".csv", ".xlsx", ".json")):
+            data_df = pd.read_csv(metadDataFramePath) if metadDataFramePath.endswith(".csv") else pd.read_excel(metadDataFramePath)
+            assert instancelabelColumn in data_df.columns, f"Instance label column '{instancelabelColumn}' not found in metadata DataFrame."
+            instance.data_df = instance.data_df.merge(data_df, on=instancelabelColumn, how="left")
+            print(f"Metadata DataFrame loaded from: {metadDataFramePath}")
+
+
         instance.dbscan = dbscan
         instance.leiden = leiden
         instance.leiden_resolution = leiden_resolution
@@ -256,6 +269,7 @@ class EmbeddingAnalysis:
         instance.classColumn = default_class_column
         instance.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
         instance.results_df = pd.DataFrame(index=instance.data_df.index)
+        instance.results_df[instancelabelColumn] = instance.data_df[instancelabelColumn]
         instance.getLabels()
         print(f"Embeddings shape: {instance.embeddings.shape}")
 
@@ -334,7 +348,11 @@ class EmbeddingAnalysis:
         clustering: DBSCAN = DBSCAN(
             eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)
         ).fit(preds)
-        return clustering.labels_.reshape(*shape)
+        self.classColumn = "DBSCAN_cluster"
+        labels = clustering.labels_.reshape(*shape).astype(int) + 1
+        self.results_df[self.classColumn] = labels.flatten().tolist()
+        self.predLabels = labels.flatten()
+        return labels
 
     def performLeiden(
         self,
@@ -360,8 +378,11 @@ class EmbeddingAnalysis:
         for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
             indices = embedding.obs[embedding.obs["leiden"] == sub_label].index.astype(int)
             labels[indices] = indx
-        return labels.astype(int).reshape(*shape)
-
+        self.classColumn = "leiden_cluster"
+        labels = labels.astype(int).reshape(*shape) + 1
+        self.results_df[self.classColumn] = labels.flatten().tolist()
+        self.predLabels = labels.flatten()
+        return labels
     def getClusters(self, preds, DBSCAN_eps=0.5, DBSCAN_min_samples=10):
         shape: tuple = preds.shape[:-1]
         preds = StandardScaler().fit_transform(preds)
@@ -392,6 +413,7 @@ class EmbeddingAnalysis:
             labels[indices] = indx
         self.predLabels = labels.astype(int) + 1
         self.results_df[self.classColumn] = self.predLabels
+        self.classColumn = "leiden_cluster"
         return self.predLabels
 
     # ------------------------------------------------------------------ #
@@ -508,19 +530,30 @@ class EmbeddingAnalysis:
         return out_path
 
     def generateMask(self, maskVolumePath, resolution=0.5, n_iterations=10,
-                     n_neighbors=15, distance_metric: str = "euclidean") -> None:
+                     n_neighbors=15, distance_metric: str = "euclidean", classColoumn=None) -> str:
         if not hasattr(self, "predLabels"):
             self.clustering(resolution=resolution, n_iterations=n_iterations,
                             n_neighbors=n_neighbors, distance_metric=distance_metric)
+            
         maskVol = skimage.io.imread(maskVolumePath)
         mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
-        mapping_array[self.instancelabels] = self.predLabels
+
+        if self.classColumn == classColoumn:
+            mapping_array[self.instancelabels] = self.predLabels
+        elif self.gtColumn == classColoumn:
+            mapping_array[self.instancelabels] = self.gtlabels
+        elif classColoumn in self.results_df.columns:
+            mapping_array[self.instancelabels] = self.results_df[classColoumn].values
+        else:
+            raise ValueError(f"Column '{classColoumn}' not found in results DataFrame.")
+        
         maskVol = mapping_array[maskVol]
-        fileName = os.path.basename(maskVolumePath).replace(".tif", "_predicted.tif")
+        fileName = os.path.basename(maskVolumePath).replace(".tif", f"_{classColoumn}.tif")
         save_dir = self.save_dir if self.save_dir is not None else os.path.dirname(maskVolumePath)
         path = os.path.join(save_dir, fileName)
         skimage.io.imsave(path, maskVol.astype(np.int16))
         print(f"Result saved to: {path}")
+        return path
 
     # ------------------------------------------------------------------ #
     # Utilities                                                            #
