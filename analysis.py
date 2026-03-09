@@ -58,22 +58,33 @@ class Classification:
         return classifier
 
     @staticmethod
-    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = None) -> Figure:
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = {}) -> Figure:
         y_pred = classifier.predict(x)
         ks: list[int] = classifier.classes_
         cm = confusion_matrix(gt, y_pred, normalize="true")
-        ticks = [mapping[k] for k in ks] if mapping is not None else ks
-        fig, ax = plt.subplots(1, 1)
+        ticks = [mapping.get(k, k) for k in ks] if mapping is not None else ks
+
+        n = len(ks)
+        cell_size = max(0.6, min(1.2, 12 / n))
+        fig_size = max(4, n * cell_size)
+        annot = n <= 20
+        fontsize = max(6, min(12, int(120 / n)))
+
+        fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
         ax: plt.Axes = sns.heatmap(
-            cm, ax=ax, annot=True, cmap="Blues",
-            xticklabels=ticks, yticklabels=ticks, cbar=False,
+            cm, ax=ax, annot=annot, cmap="Blues",
+            xticklabels=ticks, yticklabels=ticks, cbar=True,
+            fmt=".2f" if annot else "",
+            annot_kws={"size": fontsize} if annot else {},
         )
-        plt.xlabel("Predicted Labels")
-        plt.ylabel("Ground Truth Labels")
-        plt.xticks(rotation=45)
+        ax.set_xlabel("Predicted Labels")
+        ax.set_ylabel("Ground Truth Labels")
+        plt.xticks(rotation=45, ha="right", fontsize=fontsize)
+        plt.yticks(rotation=0, fontsize=fontsize)
         plt.tight_layout()
         if save_dir is not None:
-            plt.savefig(os.path.join(save_dir, "confusion_matrix.png"))
+            os.makedirs(save_dir, exist_ok=True)
+            plt.savefig(os.path.join(save_dir, "confusion_matrix.png"), dpi=150)
         plt.close()
         return fig
 
@@ -104,6 +115,7 @@ class EmbeddingAnalysis:
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: str = None,
+        classifier_method: str = "LogisticRegression",
     ) -> None:
         assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
         self.df_path: str = df_path
@@ -125,7 +137,8 @@ class EmbeddingAnalysis:
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
             default_class_column="Class",
-            metadDataFramePath=metadDataFramePath
+            metadDataFramePath=metadDataFramePath,
+            classifier_method=classifier_method,
         )
         self.predLabels = (
             self.classify(binary=binary, mapping=classMapping)
@@ -242,6 +255,7 @@ class EmbeddingAnalysis:
         default_class_column: str = "Class",
         subplots_kwargs: dict = None,
         metadDataFramePath: str = None,
+        classifier_method: str = "LogisticRegression",
     ) -> None:
         instance.gtColumn = gtColumn
         instance.instancelabelColumn = instancelabelColumn
@@ -263,7 +277,7 @@ class EmbeddingAnalysis:
         instance.leiden_n_iterations = leiden_n_iterations
         instance.leiden_n_neighbors = leiden_n_neighbors
         instance.leiden_distance_metric = leiden_distance_metric
-        instance.classifier_method = "LogisticRegression"
+        instance.classifier_method = classifier_method
         instance.classification = Classification
         instance.classMappedColumn = "Mapped"
         instance.classColumn = default_class_column
@@ -279,6 +293,8 @@ class EmbeddingAnalysis:
 
     @property
     def _has_gt(self) -> bool:
+        if isinstance(self.gtColumn, list):
+            return all(c in self.data_df.columns for c in self.gtColumn)
         return self.gtColumn is not None and self.gtColumn in self.data_df.columns
 
     # ------------------------------------------------------------------ #
@@ -287,11 +303,68 @@ class EmbeddingAnalysis:
 
     def getLabels(self) -> None:
         n = len(self.data_df)
+
+        if isinstance(self.gtColumn, list):
+            combined_col = "_".join(self.gtColumn)
+            subset = self.data_df[self.gtColumn]
+
+            # Detect one-hot encoded columns: each column only contains 0/1
+            # (handles int, float, bool, and string variants after JSON round-trip)
+            def _is_binary(col):
+                try:
+                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
+                except (ValueError, TypeError):
+                    return False
+
+            is_onehot = all(_is_binary(subset[c]) for c in self.gtColumn)
+
+            if is_onehot:
+                # Use the active column name as label; NaN where none or multiple active
+                def _onehot_label(row):
+                    active = [c for c in self.gtColumn if float(row[c]) == 1.0]
+                    if len(active) == 1:
+                        return active[0]
+                    return np.nan  # all-zero or multi-active → treated as unlabelled
+
+                self.data_df[combined_col] = subset.apply(_onehot_label, axis=1)
+            else:
+                def _fmt(v):
+                    if pd.isna(v):
+                        return "NA"
+                    if isinstance(v, float) and v.is_integer():
+                        return str(int(v))
+                    return str(v)
+
+                self.data_df[combined_col] = (
+                    subset.apply(lambda col: col.map(_fmt))
+                    .agg("_".join, axis=1)
+                )
+
+            self.gtColumn = combined_col
+
         self.gtlabels: np.ndarray = (
             get_array_from_df(self.data_df, self.gtColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
+
+        if self._has_gt and self.gtlabels.dtype.kind in ('U', 'S', 'O'):
+            if not self.classMapping:
+                unique_vals = [v for v in pd.unique(self.gtlabels) if not pd.isna(v)]
+                str_to_int = {v: i + 1 for i, v in enumerate(sorted(unique_vals, key=str))}
+                self.classMapping = {i: v for v, i in str_to_int.items()}
+            else:
+                str_to_int = {v: k for k, v in self.classMapping.items()}
+            self.gtlabels = np.array(
+                [str_to_int.get(v, np.nan) for v in self.gtlabels], dtype=float
+            )
+            self.data_df[self.gtColumn] = self.gtlabels
+
+        valid_mask = ~pd.isna(self.gtlabels)
+        if 0 in self.gtlabels[valid_mask]:
+            self.gtlabels = np.where(valid_mask, self.gtlabels + 1, self.gtlabels)
+            self.data_df[self.gtColumn] = self.gtlabels
+
         self.instancelabels: np.ndarray = get_array_from_df(self.data_df, self.instancelabelColumn)
         nan_mask = ~pd.isna(self.gtlabels)
         if nan_mask.sum() < n:
@@ -300,10 +373,10 @@ class EmbeddingAnalysis:
                 f"Training on {nan_mask.sum()} of {len(self.embeddings)} samples."
             )
             self.gtlabels[~nan_mask] = 0
-            self.traingt = self.gtlabels[nan_mask]
+            self.traingt = self.gtlabels[nan_mask].astype(int)
             self.trainEmbeddings = self.embeddings[nan_mask]
         else:
-            self.traingt = self.gtlabels
+            self.traingt = self.gtlabels.astype(int) if np.issubdtype(self.gtlabels.dtype, np.floating) else self.gtlabels
             self.trainEmbeddings = self.embeddings
 
     # ------------------------------------------------------------------ #
@@ -313,6 +386,7 @@ class EmbeddingAnalysis:
     def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None) -> np.ndarray:
         X_train, X_val, y_train, y_val = train_test_split(
             self.trainEmbeddings, self.traingt, train_size=train_size,
+            stratify=self.traingt, random_state=42
         )
         print(f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
         print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
@@ -336,7 +410,7 @@ class EmbeddingAnalysis:
 
         self.classification.createConfusionMatrixFigure(
             x=X_val, gt=y_val, classifier=self.classifier,
-            save_dir=self.save_dir, mapping=mapping,
+            save_dir=self.save_dir, mapping=mapping or self.classMapping,
         )
         return self.predLabels
 
@@ -429,6 +503,7 @@ class EmbeddingAnalysis:
             {"PCA x": pcs[:, 0], "PCA y": pcs[:, 1], "PCA z": pcs[:, 2]},
             index=self.data_df.index,
         )
+        self.explained_variance_ratio = pca_model.explained_variance_ratio_[:3].sum()
         self.concatDF(pca_df)
         return pcs
 
@@ -446,24 +521,28 @@ class EmbeddingAnalysis:
             index=self.data_df.index,
         )
 
-    def UMAPResults(self) -> Figure:
+    def UMAPResults(self):
         self.concatDF(self.UMAP())
-        points = {"x": np.asarray(self.results_df["UMAP x"]), "y": np.asarray(self.results_df["UMAP y"])}
-        return costumMatplotlib.simpleScatter(
-            points, self.gtlabels, title="UMAP",
-            save_dir=self.save_dir, **getattr(self, "subplots_kwargs", {"s": 6}),
-        )[0]
+        return self.specialScatter(
+            xColumn="UMAP x", yColumn="UMAP y",
+            xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
+            classColoumn=self.classColumn,
+            legend_title="UMAP - {}".format(self.gtColumn if self._has_gt else self.classColumn),
+            save_dir=self.save_dir,
+        )
 
     # ------------------------------------------------------------------ #
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
 
-    def vizualisePCA(self, pcas, title="") -> Figure:
-        points = costumMatplotlib.points2Dict(pcas[:, :2])
-        return costumMatplotlib.simpleScatter(
-            points, self.gtlabels, title=title,
-            save_dir=self.save_dir, **self.subplots_kwargs,
-        )[0]
+    def vizualisePCA(self, pcas=None, title=""):
+        return self.specialScatter(
+            xColumn="PCA x", yColumn="PCA y",
+            xaxis_title="PC 1", yaxis_title="PC 2",
+            classColoumn=self.classColumn,
+            legend_title="PC - {}".format(self.gtColumn if self._has_gt else self.classColumn),
+            save_dir=self.save_dir,
+        )
 
     @staticmethod
     def vizualiseCoord(points: dict, title="", labels=None, save_dir=None, **subplots_kwargs):
@@ -474,7 +553,7 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./") -> None:
+                       save_dir: str = "./"):
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -489,7 +568,7 @@ class EmbeddingAnalysis:
         classLabels = sorted(plot_df[classColoumn].unique().astype(int).tolist())
 
         def _label(k: int) -> str:
-            return mapping.get(k, str(k)) if mapping else str(k)
+            return mapping.get(k, self.classMapping.get(k, str(k)))
 
         color_map = {_label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
         color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
@@ -514,8 +593,9 @@ class EmbeddingAnalysis:
             xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
         if save_dir is not None:
-            fig.write_image(os.path.join(save_dir, f"{classColoumn}_UMAP.svg"))
+            fig.write_image(os.path.join(save_dir, f"{classColoumn}_{legend_title}.svg"))
             fig.show()
+        return fig
 
     # ------------------------------------------------------------------ #
     # Results & mask                                                       #
@@ -569,6 +649,19 @@ class EmbeddingAnalysis:
     def concatDF(self, df) -> pd.DataFrame:
         self.results_df = self.concatColumnDF(self.results_df, df)
         return self.results_df
+
+    def get_top_instances_per_class(self) -> dict:
+        """Return the instance label with the highest classification probability for each class.
+
+        Returns a dict mapping class label -> instance label of the most confidently
+        predicted instance for that class.
+        """
+        proba = self.classifier.predict_proba(self.embeddings)
+        classes = self.classifier.classes_
+        return {
+            cls: self.instancelabels[np.argmax(proba[:, i])]
+            for i, cls in enumerate(classes)
+        }
 
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]

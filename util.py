@@ -445,7 +445,6 @@ def setup(get_dataset, args: argparse.Namespace):
 
     return model, dataset
 
-from platy_nuclei_texture.model_dataset_utils.nuclei_loader import TrainingSampleLM
 def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
     model.to(device)
     model.eval()

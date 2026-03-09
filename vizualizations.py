@@ -72,11 +72,12 @@ class costumMatplotlib:
         }
 
     @classmethod
-    def saveFig(cls, fig, save_dir, title, func) -> None:
+    def saveFig(cls, fig, save_dir, title, func, fileExtension="svg") -> None:
         plt.close()
         if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
             save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
-            fig.savefig(f"{save_path}.svg", dpi=500)
+            fig.savefig(f"{save_path}.{fileExtension}", dpi=500)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
@@ -151,7 +152,7 @@ class costumMatplotlib:
         fig.tight_layout()
 
         cls.saveFig(fig, save_dir=save_dir,
-                    title=title, func=cls.simpleScatter)
+                    title=title, func=cls.simpleImshow, fileExtension="png")
         
         
 
