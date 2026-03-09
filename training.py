@@ -139,8 +139,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         #     max_epochs += self.epoch
         #     self.epoch_start = max_epochs - self.epoch
         #     self.epoch_end = max_epochs
-
-        torch.set_float32_matmul_precision('medium')
         
         super().__init__(
             accelerator=self.device,

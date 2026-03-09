@@ -52,6 +52,8 @@ class BaseModelClass(pl.LightningModule):
         self.save_hyperparameters()
         self.__dict__.update(self.hparams)
 
+        torch.set_float32_matmul_precision("medium")
+
         self.initialize_weights()
     
         _install_print_tee(save_dir)

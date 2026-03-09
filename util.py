@@ -460,12 +460,12 @@ def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
 
         if not enc_ids.shape == input_[0][3].shape:
             enc_ids = input_[0][3]
-
+        # NOTE: enc_ids does not correspond to map_ids anymore.
         x = input_[0]
         input_ = [x[0], x[1], x[2], enc_ids, np.array(x[4]), x[5]]
 
-        _, output_dict = model.forward_wo_dataloader(input_, device)
-
+        loss, output_dict = model.forward_wo_dataloader(input_, device)
+    print(f"The loss is {loss}")
     return output_dict
 
 def save2DFcolumn(
