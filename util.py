@@ -445,26 +445,27 @@ def setup(get_dataset, args: argparse.Namespace):
 
     return model, dataset
 
+@torch.inference_mode()
 def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
     model.to(device)
     model.eval()
 
-    with torch.inference_mode():
-        input_ = [dataset.__getitem__(df_index)]
+    input_ = [dataset.__getitem__(df_index)]
 
-        s = os.path.join(save_dir, f"random_masking_{df_index}.npy")
-        if not os.path.exists(s):
-            os.makedirs(os.path.dirname(s), exist_ok=True)
-            np.save(s, input_[0][3])
-        enc_ids = np.load(s)
+    s = os.path.join(save_dir, f"random_masking_{df_index}.npy")
+    if not os.path.exists(s):
+        os.makedirs(os.path.dirname(s), exist_ok=True)
+        np.save(s, input_[0][3])
+    enc_ids = np.load(s)
 
-        if not enc_ids.shape == input_[0][3].shape:
-            enc_ids = input_[0][3]
-        # NOTE: enc_ids does not correspond to map_ids anymore.
-        x = input_[0]
-        input_ = [x[0], x[1], x[2], enc_ids, np.array(x[4]), x[5]]
+    if not enc_ids.shape == input_[0][3].shape:
+        enc_ids = input_[0][3]
+    # NOTE: enc_ids does not correspond to map_ids anymore.
+    x = input_[0]
+    input_ = [x[0], x[1], x[2], enc_ids, np.array(x[4]), x[5]]
 
-        loss, output_dict = model.forward_wo_dataloader(input_, device)
+    loss, output_dict = model.forward_wo_dataloader(input_, device)
+    
     print(f"The loss is {loss}")
     return output_dict
 

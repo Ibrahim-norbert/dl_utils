@@ -15,6 +15,7 @@ from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression, RidgeClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -47,6 +48,7 @@ class Classification:
             "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
             "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
             "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42),
+            "LinearRegression": LinearRegression()
         }
         if method not in classifiers:
             raise ValueError(
@@ -58,7 +60,7 @@ class Classification:
         return classifier
 
     @staticmethod
-    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = {}) -> Figure:
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = {}, gtColumn="") -> Figure:
         y_pred = classifier.predict(x)
         ks: list[int] = classifier.classes_
         cm = confusion_matrix(gt, y_pred, normalize="true")
@@ -84,7 +86,7 @@ class Classification:
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(save_dir, "confusion_matrix.png"), dpi=150)
+            plt.savefig(os.path.join(save_dir, "{}confusion_matrix.png").format(gtColumn), dpi=300)
         plt.close()
         return fig
 
@@ -401,16 +403,16 @@ class EmbeddingAnalysis:
         self.results_df[self.classifier_method] = self.predLabels
         self.classColumn = self.classifier_method
 
-        if mapping is not None:
+        if self.classMapping is not None:
             self.results_df[self.classMappedColumn] = np.array(
-                [mapping.get(label, label) for label in self.predLabels]
+                [self.classMapping.get(label, label) for label in self.predLabels]
             )
         else:
             self.classMappedColumn = self.classifier_method
 
         self.classification.createConfusionMatrixFigure(
             x=X_val, gt=y_val, classifier=self.classifier,
-            save_dir=self.save_dir, mapping=mapping or self.classMapping,
+            save_dir=self.save_dir, mapping=mapping or self.classMapping, gtColumn=self.gtColumn
         )
         return self.predLabels
 
