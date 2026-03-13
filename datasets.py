@@ -11,9 +11,8 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from dl_utils.SampleTypes import Data, Vertices
 from dl_utils import LABEL_KEY
-
+import logging
 logger = logging.getLogger(__name__)
-
 class BaseDataset:
     """Base class for nuclei data
     Calculates general properties, loads low resoltion (s3) nuclei"""
