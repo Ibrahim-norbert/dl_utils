@@ -18,6 +18,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.linear_model import LinearRegression, RidgeClassifier
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
+from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from dl_utils import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_KEY
@@ -120,6 +121,8 @@ class EmbeddingAnalysis:
         classifier_method: str = "LogisticRegression",
     ) -> None:
         assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
+        if save_dir is None:
+            save_dir = os.path.dirname(df_path)
         self.df_path: str = df_path
         self.type: str = type
         self.data_df: pd.DataFrame = pd.read_json(df_path)
@@ -147,6 +150,11 @@ class EmbeddingAnalysis:
             if self._has_gt
             else np.zeros(len(self.data_df), dtype=int)
         )
+
+        if self.classMapping and self._has_gt:
+            self.plot_gromov_wasserstein_heatmap()
+            self.plot_kl_divergence_heatmap()
+
 
     @classmethod
     def from_dataframe(
@@ -621,11 +629,11 @@ class EmbeddingAnalysis:
         mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
 
         if self.classColumn == classColoumn:
-            mapping_array[self.instancelabels] = self.predLabels
+            mapping_array[self.instancelabels] = self.predLabels.astype(int)
         elif self.gtColumn == classColoumn:
-            mapping_array[self.instancelabels] = self.gtlabels
+            mapping_array[self.instancelabels] = self.gtlabels.astype(int)
         elif classColoumn in self.results_df.columns:
-            mapping_array[self.instancelabels] = self.results_df[classColoumn].values
+            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(int)
         else:
             raise ValueError(f"Column '{classColoumn}' not found in results DataFrame.")
         
@@ -664,6 +672,93 @@ class EmbeddingAnalysis:
             cls: self.instancelabels[np.argmax(proba[:, i])]
             for i, cls in enumerate(classes)
         }
+
+    def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500) -> Figure:
+        """Compute and plot pairwise Gromov-Wasserstein distances between classes."""
+        import ot
+
+        classes = sorted(self.classMapping.keys())
+        class_names = [self.classMapping[c] for c in classes]
+        n_classes = len(classes)
+
+        rng = np.random.default_rng(42)
+        class_embeddings = {}
+        for c in classes:
+            mask = self.gtlabels == c
+            emb = self.embeddings[mask]
+            if len(emb) > max_samples:
+                emb = emb[rng.choice(len(emb), max_samples, replace=False)]
+            class_embeddings[c] = emb
+
+        gw_matrix = np.zeros((n_classes, n_classes))
+        for i, ci in enumerate(classes):
+            for j, cj in enumerate(classes):
+                if i >= j:
+                    continue
+                Xi, Xj = class_embeddings[ci], class_embeddings[cj]
+                Ci = ot.dist(Xi, Xi)
+                Cj = ot.dist(Xj, Xj)
+                Ci /= Ci.max() + 1e-12
+                Cj /= Cj.max() + 1e-12
+                pi = np.ones(len(Xi)) / len(Xi)
+                pj = np.ones(len(Xj)) / len(Xj)
+                gw = ot.gromov.gromov_wasserstein2(Ci, Cj, pi, pj, "square_loss", verbose=False)
+                gw_matrix[i, j] = gw_matrix[j, i] = gw
+
+        fig, _ = costumMatplotlib.simpleHeatmap(
+            gw_matrix,
+            xticklabels=class_names,
+            yticklabels=class_names,
+            title="Gromov-Wasserstein Distance Between Classes",
+            save_dir=self.save_dir,
+        )
+        return fig
+
+    def plot_kl_divergence_heatmap(self, max_samples: int = 500) -> Figure:
+        """Compute and plot pairwise symmetrised KL divergence between classes (Gaussian approximation via LedoitWolf)."""
+        classes = sorted(self.classMapping.keys())
+        class_names = [self.classMapping[c] for c in classes]
+        n_classes = len(classes)
+
+        rng = np.random.default_rng(42)
+        means, covs = {}, {}
+        for c in classes:
+            mask = self.gtlabels == c
+            emb = self.embeddings[mask]
+            if len(emb) > max_samples:
+                emb = emb[rng.choice(len(emb), max_samples, replace=False)]
+            means[c] = emb.mean(axis=0)
+            covs[c] = LedoitWolf().fit(emb).covariance_
+
+        def _kl(mu_p, sigma_p, mu_q, sigma_q):
+            sigma_q_inv = np.linalg.inv(sigma_q)
+            diff = mu_q - mu_p
+            _, logdet_p = np.linalg.slogdet(sigma_p)
+            _, logdet_q = np.linalg.slogdet(sigma_q)
+            return 0.5 * (
+                np.trace(sigma_q_inv @ sigma_p)
+                + diff @ sigma_q_inv @ diff
+                - len(mu_p)
+                + logdet_q - logdet_p
+            )
+
+        kl_matrix = np.zeros((n_classes, n_classes))
+        for i, ci in enumerate(classes):
+            for j, cj in enumerate(classes):
+                if i >= j:
+                    continue
+                sym = (_kl(means[ci], covs[ci], means[cj], covs[cj])
+                       + _kl(means[cj], covs[cj], means[ci], covs[ci])) / 2
+                kl_matrix[i, j] = kl_matrix[j, i] = sym
+
+        fig, _ = costumMatplotlib.simpleHeatmap(
+            kl_matrix,
+            xticklabels=class_names,
+            yticklabels=class_names,
+            title="Symmetrised KL Divergence Between Classes",
+            save_dir=self.save_dir,
+        )
+        return fig
 
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]

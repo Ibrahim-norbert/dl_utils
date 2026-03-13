@@ -135,6 +135,37 @@ class costumMatplotlib:
         return fig, ax
 
     @classmethod
+    def simpleHeatmap(
+        cls,
+        matrix: np.ndarray,
+        xticklabels: list = None,
+        yticklabels: list = None,
+        title: str = "",
+        save_dir: str = None,
+        cmap: str = "viridis",
+        fmt: str = ".4f",
+    ) -> tuple[Figure, Axes]:
+        n = matrix.shape[0]
+        cell_size = max(1.2, min(2.0, 12 / n))
+        fig_size = max(5, n * cell_size)
+        fontsize = max(7, min(14, int(100 / n)))
+
+        fig, ax = plt.subplots(figsize=(fig_size, fig_size * 0.85))
+        sns.heatmap(
+            matrix, ax=ax, annot=True, fmt=fmt, cmap=cmap, square=True,
+            xticklabels=xticklabels if xticklabels is not None else "auto",
+            yticklabels=yticklabels if yticklabels is not None else "auto",
+            annot_kws={"size": fontsize},
+            linewidths=0.5, linecolor="white",
+        )
+        ax.set_title(title, pad=12)
+        ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize)
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
+        fig.tight_layout()
+        cls.saveFig(fig, save_dir=save_dir, title=title, func=cls.simpleHeatmap)
+        return fig, ax
+
+    @classmethod
     def simpleImshow(
         cls,
         matrix: np.ndarray,
