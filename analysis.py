@@ -393,20 +393,29 @@ class EmbeddingAnalysis:
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
-    def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None) -> np.ndarray:
-        X_train, X_val, y_train, y_val = train_test_split(
-            self.trainEmbeddings, self.traingt, train_size=train_size,
-            stratify=self.traingt, random_state=42
-        )
-        print(f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
-        print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
+    def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights = None) -> np.ndarray:
 
-        self.classifier = self.classification.train_classifier(
-            X_train, y_train, method=self.classifier_method
-        )
+
+        if classifier_weights is None:
+            X_train, X_val, y_train, y_val = train_test_split(
+                self.trainEmbeddings, self.traingt, train_size=train_size,
+                stratify=self.traingt, random_state=42
+            )
+            print(f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
+            print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
+
+            self.classifier = self.classification.train_classifier(
+                X_train, y_train, method=self.classifier_method
+            )
+
+        else:
+            self.classifier =  classifier_weights
+            X_val = self.trainEmbeddings
+            y_val = self.traingt
+
+
         self.train_accuracy = self.classification.getAccuracy(X_val, y_val, self.classifier)
         print(f"Validation accuracy: {self.train_accuracy:.4f}")
-
         self.predLabels = self.classifier.predict(self.embeddings)
         self.results_df[self.classifier_method] = self.predLabels
         self.classColumn = self.classifier_method
@@ -664,17 +673,18 @@ class EmbeddingAnalysis:
         self.results_df = self.concatColumnDF(self.results_df, df)
         return self.results_df
 
-    def get_top_instances_per_class(self) -> dict:
-        """Return the instance label with the highest classification probability for each class.
+    def get_top_instances_per_class(self, n: int = 5) -> list[tuple]:
+        """Return (class_name, instance_label) pairs for the top-n most confident instances per class.
 
-        Returns a dict mapping class label -> instance label of the most confidently
-        predicted instance for that class.
+        Yields n entries per class ordered highest-confidence first.
+        class_name is resolved via classMapping when available.
         """
-        classes = self.classifier.classes_
-        return {
-            cls: self.instancelabels[self.results_df[f"proba_{cls}"].argmax()]
-            for cls in classes
-        }
+        mapping = self.classMapping or {}
+        return [
+            (mapping.get(cls, cls), lbl)
+            for cls in self.classifier.classes_
+            for lbl in self.instancelabels[self.results_df[f"proba_{cls}"].argsort()[-1:-n - 1:-1]]
+        ]
 
     def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500) -> Figure:
         """Compute and plot pairwise Gromov-Wasserstein distances between classes."""
