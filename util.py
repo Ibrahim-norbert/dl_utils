@@ -20,11 +20,10 @@ import yaml
 from torch import inf
 from torch.utils.data import DataLoader, Dataset
 
-from dl_utils.constants import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
-from platy_nuclei_texture.model_dataset_utils.helperfunctions import addcell_type_col, cell_type2class_column
-from platy_nuclei_texture.model_dataset_utils.nuclei_loader import LMTextureNucleiDataset, \
-    EMTextureNucleiDataset
-from platy_nuclei_texture.model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
+from dl_utils import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
+
+
+
 
 
 def adjust_learning_rate(optimizer, epoch, args, start_epoch):
@@ -360,14 +359,14 @@ def loadcheckpoints(train_run_path: str):
 
 def getcheckpointinfoandargs(pnt: str):
     print("Predicting features for", pnt)
-    checkpoint_info = torch.load(pnt, map_location='cpu')
+    checkpoint_info = torch.load(pnt, map_location='cpu', weights_only=False)
     cpt_args = checkpoint_info['args']
     return checkpoint_info, cpt_args
 
 
-def get_model_dataset_cpt_args(cpt_args, batch_size, num_workers, pin_memory, drop_last=False):
+def get_model_dataset_cpt_args(get_dataset, cpt_args, batch_size, num_workers, pin_memory, drop_last=False):
 
-    model, dataset = setup(cpt_args)
+    model, dataset = setup(get_dataset, cpt_args)
 
     data_loader = DataLoader(dataset, batch_size=batch_size,
                              num_workers=num_workers, pin_memory=pin_memory, drop_last=drop_last)
@@ -378,6 +377,7 @@ def get_model_dataset_cpt_args(cpt_args, batch_size, num_workers, pin_memory, dr
 def get_dataset(LightMicroscope: bool = False, nucl_vol_diameter=11, num_patch_per_nucl=1331, mask_ratio=0.8,
                 num_sin_cos_pos_emb=78, encoder_embed_dim=80, texture_patch_dim=4, test=False, **kwargs) -> Dataset:
 
+    from platy_nuclei_texture.model_dataset_utils.nuclei_loader import LMTextureNucleiDataset, EMTextureNucleiDataset
     if LightMicroscope is True:
         print("We are dealing with LM data")
         dset = LMTextureNucleiDataset(nucl_vol_diameter=nucl_vol_diameter,
@@ -403,6 +403,8 @@ def get_model(LightMicroscope: bool = False, mask_ratio=0.8, embed_dim=80, encod
               loss_mask_zero=False, mae_encoder=False, final_activation="None", mask_only=False, norm_pix_loss=False,
               pretrained=None, memory_efficiency=False, num_patch_per_nucl=200, **kwargs) -> torch.nn.Module:
 
+    from platy_nuclei_texture.model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
+    
     if LightMicroscope is True:
 
         model = LMAutoencoderViT(texture_patch_dim=texture_patch_dim, embed_dim=embed_dim, encoder_embed_dim=encoder_embed_dim,
@@ -433,7 +435,7 @@ def get_model(LightMicroscope: bool = False, mask_ratio=0.8, embed_dim=80, encod
     return model
 
 
-def setup(args: argparse.Namespace):
+def setup(get_dataset, args: argparse.Namespace):
 
     model_dataset_args = vars(args)
 
@@ -443,10 +445,29 @@ def setup(args: argparse.Namespace):
 
     return model, dataset
 
+@torch.inference_mode()
+def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
+    model.to(device)
+    model.eval()
 
-def replaceFileExt(filePath : str, newExt : str):
-    fileExt = os.path.splitext(filePath)[-1]
-    return filePath.replace(fileExt, newExt)
+    input_ = [dataset.__getitem__(df_index)]
+
+    s = os.path.join(save_dir, f"random_masking_{df_index}.npy")
+    if not os.path.exists(s):
+        os.makedirs(os.path.dirname(s), exist_ok=True)
+        np.save(s, input_[0][3])
+    enc_ids = np.load(s)
+
+    if not enc_ids.shape == input_[0][3].shape:
+        enc_ids = input_[0][3]
+    # NOTE: enc_ids does not correspond to map_ids anymore.
+    x = input_[0]
+    input_ = [x[0], x[1], x[2], enc_ids, np.array(x[4]), x[5]]
+
+    loss, output_dict = model.forward_wo_dataloader(input_, device)
+    
+    print(f"The loss is {loss}")
+    return output_dict
 
 def save2DFcolumn(
     sorted_results: list,
@@ -547,6 +568,10 @@ def readdataframe(path: str, name='') -> pd.DataFrame:
 
 
 def getvalidationdataloader(dataset, batch_size, num_workers, pin_memory, drop_last):
+
+    # TODO: Place it here for now to avoid import conflicts
+    from platy_nuclei_texture.model_dataset_utils.helperfunctions import addcell_type_col, cell_type2class_column
+
 
     dataset.data_df = addcell_type_col(dataset.data_df)
 

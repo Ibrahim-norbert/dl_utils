@@ -37,10 +37,9 @@ class costumMatplotlib:
     @staticmethod
     def array2colors(x: np.ndarray):
         """Argument for color in sns scatter is color."""
+        x = MinMaxScaler(feature_range=(0,1), clip=True).fit_transform(x)
         assert x.shape[-1] == 3, f"Axis y must be 3"
         colors = []
-        # Scale to 0-1 range
-        x = MinMaxScaler().fit_transform(x)
         for i in x:
             colors.append(tuple(i) + (1,))
         return colors
@@ -73,11 +72,12 @@ class costumMatplotlib:
         }
 
     @classmethod
-    def saveFig(cls, fig, save_dir, title, func) -> None:
+    def saveFig(cls, fig, save_dir, title, func, fileExtension="svg") -> None:
         plt.close()
         if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
             save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
-            fig.savefig(f"{save_path}.svg", dpi=500)
+            fig.savefig(f"{save_path}.{fileExtension}", dpi=500)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
@@ -129,7 +129,9 @@ class costumMatplotlib:
 
         cls.saveFig(fig, save_dir=save_dir,
                     title=title, func=cls.simpleScatter)
-
+        
+        plt.close(fig)
+        
         return fig, ax
 
     @classmethod
@@ -150,7 +152,9 @@ class costumMatplotlib:
         fig.tight_layout()
 
         cls.saveFig(fig, save_dir=save_dir,
-                    title=title, func=cls.simpleScatter)
+                    title=title, func=cls.simpleImshow, fileExtension="png")
+        
+        
 
         return fig, ax
 

@@ -7,10 +7,26 @@ import torch.nn as nn
 import pytorch_lightning as pl
 import yaml
 from yamlfix import fix_files
-
+from torch.utils.data.dataloader import default_collate
 from .util import save_model as _save_model, load_model as _load_model
 
+def _install_print_tee(save_dir: str) -> None:
+    """Mirror all print() calls to *log_path*, following the same closure
+    pattern as util.print_for_distributed."""
+    import builtins
+    import functools
+    builtin_print = builtins.print
+    log_path = os.path.join(save_dir, "print.txt")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log_file = open(log_path, "a", buffering=1)
 
+    @functools.wraps(builtin_print)
+    def _tee_print(*args, **kwargs):
+        builtin_print(*args, **kwargs)
+        builtin_print(*args, **{**kwargs, "file": log_file})
+
+    builtins.print = _tee_print
+    
 class BaseModelClass(pl.LightningModule):
     """Masked Autoencoder with VisionTransformer backbone"""
 
@@ -29,14 +45,22 @@ class BaseModelClass(pl.LightningModule):
         bnm_decay=0.5,
         weight_decay=0.0,
         space_threshold=0.5,
-        **kwargs,
+        **kwargs
     ):
         super().__init__(**kwargs)
 
         self.save_hyperparameters()
-        self.__dict__.update(vars(self.hparams))
+        self.__dict__.update(self.hparams)
+
+        torch.set_float32_matmul_precision("medium")
 
         self.initialize_weights()
+    
+        _install_print_tee(save_dir)
+
+    @staticmethod
+    def collate_fn(**kwargs):
+        return default_collate(**kwargs)
 
     def whatDevice(self):
         return next(self.parameters()).device
@@ -89,6 +113,20 @@ class BaseModelClass(pl.LightningModule):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    def get_init_params(self):
+        """Return all __init__ parameter names and their current values."""
+        import inspect
+        sig = inspect.signature(self.__class__.__init__)
+        params = {}
+        for name in sig.parameters:
+            if name == "self":
+                continue
+            if hasattr(self, name):
+                params[name] = getattr(self, name)
+            elif name in self.hparams:
+                params[name] = self.hparams[name]
+        return params
 
     def compute_model_size(self):
         total_size_bytes = 0
