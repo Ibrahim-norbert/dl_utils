@@ -411,6 +411,10 @@ class EmbeddingAnalysis:
         self.results_df[self.classifier_method] = self.predLabels
         self.classColumn = self.classifier_method
 
+        proba = self.classifier.predict_proba(self.embeddings)
+        for i, cls in enumerate(self.classifier.classes_):
+            self.results_df[f"proba_{cls}"] = proba[:, i]
+
         if self.classMapping is not None:
             self.results_df[self.classMappedColumn] = np.array(
                 [self.classMapping.get(label, label) for label in self.predLabels]
@@ -666,11 +670,10 @@ class EmbeddingAnalysis:
         Returns a dict mapping class label -> instance label of the most confidently
         predicted instance for that class.
         """
-        proba = self.classifier.predict_proba(self.embeddings)
         classes = self.classifier.classes_
         return {
-            cls: self.instancelabels[np.argmax(proba[:, i])]
-            for i, cls in enumerate(classes)
+            cls: self.instancelabels[self.results_df[f"proba_{cls}"].argmax()]
+            for cls in classes
         }
 
     def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500) -> Figure:
