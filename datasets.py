@@ -3,15 +3,12 @@ from dl_utils import util_base as util
 import numpy as np
 import pandas as pd
 import os
-from typing import Literal
-import numpy as np
-import os
-from typing import Any, List, Literal, Tuple, Union
-import pandas as pd
+import glob
+import yaml
+from functools import cached_property
+from typing import Any, List, Literal, Optional, Tuple, Union
 from pathlib import Path
 from torch.utils.data import DataLoader
-from typing import Any, List, Literal
-from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils.SampleTypes import Data, Vertices
 from dl_utils import LABEL_KEY
 
@@ -306,6 +303,155 @@ class BaseDataset:
 
 
 
+
+
+class BaseVolumeCollectionDataset(BaseDataset):
+    """Base class for collection datasets containing paired volume and mask paths.
+
+    Handles loading or building a master index DataFrame from either a CSV
+    listing volume/mask pairs or by scanning a directory.  Per-volume dataset
+    instances are *not* created at this level — subclasses override
+    :meth:`createDatasetFromDataFramePath` and
+    :meth:`createDatasetDFfromDirectory` to populate any per-volume registry.
+
+    Subclasses should set the class-level column attributes to match their
+    specific data schema.
+
+    Class Attributes
+    ----------------
+    sampleColumn : str
+        Column used as the global sample index in the master CSV.
+    keptIndicesColumn : str
+        Column storing the per-volume DataFrame row index.
+    volumePathColumn : str
+        Column for the raw volume file path.
+    maskPathColumn : str
+        Column for the instance-segmentation mask file path.
+    """
+
+    sampleColumn: str = "sample index"
+    volumePathColumn: str = "volume path"
+    maskPathColumn: str = "mask path"
+
+    def __init__(
+        self,
+        datasetDir: Optional[str] = None,
+        fileExtension: str = "tif",
+        datasetDataframePath: Optional[str] = None,
+        datasetConfig: Optional[dict] = None,
+    ) -> None:
+        self.datasetConfig: dict = datasetConfig or {}
+        self.fileExtension: str = fileExtension
+        self.datasetDataframePath: Optional[str] = datasetDataframePath
+
+        if datasetDataframePath and os.path.isfile(datasetDataframePath):
+            csv_df = self.loadDataFrame(datasetDataframePath)
+            required_cols = [self.volumePathColumn, self.maskPathColumn]
+            missing = [c for c in required_cols if c not in csv_df.columns]
+            assert not missing, (
+                f"Dataset CSV is missing required columns: {missing}. "
+                f"Expected: {required_cols}, found: {csv_df.columns.tolist()}"
+            )
+            common = os.path.commonpath(csv_df[self.volumePathColumn].tolist())
+            self.datasetDir = common if os.path.isdir(common) else os.path.dirname(common)
+            self.createDatasetFromDataFramePath(datasetDataframePath)
+        else:
+            assert datasetDir is not None, (
+                "datasetDir is required when no datasetDataframePath is given."
+            )
+            self.datasetDir = datasetDir
+            self.createDatasetDFfromDirectory(datasetDir, fileExtension=self.fileExtension)
+
+        super().__init__(datasetPath=self.dfPath, sampleColumn=self.sampleColumn)
+
+    @cached_property
+    def dfPath(self) -> str:
+        """Absolute path to the master index CSV file.
+
+        Written one directory above *datasetDir* so it is not confused with
+        per-volume tables.
+        """
+        parent = os.path.dirname(self.datasetDir)
+        stem = os.path.basename(self.datasetDir)
+        return os.path.join(parent, f"{stem}_dataset.csv")
+
+    def createDatasetFromDataFramePath(self, manualDFPath: str) -> None:
+        """Build the master index DataFrame from a hand-crafted CSV.
+
+        Deduplicates to one row per unique volume path, assigns a sequential
+        sample index, and writes the result to :attr:`dfPath`.  Subclasses
+        override this to additionally populate any per-volume instance registry.
+
+        Parameters
+        ----------
+        manualDFPath : str
+            Path to the source CSV.
+        """
+        if os.path.exists(self.dfPath):
+            return
+
+        dataDF = self.loadDataFrame(manualDFPath)
+        result = dataDF.drop_duplicates(subset=self.volumePathColumn).reset_index(drop=True)
+        result[self.sampleColumn] = result.index
+        result.to_csv(self.dfPath)
+
+    def createDatasetDFfromDirectory(self, directory: str, fileExtension: str) -> None:
+        """Discover volume/mask pairs in *directory* and build master index.
+
+        Volumes are expected directly in *directory*; masks must reside in a
+        ``mask/`` sub-directory with identical filenames.  Subclasses should
+        override to additionally populate any per-volume instance registry.
+
+        Parameters
+        ----------
+        directory : str
+            Root directory to scan.
+        fileExtension : str
+            Glob extension, e.g. ``"tif"``.
+
+        Raises
+        ------
+        AssertionError
+            If no mask files are found, or if volume/mask counts differ.
+        """
+        if os.path.exists(self.dfPath):
+            return
+        
+        volumePaths: List[str] = glob.glob(os.path.join(directory, f"*{fileExtension}"))
+        maskPaths: List[str] = glob.glob(os.path.join(directory, "mask", f"*{fileExtension}"))
+
+        assert maskPaths, (
+            f"No mask files found. Volumes/masks found: "
+            f"{len(volumePaths)}/{len(maskPaths)} in {directory}"
+        )
+        assert len(volumePaths) == len(maskPaths), (
+            f"Volume and mask counts must match: "
+            f"{len(volumePaths)} volumes, {len(maskPaths)} masks."
+        )
+
+        result = pd.DataFrame({
+            self.volumePathColumn: volumePaths,
+            self.maskPathColumn: maskPaths,
+        })
+        result[self.sampleColumn] = result.index
+        result.to_csv(self.dfPath)
+
+    @staticmethod
+    def getConfig(path: str) -> dict:
+        """Load a YAML configuration file and return it as a dictionary.
+
+        Parameters
+        ----------
+        path : str
+            Absolute path to a ``.yaml`` configuration file.
+
+        Returns
+        -------
+        dict
+            Parsed YAML contents.
+        """
+        with open(path, "r") as f:
+            return yaml.safe_load(f)
 
 
 class VerticesDataset(BaseDataset):
