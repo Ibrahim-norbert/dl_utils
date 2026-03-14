@@ -1,5 +1,6 @@
+import shutil
 from dl_utils.SampleLoader import SampleLoaderBioImage
-from torch.utils.data import Subset, Dataset
+from dl_utils import util_base as util
 import numpy as np
 import pandas as pd
 import os
@@ -11,10 +12,9 @@ from pathlib import Path
 from torch.utils.data import DataLoader
 from dl_utils.SampleTypes import Data, Vertices
 from dl_utils import LABEL_KEY
-
-
-
-class BaseDataset(Dataset):
+import logging
+logger = logging.getLogger(__name__)
+class BaseDataset:
     """Base class for nuclei data
     Calculates general properties, loads low resoltion (s3) nuclei"""
 
@@ -31,6 +31,191 @@ class BaseDataset(Dataset):
         self.samples: np.ndarray[Literal["1"], np.dtype[np.int32]] = np.unique(
             self.get_all_labels(self.datasetDF, self.sampleColumn)
         )
+
+    def writeChunkedImage(self, filePath: str, volume: np.ndarray, groupkey : str, key: str) -> None:
+        """Write *volume* into an N5 file at *n5_file*.
+
+        Array is stored under the group ``groupkey/`` with datasets
+        ``key``, using ``(32, 32, 32)`` chunks. When ``DEBUG``
+        logging is active a read-back verification is performed to confirm
+        the write succeeded.
+
+        Parameters
+        ----------
+        filePath : str
+            Path to the target N5 file (created or appended).
+        volume : If necessary, scaled to
+            ``uint16`` before writing.
+        """
+
+        import z5py
+
+        n5_file = util.replaceFileExt(filePath, ".n5")
+
+        logger.debug("Volume intensity range: [%s, %s]", volume.min(), volume.max())
+        # TODO: For now ensure image is in grayscale
+        if np.issubdtype(volume.dtype, np.floating):
+            assert volume.min() >= 0 and volume.max() <= 1, f"We do not have floating point grayscale range of 0 - 1 but instead {volume.min()} - {volume.max()}"
+            # Should integer, else saving n5 file would take too long
+            volume = (volume * 65535).astype(np.uint16)
+            logger.debug("Volume intensity range after scaling: [%s, %s]", volume.min(), volume.max())
+
+        assert volume.dtype in [np.int8, np.int16], f"The data type of the volume must be int16 or lower but we have {volume.dtype}"
+
+        with z5py.File(n5_file, 'a', use_zarr_format=False) as f:
+            if groupkey not in f:
+                group = f.create_group(groupkey)
+            else:
+                group = f[groupkey]
+
+            volume_ds = group.require_dataset(
+                key,
+                shape=volume.shape,
+                chunks=(32, 32, 32),
+                dtype=volume.dtype,
+            )
+            volume_ds[:] = volume
+
+        # Verification read-back — only runs when DEBUG logging is enabled
+        if logger.isEnabledFor(logging.DEBUG):
+            with z5py.File(n5_file, 'r', use_zarr_format=False) as f:
+                volume_read = f[f"{groupkey}/{key}"][:]
+            logger.debug("Written volume — shape: %s, dtype: %s", volume_read.shape, volume_read.dtype)
+
+
+    @staticmethod
+    def getbboxfromdf(df: pd.DataFrame, df_indx) -> np.ndarray:
+
+        cols = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
+
+        print(df_indx)
+        # Extract and ensure numerical values
+        bbox_values = [df.loc[df_indx, dim] for dim in cols]
+        # print(bbox_values, "before series check")
+        # bbox_values = [val.iloc[0] if not isinstance(val, numbers.Number) else val for val in bbox_values]
+        # print(bbox_values, "after series check")
+        if not all(isinstance(val, numbers.Number) for val in bbox_values):
+            raise DataclassTypeError("All bounding box values must be numeric. but got: "
+                                     f"{[type(val) for val in bbox_values]}")
+
+        return np.array(bbox_values, dtype=int).T  # Convert to NumPy float array
+    
+    @staticmethod
+    def bbox2slice(bbox: np.ndarray) -> tuple[slice, slice, slice]:
+        """Convert a flattened bounding-box array into a tuple of slices.
+
+        Parameters
+        ----------
+        bbox : np.ndarray
+            1-D (or single-row 2-D) array of six integers ordered as
+            ``[start_z, stop_z, start_y, stop_y, start_x, stop_x]``.
+
+        Returns
+        -------
+        tuple of slice
+            ``(slice_z, slice_y, slice_x)`` ready to index a 3-D array.
+
+        Raises
+        ------
+        AssertionError
+            If *bbox* has more than one row.
+        """
+        assert bbox.ndim < 2 or bbox.shape[0] == 1, "Too many dims in bbox"
+        bbox = bbox.flatten()
+        return (slice(bbox[0], bbox[1]), slice(bbox[2], bbox[3]),
+                slice(bbox[4], bbox[5]))
+
+    @staticmethod
+    def addbbox_slices_col(table: pd.DataFrame) -> pd.DataFrame:
+        """Append a ``"bbox slices"`` column of per-nucleus slice tuples.
+
+        If any of the expected bounding-box columns are absent from *table*,
+        ``merge_with_nucl_table`` is called first to populate them.
+
+        Parameters
+        ----------
+        table : pd.DataFrame
+            Nucleus table.  Expected bounding-box columns:
+            ``bb_min_z``, ``bb_max_z``, ``bb_min_y``, ``bb_max_y``,
+            ``bb_min_x``, ``bb_max_x``.
+
+        Returns
+        -------
+        pd.DataFrame
+            *table* with an added ``"bbox slices"`` column whose values are
+            ``(slice_z, slice_y, slice_x)`` tuples at s3 resolution.
+        """
+        cols: List[str] = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
+
+        # Merge nucleus table if any bounding-box columns are absent
+        missing_cols: List[str] = [col for col in cols if col not in table.columns]
+        assert not missing_cols, "The bounding box coordinates are incomplete"
+
+        bbs: List[Tuple[slice[Any, Any, Any]]] = [BaseDataset.get_slice(table, row.name) for _, row in table.iterrows()]
+
+        return util.save2DFcolumn(bbs, BaseDataset.get_all_labels(table, ), table, "bbox slices")
+
+    def resampleVolume(self, volume: np.ndarray, resolutions: list[int],
+                       interpolationOrder: int = 0) -> tuple[np.ndarray, int]:
+        """Resample *volume* to isotropic resolution.
+
+        Normalises all axis resolutions relative to the finest (minimum) one,
+        then rescales the volume accordingly.  If the volume is already
+        isotropic the resize step is skipped.
+
+        Parameters
+        ----------
+        volume : np.ndarray
+            3-D input volume ``(Z, Y, X)``.
+        resolutions : list of int
+            Physical voxel size (e.g. in nm) for each axis in ZYX order.
+        interpolationOrder : int, optional
+            Spline interpolation order passed to :func:`skimage.transform.resize`.
+            Use ``0`` for label/mask volumes (nearest-neighbour) and ``3`` for
+            raw intensity volumes (bicubic).  Default ``0``.
+
+        Returns
+        -------
+        volume : np.ndarray
+            Resampled volume.
+        min_res : int
+            The finest (smallest) voxel size from *resolutions*, which becomes
+            the isotropic resolution of the output.
+        """
+        min_res: int = min(resolutions)
+        resolutions = np.array(resolutions) / min_res
+
+        logger.debug("Pre-resampled dimension: %s", volume.shape)
+
+        if all(res == 1 for res in resolutions):
+            logger.debug("Isotropic resolution detected. Skipping resizing.")
+            return volume, min_res
+
+        volume = resize(volume, tuple((np.array(volume.shape) * resolutions).flatten()),
+                        anti_aliasing=True, order=interpolationOrder)
+
+        logger.debug("Resampled dimension: %s", volume.shape)
+        return volume, min_res
+
+    @staticmethod
+    def get_slice(df: pd.DataFrame, df_indx: int) -> tuple[slice, slice, slice]:
+        """Return the bounding-box slice tuple for a nucleus at *df_indx*.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Nucleus table containing bounding-box columns.
+        df_indx : int
+            Row index (DataFrame index label) of the target nucleus.
+
+        Returns
+        -------
+        tuple of slice
+            ``(slice_z, slice_y, slice_x)`` covering the nucleus bounding box.
+        """
+        bbox: ndarray[Tuple[Any], dtype[Any]] = BaseDataset.getbboxfromdf(df, df_indx)
+        slice_val: Tuple[slice[Any, Any, Any]] = BaseDataset.bbox2slice(bbox)
+        return slice_val
 
     def loadDataFrame(self, datasetPath: str) -> pd.DataFrame:
         data_df = SampleLoaderBioImage.loadData(datasetPath)
@@ -94,18 +279,7 @@ class BaseDataset(Dataset):
             np.save(path, array)
 
     @staticmethod
-    def getDataloader(dataset, batch_size, num_workers, persistent_workers, **kwargs):
-        # print(f"All entered parameters: {locals()}")
-        return DataLoader(
-            dataset=dataset,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            persistent_workers=persistent_workers,
-            **kwargs,
-        )
-
-    @staticmethod
-    def subset_dataset(dataset, indices) -> Subset:
+    def subset_dataset(dataset, indices) -> "SubsetDataset":
         """
         Create a subset of the dataset by selecting specific labels.
 
@@ -114,17 +288,16 @@ class BaseDataset(Dataset):
             nucl (bool, optional): Whether to use nuclear labels (`True`) or other labels (`False`). Default is `True`.
 
         Returns:
-            Subset: A PyTorch `Subset` object containing the selected data.
+            SubsetDataset: A subset object containing the selected data.
 
         Behavior:
             - Converts the input `labels` into dataset indices using `self.label2index()`.
             - Creates a new column in `self.data_df` to categorize cell types.
-            - Uses the subset indices to create a `Subset` object from the original dataset.
+            - Uses the subset indices to create a subset from the original dataset.
             - Subsets `self.data_df` to match the indices in the subset.
         """
 
-        # Create the PyTorch Subset object
-        mini_dataset: Subset = Subset(dataset, indices)
+        mini_dataset = SubsetDataset(dataset, indices)
 
         return mini_dataset
 
@@ -262,6 +435,52 @@ class BaseVolumeCollectionDataset(BaseDataset):
         })
         result[self.sampleColumn] = result.index
         result.to_csv(self.dfPath)
+
+    def copy_samples(self, src_root: str, dest_root: str) -> None:
+        """Copy volumes and masks to *dest_root*, preserving the sub-tree below *src_root*.
+
+        For every file ``<src_root>/a/b/file.tif`` the destination is
+        ``<dest_root>/a/b/file.tif``.  Intermediate directories are created as
+        needed.  An updated index is saved as ``dataset.xlsx`` inside *dest_root*.
+
+        Parameters
+        ----------
+        src_root : str
+            Common ancestor whose sub-tree structure should be preserved.
+            Every volume and mask path must be located under this directory.
+        dest_root : str
+            Root of the destination tree.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a source file listed in the index does not exist.
+        ValueError
+            If a source file is not located under *src_root*.
+        """
+        src_root  = os.path.abspath(src_root)
+        dest_root = os.path.abspath(dest_root)
+
+        df = self.datasetDF.copy()
+
+        for idx, row in df.iterrows():
+            for col in (self.volumePathColumn, self.maskPathColumn):
+                src = os.path.abspath(row[col])
+
+                if not os.path.isfile(src):
+                    raise FileNotFoundError(f"Source file not found: {src}")
+                if not src.startswith(src_root):
+                    raise ValueError(f"{src!r} is not under src_root {src_root!r}")
+
+                rel  = os.path.relpath(src, src_root)
+                dest = os.path.join(dest_root, rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
+                df.at[idx, col] = dest
+
+        os.makedirs(dest_root, exist_ok=True)
+        df.to_excel(os.path.join(dest_root, "dataset.xlsx"), index=False)
+        logger.info("Copied %d samples from %s to %s", len(df), src_root, dest_root)
 
     @staticmethod
     def getConfig(path: str) -> dict:
