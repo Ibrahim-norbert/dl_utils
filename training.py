@@ -605,7 +605,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--num_workers", type=int, default=None)
         parser.add_argument("--trainFrac", type=float, default=0.9)
         parser.add_argument("--shuffle", action="store_true", default=True)
-        parser.add_argument("--fast_dev_run", type=int, default=1)
+        parser.add_argument("--fast_dev_run", type=int, default=0)
         parser.add_argument("--reproducibility_seed", type=int, default=43)
         parser.add_argument("--dataset", default="SMLMDataset")
         parser.add_argument("--limit_val_batches", type=float, default=1.0)
@@ -617,7 +617,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--EarlyStopping_mode", default="min")
         parser.add_argument("--EarlyStopping_patience", type=int, default=50)
         # --- logging ---
-        parser.add_argument("--wandbProjectName", default="")
+        # parser.add_argument("--wandbProjectName", default="")
         return parser
 
     @classmethod
