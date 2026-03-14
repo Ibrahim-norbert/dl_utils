@@ -1,3 +1,4 @@
+import shutil
 from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils import util_base as util
 import numpy as np
@@ -434,6 +435,53 @@ class BaseVolumeCollectionDataset(BaseDataset):
         })
         result[self.sampleColumn] = result.index
         result.to_csv(self.dfPath)
+
+    def move_samples(self, src_root: str, dest_root: str) -> None:
+        """Move volumes and masks to *dest_root*, preserving the sub-tree below *src_root*.
+
+        For every file ``<src_root>/a/b/file.tif`` the destination is
+        ``<dest_root>/a/b/file.tif``.  Intermediate directories are created as
+        needed.  The master index CSV at :attr:`dfPath` is updated in-place so
+        all path columns reflect the new locations.
+
+        Parameters
+        ----------
+        src_root : str
+            Common ancestor whose sub-tree structure should be preserved.
+            Every volume and mask path must be located under this directory.
+        dest_root : str
+            Root of the destination tree.
+
+        Raises
+        ------
+        FileNotFoundError
+            If a source file listed in the index does not exist.
+        ValueError
+            If a source file is not located under *src_root*.
+        """
+        src_root  = os.path.abspath(src_root)
+        dest_root = os.path.abspath(dest_root)
+
+        df = self.data_df.copy()
+
+        for idx, row in df.iterrows():
+            for col in (self.volumePathColumn, self.maskPathColumn):
+                src = os.path.abspath(row[col])
+
+                if not os.path.isfile(src):
+                    raise FileNotFoundError(f"Source file not found: {src}")
+                if not src.startswith(src_root):
+                    raise ValueError(f"{src!r} is not under src_root {src_root!r}")
+
+                rel  = os.path.relpath(src, src_root)
+                dest = os.path.join(dest_root, rel)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.move(src, dest)
+                df.at[idx, col] = dest
+
+        self.data_df = df
+        df.to_csv(self.dfPath)
+        logger.info("Moved %d samples from %s to %s", len(df), src_root, dest_root)
 
     @staticmethod
     def getConfig(path: str) -> dict:
