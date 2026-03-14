@@ -313,6 +313,7 @@ class EmbeddingAnalysis:
 
     def getLabels(self) -> None:
         n = len(self.data_df)
+        _gtColumn_was_list = isinstance(self.gtColumn, list)
 
         if isinstance(self.gtColumn, list):
             combined_col = "_".join(self.gtColumn)
@@ -377,14 +378,22 @@ class EmbeddingAnalysis:
 
         self.instancelabels: np.ndarray = get_array_from_df(self.data_df, self.instancelabelColumn)
         nan_mask = ~pd.isna(self.gtlabels)
-        if nan_mask.sum() < n:
+        # When gtColumn was a list, additionally exclude zero/inactive rows so that
+        # only explicitly labelled (active) samples participate in training.
+        # Mutual exclusivity is already guaranteed upstream: _onehot_label returns
+        # NaN for multi-active rows, so they are caught by nan_mask as well.
+        if _gtColumn_was_list:
+            train_mask = nan_mask & (self.gtlabels > 0)
+        else:
+            train_mask = nan_mask
+        if train_mask.sum() < n:
             warnings.warn(
-                f"Labels contain {(~nan_mask).sum()} NaN value(s). "
-                f"Training on {nan_mask.sum()} of {len(self.embeddings)} samples."
+                f"Labels contain {n - train_mask.sum()} inactive/NaN value(s). "
+                f"Training on {train_mask.sum()} of {len(self.embeddings)} samples."
             )
             self.gtlabels[~nan_mask] = 0
-            self.traingt = self.gtlabels[nan_mask].astype(int)
-            self.trainEmbeddings = self.embeddings[nan_mask]
+            self.traingt = self.gtlabels[train_mask].astype(int)
+            self.trainEmbeddings = self.embeddings[train_mask]
         else:
             self.traingt = self.gtlabels.astype(int) if np.issubdtype(self.gtlabels.dtype, np.floating) else self.gtlabels
             self.trainEmbeddings = self.embeddings
