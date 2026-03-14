@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from argparse import Namespace
+import configargparse
 import contextlib
 import inspect
 import io
@@ -162,11 +163,36 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                 frame = frame.f_back
             hparams: dict[str, Any] = _get_init_args(frame=frame)[-1]
 
-            # Merge config file values into hparams (config file overrides defaults)
+            # Merge config file values with correct priority:
+            #   explicitly-passed args  >  config file  >  signature defaults
+            # We detect "was this param explicitly passed?" by comparing its
+            # current value against the __init__ signature default.  If the
+            # value equals the default (or the param has no default), the
+            # config file is allowed to override it.
             config_file = hparams.pop("config_file", None)
-            if config_file is not None:
+            if config_file is not None and os.path.isfile(str(config_file)):
+                _cls = frame.f_locals.get("__class__") if frame else None
+                _sig_defaults: dict[str, Any] = {}
+                if _cls is not None:
+                    _sig_defaults = {
+                        name: param.default
+                        for name, param in inspect.signature(_cls.__init__).parameters.items()
+                        if param.default is not inspect.Parameter.empty
+                    }
                 with open(config_file, "r") as _f:
-                    hparams.update(yaml.safe_load(_f) or {})
+                    yaml_data: dict[str, Any] = yaml.safe_load(_f) or {}
+                _sentinel = object()
+                for k, v in yaml_data.items():
+                    if k not in hparams:
+                        # Key not declared in __init__ — add it from config.
+                        hparams[k] = v
+                    elif hparams[k] == _sig_defaults.get(k, _sentinel):
+                        # Still at its default — let config file override.
+                        hparams[k] = v
+                    elif isinstance(v, dict) and isinstance(hparams.get(k), dict):
+                        # Nested dict (e.g. modelConfig/datasetConfig):
+                        # config file provides base keys; explicit dict wins per-key.
+                        hparams[k] = {**v, **hparams[k]}
 
             # Clean config
             modelConfig = hparams.get("modelConfig", {})
@@ -521,6 +547,139 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             limit_val_batches=limit_val_batches,
             args=args,
         )
+
+    @classmethod
+    def get_args(
+        cls,
+        default_config_files: list[str] | None = None,
+        description: str = "Training",
+        **parser_kwargs,
+    ) -> configargparse.ArgumentParser:
+        """Return a configargparse parser pre-populated with all BaseClassTrainer params.
+
+        Subclasses should override this, call ``super().get_args(...)``, and
+        extend the returned parser with their own arguments::
+
+            @classmethod
+            def get_args(cls, default_config_files=None, **kw):
+                parser = super().get_args(default_config_files, **kw)
+                parser.add_argument("--my_param", type=int, default=42)
+                return parser
+
+        Parameters
+        ----------
+        default_config_files:
+            Paths probed automatically when ``--config_file`` is not supplied
+            on the CLI (forwarded to ``configargparse.ArgumentParser``).
+        description:
+            Parser description string.
+        **parser_kwargs:
+            Additional keyword arguments forwarded to
+            ``configargparse.ArgumentParser``.
+
+        Returns
+        -------
+        configargparse.ArgumentParser
+            Parser with ``--config_file`` (``is_config_file=True``) and one
+            argument per ``BaseClassTrainer.__init__`` parameter.
+        """
+        parser = configargparse.ArgumentParser(
+            description=description,
+            default_config_files=default_config_files or [],
+            config_file_parser_class=configargparse.YAMLConfigFileParser,
+            allow_abbrev=False,
+            **parser_kwargs,
+        )
+        parser.add_argument(
+            "--config_file", is_config_file=True,
+            help="Path to a YAML config file. CLI args take priority over config file values.",
+        )
+        # --- identifiers ---
+        parser.add_argument("--modelName", default="Model")
+        parser.add_argument("--save_dir", default="")
+        parser.add_argument("--ckptPath", default=None)
+        parser.add_argument("--weightsCkptPath", default="")
+        # --- training loop ---
+        parser.add_argument("--max_epochs", type=int, default=200)
+        parser.add_argument("--batch_size", type=int, default=1)
+        parser.add_argument("--num_workers", type=int, default=None)
+        parser.add_argument("--trainFrac", type=float, default=0.9)
+        parser.add_argument("--shuffle", action="store_true", default=True)
+        parser.add_argument("--fast_dev_run", type=int, default=1)
+        parser.add_argument("--reproducibility_seed", type=int, default=43)
+        parser.add_argument("--dataset", default="SMLMDataset")
+        parser.add_argument("--limit_val_batches", type=float, default=1.0)
+        # --- callbacks ---
+        parser.add_argument("--ModelCheckpoint_save_top_k", type=int, default=3)
+        parser.add_argument("--ModelCheckpoint_monitor", default="Train LOSS")
+        parser.add_argument("--ModelCheckpoint_mode", default="min")
+        parser.add_argument("--EarlyStopping_monitor", default="Train LOSS")
+        parser.add_argument("--EarlyStopping_mode", default="min")
+        parser.add_argument("--EarlyStopping_patience", type=int, default=50)
+        # --- logging ---
+        parser.add_argument("--wandbProjectName", default="")
+        return parser
+
+    @classmethod
+    def _model_config_defaults(cls) -> dict:
+        """Subclasses override to supply default model-architecture config keys.
+
+        These keys are popped from the flat args namespace and merged into
+        ``modelConfig`` by :meth:`parse_args`.
+        """
+        return {}
+
+    @classmethod
+    def _dataset_config_defaults(cls) -> dict:
+        """Subclasses override to supply default dataset config keys.
+
+        These keys are popped from the flat args namespace and merged into
+        ``datasetConfig`` by :meth:`parse_args`.
+        """
+        return {}
+
+    @classmethod
+    def parse_args(cls) -> dict:
+        """Parse CLI / config-file args and return a kwargs dict for ``cls(**kwargs)``.
+
+        Handles:
+        * ``--num_workers`` auto-detection when still ``None`` after parsing
+        * ``modelConfig`` / ``datasetConfig`` nested-YAML-string unpacking
+        * Flat model/dataset keys merged over per-class defaults
+
+        Subclasses should override :meth:`_model_config_defaults` and
+        :meth:`_dataset_config_defaults` rather than overriding this method.
+        """
+        args = cls.get_args().parse_args()
+        if getattr(args, "num_workers", None) is None:
+            num_threads = os.cpu_count()
+            args.num_workers = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+        print(f"CPU threads (num_workers): {args.num_workers}")
+
+        args_dict = vars(args)
+
+        def _as_dict(value) -> dict:
+            if not value:
+                return {}
+            if isinstance(value, dict):
+                return value
+            return yaml.safe_load(value) or {}
+
+        nested_model = _as_dict(args_dict.pop("modelConfig", None))
+        nested_dataset = _as_dict(args_dict.pop("datasetConfig", None))
+
+        model_defaults = cls._model_config_defaults()
+        dataset_defaults = cls._dataset_config_defaults()
+
+        # Pop any flat keys that belong to these configs so they don't leak into **kwargs
+        flat_model = {k: args_dict.pop(k) for k in list(model_defaults.keys()) if k in args_dict}
+        flat_dataset = {k: args_dict.pop(k) for k in list(dataset_defaults.keys()) if k in args_dict}
+
+        # Priority: defaults < nested YAML block > flat args (nested wins when present)
+        args_dict["modelConfig"] = {**model_defaults, **(nested_model if nested_model else flat_model)}
+        args_dict["datasetConfig"] = {**dataset_defaults, **(nested_dataset if nested_dataset else flat_dataset)}
+
+        return args_dict
 
     def _compute_save_dir(self) -> str:
         """Hook for subclasses to define the root save directory.
