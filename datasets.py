@@ -436,13 +436,12 @@ class BaseVolumeCollectionDataset(BaseDataset):
         result[self.sampleColumn] = result.index
         result.to_csv(self.dfPath)
 
-    def move_samples(self, src_root: str, dest_root: str) -> None:
-        """Move volumes and masks to *dest_root*, preserving the sub-tree below *src_root*.
+    def copy_samples(self, src_root: str, dest_root: str) -> None:
+        """Copy volumes and masks to *dest_root*, preserving the sub-tree below *src_root*.
 
         For every file ``<src_root>/a/b/file.tif`` the destination is
         ``<dest_root>/a/b/file.tif``.  Intermediate directories are created as
-        needed.  The master index CSV at :attr:`dfPath` is updated in-place so
-        all path columns reflect the new locations.
+        needed.  An updated index is saved as ``dataset.xlsx`` inside *dest_root*.
 
         Parameters
         ----------
@@ -462,7 +461,7 @@ class BaseVolumeCollectionDataset(BaseDataset):
         src_root  = os.path.abspath(src_root)
         dest_root = os.path.abspath(dest_root)
 
-        df = self.data_df.copy()
+        df = self.datasetDF.copy()
 
         for idx, row in df.iterrows():
             for col in (self.volumePathColumn, self.maskPathColumn):
@@ -476,12 +475,12 @@ class BaseVolumeCollectionDataset(BaseDataset):
                 rel  = os.path.relpath(src, src_root)
                 dest = os.path.join(dest_root, rel)
                 os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.move(src, dest)
+                shutil.copy2(src, dest)
                 df.at[idx, col] = dest
 
-        self.data_df = df
-        df.to_csv(self.dfPath)
-        logger.info("Moved %d samples from %s to %s", len(df), src_root, dest_root)
+        os.makedirs(dest_root, exist_ok=True)
+        df.to_excel(os.path.join(dest_root, "dataset.xlsx"), index=False)
+        logger.info("Copied %d samples from %s to %s", len(df), src_root, dest_root)
 
     @staticmethod
     def getConfig(path: str) -> dict:
