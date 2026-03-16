@@ -374,18 +374,19 @@ class EmbeddingAnalysis:
         # only explicitly labelled (active) samples participate in training.
         # Mutual exclusivity is already guaranteed upstream: _onehot_label returns
         # NaN for multi-active rows, so they are caught by nan_mask as well.
-        if _gtColumn_was_list:
-            train_mask = nan_mask & (self.gtlabels > 0)
-        else:
-            train_mask = nan_mask
-        if train_mask.sum() < n:
+        # if _gtColumn_was_list:
+        #     train_mask = nan_mask & (self.gtlabels > 0)
+        # else:
+        #     train_mask = nan_mask
+        if nan_mask.sum() < n:
             warnings.warn(
-                f"Labels contain {n - train_mask.sum()} inactive/NaN value(s). "
-                f"Training on {train_mask.sum()} of {len(self.embeddings)} samples."
+                f"Labels contain {n - nan_mask.sum()} inactive/NaN value(s). "
+                f"Training on {nan_mask.sum()} of {len(self.embeddings)} samples."
             )
+            # Turn nan values to 0 but filter for training classifier
             self.gtlabels[~nan_mask] = 0
-            self.traingt = self.gtlabels[train_mask].astype(int)
-            self.trainEmbeddings = self.embeddings[train_mask]
+            self.traingt = self.gtlabels[nan_mask].astype(int)
+            self.trainEmbeddings = self.embeddings[nan_mask]
         else:
             self.traingt = self.gtlabels.astype(int) if np.issubdtype(self.gtlabels.dtype, np.floating) else self.gtlabels
             self.trainEmbeddings = self.embeddings
