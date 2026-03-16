@@ -151,6 +151,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             **args,
         )
 
+
+    
     def save_hyperparameters(self) -> Namespace | types.NoneType:
         # From pytorch_lightning.core.mixins.hparams_mixin import HyperparametersMixin
         current_frame: sys.FrameType | types.NoneType = inspect.currentframe()

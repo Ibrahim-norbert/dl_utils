@@ -45,7 +45,10 @@ CELL_DICT = None
 
 NUCLEUS_LABEL_KEY = "label_id"
 LABEL_KEY = "labels"
-EMBED_KEY = "Embeddings"
+EMBED_DICT_EMBED = "Embeddings"
+PREDICTED_LABEL_KEY = "pred labels"
+GT_LABEL_KEY = "gt"
+LOSS_KEY = "loss"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
 
 TOKEN_KEY = "token"
@@ -53,3 +56,4 @@ FEATURES_KEY = "features"
 AVG_TOKEN_FEATURES_KEY = "avg_token_feature"
 MASKED_FEATURES_KEY = "masked_features"
 MASKED_AVG_TOKEN_FEATURES_KEY = "masked_avg_token_feature"
+

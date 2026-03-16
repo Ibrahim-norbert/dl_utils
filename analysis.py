@@ -21,7 +21,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from dl_utils import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_KEY
+from dl_utils import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
 from dl_utils.vizualizations import costumMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
 
@@ -105,7 +105,7 @@ class EmbeddingAnalysis:
     def __init__(
         self,
         df_path: str = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json",
-        type: str = EMBED_KEY,
+        type: str = EMBED_DICT_EMBED,
         instancelabelColumn: str = NUCLEUS_LABEL_KEY,
         gtColumn: str = None,
         classMapping: dict = {},
@@ -818,7 +818,7 @@ if __name__ == '__main__':
     from ProjectRoot import change_wd_to_project_root
     change_wd_to_project_root()
     from dl_utils.analysis import EmbeddingAnalysis
-    from dl_utils import EMBED_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
+    from dl_utils import EMBED_DICT_EMBED, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
 
     save_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\predictedMask"
     mapping = {1: "Neuron", 2: "Glial"}
