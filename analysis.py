@@ -1,4 +1,5 @@
 import base64
+from typing import Optional
 import os
 import pathlib
 import warnings
@@ -117,7 +118,7 @@ class EmbeddingAnalysis:
         leiden_n_iterations: int = 2,
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
-        metadDataFramePath: str = None,
+        metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
     ) -> None:
         assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
@@ -264,7 +265,7 @@ class EmbeddingAnalysis:
         leiden_distance_metric,
         default_class_column: str = "Class",
         subplots_kwargs: dict = None,
-        metadDataFramePath: str = None,
+        metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
     ) -> None:
         instance.gtColumn = gtColumn
