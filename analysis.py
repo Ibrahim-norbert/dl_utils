@@ -146,11 +146,6 @@ class EmbeddingAnalysis:
             metadDataFramePath=metadDataFramePath,
             classifier_method=classifier_method,
         )
-        self.predLabels = (
-            self.classify(binary=binary, mapping=classMapping)
-            if self._has_gt
-            else np.zeros(len(self.data_df), dtype=int)
-        )
 
         if self.classMapping and self._has_gt:
             self.plot_gromov_wasserstein_heatmap()
@@ -198,11 +193,7 @@ class EmbeddingAnalysis:
             default_class_column="cluster",
             subplots_kwargs={"s": 1},
         )
-        instance.predLabels = (
-            instance.classify(binary=binary, mapping=classMapping)
-            if instance._has_gt
-            else np.zeros(len(instance.data_df), dtype=int)
-        )
+
         return instance
 
     @classmethod
