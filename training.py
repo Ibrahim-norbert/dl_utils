@@ -24,6 +24,7 @@ from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
+from lightning.pytorch.callbacks import DeviceStatsMonitor
 
 
 
@@ -528,9 +529,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         # TODO: Hack for now until smarter config parsing
         args = {
-            "callbacks": [checkpoint_callback, early_stopping_callback],
+            "callbacks": [checkpoint_callback, early_stopping_callback, DeviceStatsMonitor(cpu_stats=False)],
             "logger": wandb_logger,
-            "profiler": profiler,
         }
 
         super().__init__(

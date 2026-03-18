@@ -127,6 +127,7 @@ class EmbeddingAnalysis:
         self.df_path: str = df_path
         self.type: str = type
         self.data_df: pd.DataFrame = pd.read_json(df_path)
+        print(f"Available coloumns: {self.data_df.columns.tolist()}")
         self.embeddings: np.ndarray = StandardScaler().fit_transform(
             get_array_from_df(self.data_df, type)
         )
@@ -449,8 +450,6 @@ class EmbeddingAnalysis:
         ).fit(preds)
         self.classColumn = "DBSCAN_cluster"
         labels = clustering.labels_.reshape(*shape).astype(int) + 1
-        self.results_df[self.classColumn] = labels.flatten().tolist()
-        self.predLabels = labels.flatten()
         return labels
 
     def performLeiden(
@@ -477,9 +476,7 @@ class EmbeddingAnalysis:
         for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
             indices = embedding.obs[embedding.obs["leiden"] == sub_label].index.astype(int)
             labels[indices] = indx
-        self.classColumn = "leiden_cluster"
         labels = labels.astype(int).reshape(*shape) + 1
-        self.results_df[self.classColumn] = labels.flatten().tolist()
         self.predLabels = labels.flatten()
         return labels
     def getClusters(self, preds, DBSCAN_eps=0.5, DBSCAN_min_samples=10):
@@ -578,32 +575,39 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./"):
+                       save_dir: str = "./", precomputed_colors: bool = False):
         import plotly.express as px
         from . import MoBie_coloring
 
-        color_space = MoBie_coloring.GlasbeyARGBLut()
         plot_df = self.results_df.copy()
 
-        if classColoumn not in plot_df.columns:
-            print(f"{classColoumn} is not a column in DataFrame")
-            plot_df[classColoumn] = 0
+        if precomputed_colors:
+            # Color column already contains plotly-compatible rgba strings — use directly
+            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
+            fig.update_traces(marker=dict(color=plot_df[classColoumn].tolist(), size=4))
+        else:
+            color_space = MoBie_coloring.GlasbeyARGBLut()
 
-        plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
-        classLabels = sorted(plot_df[classColoumn].unique().astype(int).tolist())
+            if classColoumn not in plot_df.columns:
+                print(f"{classColoumn} is not a column in DataFrame")
+                plot_df[classColoumn] = 0
 
-        def _label(k: int) -> str:
-            return mapping.get(k, self.classMapping.get(k, str(k)))
+            plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
+            classLabels = sorted(plot_df[classColoumn].unique().astype(int).tolist())
 
-        color_map = {_label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
-        color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
-        plot_df[classColoumn] = plot_df[classColoumn].astype(int).map(_label)
+            def _label(k: int) -> str:
+                return mapping.get(k, self.classMapping.get(k, str(k)))
 
-        fig = px.scatter(
-            plot_df, x=xColumn, y=yColumn, color=classColoumn,
-            color_discrete_map=color_map,
-            category_orders={classColoumn: [_label(k) for k in classLabels]},
-        )
+            color_map = {_label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
+            color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
+            plot_df[classColoumn] = plot_df[classColoumn].astype(int).map(_label)
+
+            fig = px.scatter(
+                plot_df, x=xColumn, y=yColumn, color=classColoumn,
+                color_discrete_map=color_map,
+                category_orders={classColoumn: [_label(k) for k in classLabels]},
+            )
+
         fig.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),

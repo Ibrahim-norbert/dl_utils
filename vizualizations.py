@@ -129,9 +129,7 @@ class costumMatplotlib:
 
         cls.saveFig(fig, save_dir=save_dir,
                     title=title, func=cls.simpleScatter)
-        
-        plt.close(fig)
-        
+
         return fig, ax
 
     @classmethod
