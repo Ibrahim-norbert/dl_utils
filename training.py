@@ -106,6 +106,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         modelConfig: typing.Union[None, dict] = None,
         datasetConfig: typing.Union[None, dict] = None,
         limit_val_batches=0,
+        accumulate_grad_batches=10,
         args={},
     ) -> types.NoneType:
 
@@ -149,6 +150,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             max_epochs=max_epochs,
             log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
+            accumulate_grad_batches=accumulate_grad_batches,
             **args,
         )
 
@@ -488,6 +490,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         wandbProjectName="",
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
+        accumulate_grad_batches=10,
         **kwargs,
     ) -> types.NoneType:
 
@@ -547,6 +550,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             dataset=self.hparams.dataset,
             fast_dev_run=self.hparams.fast_dev_run,
             limit_val_batches=limit_val_batches,
+            accumulate_grad_batches=accumulate_grad_batches,
             args=args,
         )
 
@@ -611,6 +615,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--reproducibility_seed", type=int, default=43)
         parser.add_argument("--dataset", default="SMLMDataset")
         parser.add_argument("--limit_val_batches", type=float, default=1.0)
+        parser.add_argument("--accumulate_grad_batches", type=int, default=1)
         # --- callbacks ---
         parser.add_argument("--ModelCheckpoint_save_top_k", type=int, default=3)
         parser.add_argument("--ModelCheckpoint_monitor", default="Train LOSS")
