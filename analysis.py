@@ -535,7 +535,7 @@ class EmbeddingAnalysis:
 
         reducer = umap.UMAP(
             n_neighbors=n_neighbors, min_dist=min_dist, n_components=n_components,
-            random_state=random_state, metric=metric, **kwargs,
+            random_state=random_state, metric=metric, n_jobs=10, **kwargs,
         ).fit(self.embeddings)
         umap_array = reducer.transform(self.embeddings)
         return pd.DataFrame(
@@ -622,6 +622,7 @@ class EmbeddingAnalysis:
             xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
         if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
             fig.write_image(os.path.join(save_dir, f"{classColoumn}_{legend_title}.svg"))
             fig.show()
         return fig
