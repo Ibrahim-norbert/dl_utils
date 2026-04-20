@@ -33,3 +33,10 @@ class Vertices(NamedTuple):
 
     data: Data
     filePath: str
+
+class PromptData(Data):
+    pass
+    
+class SAMVertices(Vertices):
+
+    promptData : PromptData
