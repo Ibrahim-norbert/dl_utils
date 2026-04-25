@@ -25,7 +25,7 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
 from lightning.pytorch.callbacks import DeviceStatsMonitor
-
+import shutil
 
 
 def full_stack() -> str:
@@ -251,9 +251,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             raise FileNotFoundError(f"[getModel] weightsCkptPath not found: {weights_path}")
         return self.loadWeights(weights_path, module)
 
-
-
-
     def getValDataloader(self, val_ds: datasets.BaseDataset, **kwargs):
 
         val_ds = datasets.BaseDataset.getDataloader(
@@ -316,22 +313,23 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def saveConfig(self) -> types.NoneType:
         # Writing the data to a YAML file
 
-        # Save to yaml file
-        path: str = os.path.join(self.save_dir, self.__class__.__name__)
+        if os.path.exists(self.save_dir):
+            # Save to yaml file
+            path: str = os.path.join(self.save_dir, self.__class__.__name__)
 
-        # Any argparse Namespaces in hparams are converted to dicts
-        for key, value in vars(self.hparams).items():
-            if isinstance(value, argparse.Namespace):
-                setattr(self.hparams, key, vars(value))
+            # Any argparse Namespaces in hparams are converted to dicts
+            for key, value in vars(self.hparams).items():
+                if isinstance(value, argparse.Namespace):
+                    setattr(self.hparams, key, vars(value))
 
-        # TODO: Read through following for improvement:
-        # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
+            # TODO: Read through following for improvement:
+            # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
 
-        # Test if each value is acceptable to yaml
-        filpath: str = f"{path}.yaml"
-        print(f"Saving config here: {filpath}")
-        with open(filpath, "w") as file:
-            yaml.dump(vars(self.hparams), file)
+            # Test if each value is acceptable to yaml
+            filpath: str = f"{path}.yaml"
+            print(f"Saving config here: {filpath}")
+            with open(filpath, "w") as file:
+                yaml.dump(vars(self.hparams), file)
 
     def timeStampsave_dir(self) -> types.NoneType:
 
@@ -348,6 +346,22 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.save_dir: str = os.path.join(self.save_dir, self.time_string)
 
         os.makedirs(self.save_dir, exist_ok=True)
+
+    def fit(self, *args, **kwargs):
+        
+
+        try:
+            super().fit(*args, **kwargs)
+
+        except Exception:
+            save_dir = getattr(self, "save_dir", None)
+            if save_dir and os.path.isdir(save_dir):
+                files = os.listdir(save_dir)
+                if not any(
+                    any(ext in f for ext in (".pth", ".png", ".svg")) for f in files
+                ):
+                    shutil.rmtree(save_dir)
+
 
     @torch.no_grad()
     def compute_peak_gpu_memory(self, model, dataloader):

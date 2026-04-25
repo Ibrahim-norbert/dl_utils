@@ -398,7 +398,6 @@ class EmbeddingAnalysis:
 
     def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights = None) -> np.ndarray:
 
-
         if classifier_weights is None:
             X_train, X_val, y_train, y_val = train_test_split(
                 self.trainEmbeddings, self.traingt, train_size=train_size,
@@ -416,10 +415,11 @@ class EmbeddingAnalysis:
             X_val = self.trainEmbeddings
             y_val = self.traingt
 
-
         self.train_accuracy = self.classification.getAccuracy(X_val, y_val, self.classifier)
         print(f"Validation accuracy: {self.train_accuracy:.4f}")
         self.predLabels = self.classifier.predict(self.embeddings)
+
+
         self.results_df[self.classifier_method] = self.predLabels
         self.classColumn = self.classifier_method
 
@@ -543,27 +543,27 @@ class EmbeddingAnalysis:
             index=self.data_df.index,
         )
 
-    def UMAPResults(self):
+    def UMAPResults(self, **kwargs):
         self.concatDF(self.UMAP())
         return self.specialScatter(
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
             classColoumn=self.classColumn,
             legend_title="UMAP - {}".format(self.gtColumn if self._has_gt else self.classColumn),
-            save_dir=self.save_dir,
+            save_dir=self.save_dir,**kwargs
         )
 
     # ------------------------------------------------------------------ #
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
 
-    def vizualisePCA(self, pcas=None, title=""):
+    def vizualisePCA(self, pcas=None, title="", **kwargs):
         return self.specialScatter(
             xColumn="PCA x", yColumn="PCA y",
             xaxis_title="PC 1", yaxis_title="PC 2",
             classColoumn=self.classColumn,
             legend_title="PC - {}".format(self.gtColumn if self._has_gt else self.classColumn),
-            save_dir=self.save_dir,
+            save_dir=self.save_dir, **kwargs
         )
 
     @staticmethod
@@ -575,7 +575,7 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./", precomputed_colors: bool = False):
+                       save_dir: str = "./", precomputed_colors: bool = False, **kwargs):
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -621,6 +621,8 @@ class EmbeddingAnalysis:
             legend_title_text=legend_title,
             xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
+
+        fig.update_traces(marker=dict(size=kwargs.get("markerSize", 3), opacity=kwargs.get("markerOpacity", 0.8)))
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             fig.write_image(os.path.join(save_dir, f"{classColoumn}_{legend_title}.svg"))
