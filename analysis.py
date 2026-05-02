@@ -128,9 +128,11 @@ class EmbeddingAnalysis:
         self.type: str = type
         self.data_df: pd.DataFrame = pd.read_json(df_path)
         print(f"Available coloumns: {self.data_df.columns.tolist()}")
-        self.embeddings: np.ndarray = StandardScaler().fit_transform(
-            get_array_from_df(self.data_df, type)
-        )
+        embeddings = get_array_from_df(self.data_df, type)
+        assert np.unique(embeddings.flatten()).__len__() > 1, f"The embeddings are uninformative with the constant value of {np.unique(embeddings.flatten())}"
+
+        self.embeddings: np.ndarray = StandardScaler().fit_transform(embeddings)
+        
         self._apply_common_setup(
             self,
             gtColumn=gtColumn,

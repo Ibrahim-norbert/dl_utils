@@ -121,7 +121,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         if self.hparams.fast_dev_run is True or self.hparams.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
-            self.device = "cpu"
+            #self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
@@ -230,7 +230,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = torch.load(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
-        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        missing, unexpected = module.load_state_dict(state_dict=state_dict, strict=False)
         print(f"[getModel] Loaded weights from: {ckptPath}")
         if missing:
             print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
