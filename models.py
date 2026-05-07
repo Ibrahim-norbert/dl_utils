@@ -56,7 +56,7 @@ class BaseModelClass(pl.LightningModule):
 
         self.initialize_weights()
     
-        _install_print_tee(save_dir)
+        #_install_print_tee(save_dir)
 
     @staticmethod
     def collate_fn(**kwargs):
