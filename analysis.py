@@ -22,10 +22,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from dl_utils import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
+from dl_utils import GT_LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
 from dl_utils.vizualizations import costumMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
-
+from scipy.spatial.distance import cdist
 sns.set_context("poster")
 
 
@@ -129,9 +129,13 @@ class EmbeddingAnalysis:
         self.data_df: pd.DataFrame = pd.read_json(df_path)
         print(f"Available coloumns: {self.data_df.columns.tolist()}")
         embeddings = get_array_from_df(self.data_df, type)
+        nan_mask = np.isnan(embeddings)
+        assert not nan_mask.any(), f"Yes we have {nan_mask.sum()} nans in the array"
+
         assert np.unique(embeddings.flatten()).__len__() > 1, f"The embeddings are uninformative with the constant value of {np.unique(embeddings.flatten())}"
 
         self.embeddings: np.ndarray = StandardScaler().fit_transform(embeddings)
+
         
         self._apply_common_setup(
             self,
@@ -206,7 +210,7 @@ class EmbeddingAnalysis:
         meta_df: "pd.DataFrame",
         save_dir: str = None,
         gtColumn: str = None,
-        instancelabelColumn: str = NUCLEUS_LABEL_KEY,
+        instancelabelColumn: str = GT_LABEL_KEY,
         leiden: bool = False,
         leiden_resolution: float = 1.0,
         leiden_n_iterations: int = 2,
@@ -398,6 +402,9 @@ class EmbeddingAnalysis:
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
+
+
+
     def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights = None) -> np.ndarray:
 
         if classifier_weights is None:
@@ -470,7 +477,7 @@ class EmbeddingAnalysis:
         embedding = ad.AnnData(X=preds)
         scanpy.pp.neighbors(
             embedding, n_neighbors=n_neighbors, n_pcs=None,
-            metric=distance_metric, random_state=111,  # type: ignore[arg-type]
+            metric=distance_metric, random_state=111, use_rep="X" # type: ignore[arg-type]
         )
         scanpy.tl.leiden(
             embedding, resolution=resolution, random_state=111, n_iterations=n_iterations,
@@ -520,7 +527,11 @@ class EmbeddingAnalysis:
 
     def pca(self) -> np.ndarray:
         pca_model = PCA()
+        nan_mask = np.isnan(self.embeddings)
+        assert not nan_mask.any(), f"Yes we have {nan_mask.sum()} nans in the array"
         pcs = pca_model.fit_transform(self.embeddings)
+        nan_mask = np.isnan(pcs)
+        assert not nan_mask.any(), f"Yes we have {nan_mask.sum()} nans in the array"
         print(f"Explained variance      : {pca_model.explained_variance_ratio_[:5].round(3)}")
         print(f"Cumulative (first 3)    : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
         pca_df = pd.DataFrame(

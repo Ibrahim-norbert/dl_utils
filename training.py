@@ -361,6 +361,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                     any(ext in f for ext in (".pth", ".png", ".svg")) for f in files
                 ):
                     shutil.rmtree(save_dir)
+            raise
 
 
     @torch.no_grad()
