@@ -119,6 +119,7 @@ class EmbeddingAnalysis:
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: str = None,
         classifier_method: str = "LogisticRegression",
+        **kwargs,
     ) -> None:
         assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
         if save_dir is None:
@@ -129,6 +130,8 @@ class EmbeddingAnalysis:
         self.embeddings: np.ndarray = StandardScaler().fit_transform(
             get_array_from_df(self.data_df, type)
         )
+        print(f"The embedding array has shape {self.embeddings.shape} and dtype {self.embeddings.dtype}")
+        
         self._apply_common_setup(
             self,
             gtColumn=gtColumn,
@@ -144,12 +147,19 @@ class EmbeddingAnalysis:
             default_class_column="Class",
             metadDataFramePath=metadDataFramePath,
             classifier_method=classifier_method,
+            **kwargs
         )
         self.predLabels = (
             self.classify(binary=binary, mapping=classMapping)
             if self._has_gt
             else np.zeros(len(self.data_df), dtype=int)
         )
+
+        # Add ground truth column as mapping
+        self.results_df["Mapping_gtColumns"] = [self.classMapping.get(label, label) for label in self.gtlabels]
+        self.results_df["gtColumns"] = self.gtlabels
+
+        print("We have the following columns in the results DataFrame:", self.results_df.columns.tolist())
 
         if self.classMapping and self._has_gt:
             self.plot_gromov_wasserstein_heatmap()
@@ -229,7 +239,12 @@ class EmbeddingAnalysis:
         instance.type = None
         instance.data_df = meta_df.reset_index(drop=True).copy()
         instance.embeddings = StandardScaler().fit_transform(embeddings)
-        gt_present = gtColumn is not None and gtColumn in meta_df.columns
+        if gtColumn is None:
+            gt_present = False
+        elif isinstance(gtColumn, list):
+            gt_present = all(c in meta_df.columns for c in gtColumn)
+        else:
+            gt_present = gtColumn in meta_df.columns
         cls._apply_common_setup(
             instance,
             gtColumn=gtColumn,
@@ -242,11 +257,80 @@ class EmbeddingAnalysis:
             leiden_n_iterations=leiden_n_iterations,
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
-            default_class_column=gtColumn if gt_present else "Class",
+            default_class_column=("_".join(gtColumn) if isinstance(gtColumn, list) else gtColumn) if gt_present else "Class",
         )
         # Colour by ground-truth label; skip classifier training
         instance.predLabels = instance.gtlabels
         return instance
+
+    @staticmethod
+    def _standardise_label_column(
+        data_df: pd.DataFrame,
+        gtColumn,
+        classMapping: dict,
+    ) -> tuple["pd.DataFrame", str, dict]:
+        """Convert gtColumn (list of condition columns or single column name) into
+        a single integer label column in *data_df*.
+
+        When *gtColumn* is already a string only the string→integer mapping is
+        applied (if the column contains string values).  Returns
+        ``(data_df, new_gtColumn_name, updated_classMapping)``.
+        """
+        _df = data_df
+        _label_order: list | None = None  # tracks original list order for int assignment
+
+        if isinstance(gtColumn, list):
+            _label_order = list(gtColumn)  # preserve caller-specified order
+            combined_col = "_".join(gtColumn)
+            subset = _df[gtColumn]
+
+            def _is_binary(col):
+                try:
+                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
+                except (ValueError, TypeError):
+                    return False
+
+            _df = _df.copy()
+            if all(_is_binary(subset[c]) for c in gtColumn):
+                def _onehot_label(row):
+                    active = [c for c in gtColumn if float(row[c]) == 1.0]
+                    return active[0] if len(active) == 1 else np.nan
+                _df[combined_col] = subset.apply(_onehot_label, axis=1)
+            else:
+                def _fmt(v):
+                    if pd.isna(v):
+                        return "NA"
+                    if isinstance(v, float) and v.is_integer():
+                        return str(int(v))
+                    return str(v)
+                _df[combined_col] = (
+                    subset.apply(lambda col: col.map(_fmt)).agg("_".join, axis=1)
+                )
+            gtColumn = combined_col
+
+        if gtColumn in _df.columns:
+            col_vals = get_array_from_df(_df, gtColumn)
+            if col_vals.dtype.kind in ("U", "S", "O"):
+                unique_vals = [v for v in pd.unique(col_vals) if not pd.isna(v)]
+                if not classMapping:
+                    if _label_order is not None:
+                        # use caller-supplied list order; append any unseen values after
+                        ordered = [v for v in _label_order if v in unique_vals]
+                        ordered += [v for v in unique_vals if v not in ordered]
+                    else:
+                        # single column: preserve first-appearance order from the data
+                        ordered = unique_vals
+                    str_to_int = {v: i + 1 for i, v in enumerate(ordered)}
+                    classMapping = {i: v for v, i in str_to_int.items()}
+                else:
+                    str_to_int = {v: k for k, v in classMapping.items()}
+                if _df is data_df:
+                    _df = _df.copy()
+                _df[gtColumn] = np.array(
+                    [str_to_int.get(v, np.nan) for v in col_vals], dtype=float
+                )
+
+        return _df, gtColumn, classMapping
 
     @staticmethod
     def _apply_common_setup(
@@ -266,10 +350,10 @@ class EmbeddingAnalysis:
         subplots_kwargs: dict = None,
         metadDataFramePath: str = None,
         classifier_method: str = "LogisticRegression",
+        **kwargs,
     ) -> None:
-        instance.gtColumn = gtColumn
+        instance._gtColumn_was_list = isinstance(gtColumn, list)
         instance.instancelabelColumn = instancelabelColumn
-        instance.classMapping = classMapping
         instance.save_dir = os.path.join(save_dir, "EmbeddingAnalysis") if save_dir is not None else None
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
@@ -280,6 +364,13 @@ class EmbeddingAnalysis:
             instance.data_df = instance.data_df.merge(data_df, on=instancelabelColumn, how="left")
             print(f"Metadata DataFrame loaded from: {metadDataFramePath}")
 
+        # Standardise label column(s) into a single integer column before getLabels runs.
+        if gtColumn is not None:
+            instance.data_df, gtColumn, classMapping = EmbeddingAnalysis._standardise_label_column(
+                instance.data_df, gtColumn, classMapping or {}
+            )
+        instance.gtColumn = gtColumn
+        instance.classMapping = classMapping or {}
 
         instance.dbscan = dbscan
         instance.leiden = leiden
@@ -292,8 +383,13 @@ class EmbeddingAnalysis:
         instance.classMappedColumn = "Mapped"
         instance.classColumn = default_class_column
         instance.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
-        instance.results_df = pd.DataFrame(index=instance.data_df.index)
-        instance.results_df[instancelabelColumn] = instance.data_df[instancelabelColumn]
+        scalar_cols = [
+            c for c in instance.data_df.columns
+            if instance.data_df[c].dtype.kind in ("f", "i", "u", "U", "S", "O")
+            and not instance.data_df[c].apply(lambda x: isinstance(x, (list, dict, np.ndarray))).any()
+        ]
+        instance.results_df = instance.data_df[scalar_cols].copy()
+
         instance.getLabels()
         print(f"Embeddings shape: {instance.embeddings.shape}")
 
@@ -303,8 +399,6 @@ class EmbeddingAnalysis:
 
     @property
     def _has_gt(self) -> bool:
-        if isinstance(self.gtColumn, list):
-            return all(c in self.data_df.columns for c in self.gtColumn)
         return self.gtColumn is not None and self.gtColumn in self.data_df.columns
 
     # ------------------------------------------------------------------ #
@@ -313,63 +407,14 @@ class EmbeddingAnalysis:
 
     def getLabels(self) -> None:
         n = len(self.data_df)
-        _gtColumn_was_list = isinstance(self.gtColumn, list)
 
-        if isinstance(self.gtColumn, list):
-            combined_col = "_".join(self.gtColumn)
-            subset = self.data_df[self.gtColumn]
-
-            # Detect one-hot encoded columns: each column only contains 0/1
-            # (handles int, float, bool, and string variants after JSON round-trip)
-            def _is_binary(col):
-                try:
-                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
-                except (ValueError, TypeError):
-                    return False
-
-            is_onehot = all(_is_binary(subset[c]) for c in self.gtColumn)
-
-            if is_onehot:
-                # Use the active column name as label; NaN where none or multiple active
-                def _onehot_label(row):
-                    active = [c for c in self.gtColumn if float(row[c]) == 1.0]
-                    if len(active) == 1:
-                        return active[0]
-                    return np.nan  # all-zero or multi-active → treated as unlabelled
-
-                self.data_df[combined_col] = subset.apply(_onehot_label, axis=1)
-            else:
-                def _fmt(v):
-                    if pd.isna(v):
-                        return "NA"
-                    if isinstance(v, float) and v.is_integer():
-                        return str(int(v))
-                    return str(v)
-
-                self.data_df[combined_col] = (
-                    subset.apply(lambda col: col.map(_fmt))
-                    .agg("_".join, axis=1)
-                )
-
-            self.gtColumn = combined_col
-
+        # Label column is already a single integer column at this point —
+        # _standardise_label_column in _apply_common_setup handled list→str and str→int.
         self.gtlabels: np.ndarray = (
             get_array_from_df(self.data_df, self.gtColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
-
-        if self._has_gt and self.gtlabels.dtype.kind in ('U', 'S', 'O'):
-            if not self.classMapping:
-                unique_vals = [v for v in pd.unique(self.gtlabels) if not pd.isna(v)]
-                str_to_int = {v: i + 1 for i, v in enumerate(sorted(unique_vals, key=str))}
-                self.classMapping = {i: v for v, i in str_to_int.items()}
-            else:
-                str_to_int = {v: k for k, v in self.classMapping.items()}
-            self.gtlabels = np.array(
-                [str_to_int.get(v, np.nan) for v in self.gtlabels], dtype=float
-            )
-            self.data_df[self.gtColumn] = self.gtlabels
 
         valid_mask = ~pd.isna(self.gtlabels)
         if 0 in self.gtlabels[valid_mask]:
@@ -378,14 +423,15 @@ class EmbeddingAnalysis:
 
         self.instancelabels: np.ndarray = get_array_from_df(self.data_df, self.instancelabelColumn)
         nan_mask = ~pd.isna(self.gtlabels)
-        # When gtColumn was a list, additionally exclude zero/inactive rows so that
-        # only explicitly labelled (active) samples participate in training.
-        # Mutual exclusivity is already guaranteed upstream: _onehot_label returns
-        # NaN for multi-active rows, so they are caught by nan_mask as well.
-        if _gtColumn_was_list:
+        # When gtColumn was originally a list (one-hot), additionally exclude zero/inactive
+        # rows so that only explicitly labelled samples participate in training.
+        if self._gtColumn_was_list:
             train_mask = nan_mask & (self.gtlabels > 0)
         else:
             train_mask = nan_mask
+        
+
+        # TODO: Maybe we need to standardise the labels gt and also the whole embeddings space
         if train_mask.sum() < n:
             warnings.warn(
                 f"Labels contain {n - train_mask.sum()} inactive/NaN value(s). "
@@ -553,13 +599,15 @@ class EmbeddingAnalysis:
             index=self.data_df.index,
         )
 
-    def UMAPResults(self):
+    def UMAPResults(self, classColoumn: str | None = None):
+        col = classColoumn if classColoumn is not None else self.classColumn
         self.concatDF(self.UMAP())
-        return self.specialScatter(
+        return EmbeddingAnalysis.specialScatter(
+            self,
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
-            classColoumn=self.classColumn,
-            legend_title="UMAP - {}".format(self.gtColumn if self._has_gt else self.classColumn),
+            classColoumn=col,
+            legend_title="UMAP - {}".format(self.gtColumn if self._has_gt else col),
             save_dir=self.save_dir,
         )
 
@@ -567,12 +615,72 @@ class EmbeddingAnalysis:
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
 
-    def vizualisePCA(self, pcas=None, title=""):
-        return self.specialScatter(
+    def plot_distance_matrix(self, metric: str = "cosine") -> Figure:
+        """Plot a pairwise distance matrix sorted by GT class label.
+
+        Uses the labelled training embeddings (``trainEmbeddings`` /
+        ``traingt``).  Each row is normalised to sum to 1 so relative
+        distances are comparable across rows with different scales.
+        """
+        from scipy.spatial.distance import cdist
+
+        sort = np.argsort(self.traingt)
+        feats = self.trainEmbeddings[sort]
+        labels = self.traingt[sort]
+        classes = np.unique(labels)
+        print(f"[plot_distance_matrix] {len(classes)} classes found in traingt: "
+              f"{[self.classMapping.get(int(c), int(c)) for c in classes]}")
+
+        D = cdist(feats, feats, metric=metric)  # type: ignore[call-overload]
+        D = D / (D.sum(axis=1, keepdims=True) + 1e-12)
+
+        tick_pos, tick_lbl, boundaries = [], [], []
+        for i, cls in enumerate(classes):
+            positions = np.where(labels == cls)[0]
+            tick_pos.append(positions.mean())
+            tick_lbl.append(str(self.classMapping.get(int(cls), int(cls))))
+            if i < len(classes) - 1:
+                boundaries.append(positions[-1] + 0.5)
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.grid(False)
+        im = ax.imshow(D, aspect="auto", cmap="viridis", interpolation="nearest")
+        plt.colorbar(im, ax=ax, label=f"{metric} distance (row-normalised)")
+
+        for b in boundaries:
+            ax.axhline(b, color="white", lw=0.8, alpha=0.6)
+            ax.axvline(b, color="white", lw=0.8, alpha=0.6)
+
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(tick_pos)
+        ax.set_yticklabels(tick_lbl, fontsize=8)
+        ax.set_xlabel("Class")
+        ax.set_ylabel("Class")
+        ax.set_title(
+            f"Pairwise {metric} distance matrix (row-normalised)\n"
+            f"({len(feats)} samples, sorted by GT label)"
+        )
+        plt.tight_layout()
+
+        save_dir: str | None = getattr(self, "save_dir", None)  # type: ignore[assignment]
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"distance_matrix_{metric}.png"), dpi=300)
+
+        return fig
+
+    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None):
+        col = classColoumn if classColoumn is not None else self.classColumn
+        # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
+        # columns are never temporarily zeroed by subclass overrides, allowing
+        # every sample to be coloured by its predicted class.
+        return EmbeddingAnalysis.specialScatter(
+            self,
             xColumn="PCA x", yColumn="PCA y",
             xaxis_title="PC 1", yaxis_title="PC 2",
-            classColoumn=self.classColumn,
-            legend_title="PC - {}".format(self.gtColumn if self._has_gt else self.classColumn),
+            classColoumn=col,
+            legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
             save_dir=self.save_dir,
         )
 
@@ -650,8 +758,10 @@ class EmbeddingAnalysis:
         maskVol = skimage.io.imread(maskVolumePath)
         mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
 
-        if self.classColumn == classColoumn:
-            mapping_array[self.instancelabels] = self.predLabels.astype(int)
+        if self.classColumn == classColoumn and classColoumn in self.results_df.columns:
+            # Use results_df so that predictions for all cells are reflected,
+            # including those without a ground-truth label.
+            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(int)
         elif self.gtColumn == classColoumn:
             mapping_array[self.instancelabels] = self.gtlabels.astype(int)
         elif classColoumn in self.results_df.columns:

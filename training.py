@@ -144,7 +144,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         super().__init__(
             accelerator=self.device,
             fast_dev_run=self.hparams.fast_dev_run,
-            deterministic=True,
+            deterministic="warn",
             max_epochs=max_epochs,
             log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
@@ -222,21 +222,35 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             self.datasetConfig = Namespace(**datasetConfig)
             return self.hparams
 
+
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = torch.load(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
-        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        model_state = module.state_dict()
+        # strict=False alone does not protect against shape mismatches — PyTorch
+        # still errors when a key exists in both dicts with differing tensor shapes.
+        shape_skipped = [
+            k for k, v in state_dict.items()
+            if k in model_state and v.shape != model_state[k].shape
+        ]
+        compatible = {k: v for k, v in state_dict.items() if k not in shape_skipped}
+        missing, unexpected = module.load_state_dict(state_dict=compatible, strict=False)
         print(f"[getModel] Loaded weights from: {ckptPath}")
+        if shape_skipped:
+            print(f"  Shape-mismatched keys skipped ({len(shape_skipped)}): "
+                  f"{shape_skipped[:5]}{'...' if len(shape_skipped) > 5 else ''}")
         if missing:
             print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
         if unexpected:
             print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
         return module
+    
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
         """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
 
         Handles both raw state dicts and Lightning checkpoints (nested under "state_dict").
-        Uses strict=False and reports missing/unexpected keys so shape mismatches are visible.
+        Filters out shape-mismatched keys before loading so architecture changes in the
+        tokenizer or decoder head don't block the backbone weights from loading.
         Raises FileNotFoundError if the path is set but does not exist.
         """
         weights_path: str = getattr(self.hparams, "weightsCkptPath", "") or ""

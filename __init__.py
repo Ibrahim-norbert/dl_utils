@@ -43,7 +43,8 @@ LM_DF = None
 NUCL_DICT = None
 CELL_DICT = None
 
-NUCLEUS_LABEL_KEY = "label_id"
+OLD_LABEL_KEY = "label_id"
+NUCLEUS_LABEL_KEY = OLD_LABEL_KEY
 LABEL_KEY = "labels"
 EMBED_KEY = "Embeddings"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
