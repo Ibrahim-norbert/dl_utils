@@ -453,17 +453,19 @@ class EmbeddingAnalysis:
     # Clustering                                                           #
     # ------------------------------------------------------------------ #
 
-    def performDBSCAN(self, preds, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
+    def performDBSCAN(self, embeddings, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
+        embeddings = StandardScaler().fit_transform(embeddings)
         clustering: DBSCAN = DBSCAN(
             eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)
-        ).fit(preds)
+        ).fit(embeddings)
         self.classColumn = "DBSCAN_cluster"
         labels = clustering.labels_.reshape(*shape).astype(int) + 1
+        self.predLabels = labels
         return labels
 
     def performLeiden(
         self,
-        preds: np.ndarray,
+        embeddings: np.ndarray,
         shape: tuple,
         resolution: float = 1.0,
         n_iterations: int = 2,
@@ -472,9 +474,9 @@ class EmbeddingAnalysis:
     ) -> np.ndarray:
         import anndata as ad
         import scanpy
-
-        labels = np.zeros(preds.shape[0])
-        embedding = ad.AnnData(X=preds)
+        embeddings = StandardScaler().fit_transform(embeddings)
+        labels = np.zeros(embeddings.shape[0])
+        embedding = ad.AnnData(X=embeddings)
         scanpy.pp.neighbors(
             embedding, n_neighbors=n_neighbors, n_pcs=None,
             metric=distance_metric, random_state=111, use_rep="X" # type: ignore[arg-type]
@@ -488,38 +490,19 @@ class EmbeddingAnalysis:
         labels = labels.astype(int).reshape(*shape) + 1
         self.predLabels = labels.flatten()
         return labels
-    def getClusters(self, preds, DBSCAN_eps=0.5, DBSCAN_min_samples=10):
-        shape: tuple = preds.shape[:-1]
-        preds = StandardScaler().fit_transform(preds)
+    
+    def cluster(self, **kwargs):
+        shape: tuple = self.embeddings.shape[:-1]
+        
         if self.leiden:
-            return self.performLeiden(
-                preds, shape,
-                resolution=self.leiden_resolution,
-                n_iterations=self.leiden_n_iterations,
-                n_neighbors=self.leiden_n_neighbors,
-                distance_metric=self.leiden_distance_metric,
-            )
-        return self.performDBSCAN(preds=preds, shape=shape,
-                                   DBSCAN_eps=DBSCAN_eps, DBSCAN_min_samples=DBSCAN_min_samples)
+            labels = self.performLeiden(embeddings=self.embeddings, shape=shape,**kwargs)
 
-    def clustering(self, resolution: float, n_iterations: int, n_neighbors: int,
-                   distance_metric: str = "euclidean"):
-        import anndata as ad
-        import scanpy
+        else:
+            labels = self.performDBSCAN(embeddings=self.embeddings, shape=shape,**kwargs)
 
-        labels = np.zeros(self.embeddings.shape[0])
-        embedding = ad.AnnData(X=self.embeddings)
-        scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors, n_pcs=None,
-                            metric=distance_metric, random_state=111)
-        scanpy.tl.leiden(embedding, resolution=resolution,
-                         random_state=111, n_iterations=n_iterations)
-        for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
-            indices = embedding.obs[embedding.obs["leiden"] == sub_label].index.astype(int)
-            labels[indices] = indx
-        self.predLabels = labels.astype(int) + 1
-        self.results_df[self.classColumn] = self.predLabels
-        self.classColumn = "leiden_cluster"
-        return self.predLabels
+        self.results_df[self.classColumn] = labels
+
+        return labels
 
     # ------------------------------------------------------------------ #
     # Dimensionality reduction                                             #
@@ -588,7 +571,8 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./", precomputed_colors: bool = False, **kwargs):
+                       save_dir: str = "./", precomputed_colors: bool = False,
+                       show_axes: bool = False, color_background: bool = False, **kwargs):
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -609,10 +593,13 @@ class EmbeddingAnalysis:
             classLabels = sorted(plot_df[classColoumn].unique().astype(int).tolist())
 
             def _label(k: int) -> str:
+                if k == 0 and color_background:
+                    return "background"
                 return mapping.get(k, self.classMapping.get(k, str(k)))
 
             color_map = {_label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
-            color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
+            if not color_background:
+                color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
             plot_df[classColoumn] = plot_df[classColoumn].astype(int).map(_label)
 
             fig = px.scatter(
@@ -622,8 +609,12 @@ class EmbeddingAnalysis:
             )
 
         fig.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
+                       visible=True, showline=show_axes, linecolor="black",
+                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
+                       visible=True, showline=show_axes, linecolor="black",
+                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=True,
