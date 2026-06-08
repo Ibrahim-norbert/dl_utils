@@ -22,7 +22,7 @@ from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from dl_utils import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_KEY
-from dl_utils.vizualizations import costumMatplotlib
+from dl_utils.vizualizations import CustomMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
 
 sns.set_context("poster")
@@ -578,7 +578,7 @@ class EmbeddingAnalysis:
 
     @staticmethod
     def vizualiseCoord(points: dict, title="", labels=None, save_dir=None, **subplots_kwargs):
-        return costumMatplotlib.simpleScatter(
+        return CustomMatplotlib.simpleScatter(
             points, labels, title=title, save_dir=save_dir, **subplots_kwargs,
         )[0]
 
@@ -727,7 +727,7 @@ class EmbeddingAnalysis:
                 gw = ot.gromov.gromov_wasserstein2(Ci, Cj, pi, pj, "square_loss", verbose=False)
                 gw_matrix[i, j] = gw_matrix[j, i] = gw
 
-        fig, _ = costumMatplotlib.simpleHeatmap(
+        fig, _ = CustomMatplotlib.simpleHeatmap(
             gw_matrix,
             xticklabels=class_names,
             yticklabels=class_names,
@@ -773,7 +773,7 @@ class EmbeddingAnalysis:
                        + _kl(means[cj], covs[cj], means[ci], covs[ci])) / 2
                 kl_matrix[i, j] = kl_matrix[j, i] = sym
 
-        fig, _ = costumMatplotlib.simpleHeatmap(
+        fig, _ = CustomMatplotlib.simpleHeatmap(
             kl_matrix,
             xticklabels=class_names,
             yticklabels=class_names,

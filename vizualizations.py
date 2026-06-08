@@ -23,7 +23,7 @@ class FeatureVizualizer:
 
 
 
-class costumMatplotlib:
+class CustomMatplotlib:
     def __init__(self, style_set_context="paper") -> None:
 
         # self.figsize = (12,6)
@@ -113,14 +113,14 @@ class costumMatplotlib:
         sns.set_context("paper", font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
         if labels is not None:
-            ax: Axes = costumMatplotlib.subScatter(
+            ax: Axes = CustomMatplotlib.subScatter(
                 ax=ax,
-                color=costumMatplotlib.labels2colors(labels),
+                color=CustomMatplotlib.labels2colors(labels),
                 points=points,
                 **kwargs,
             )
         else:
-            ax: Axes = costumMatplotlib.subScatter(
+            ax: Axes = CustomMatplotlib.subScatter(
                 ax=ax, points=points, **kwargs)
 
         ax.set_title(title)
@@ -178,7 +178,7 @@ class costumMatplotlib:
         # fig, ax = plt.subplots(1,1, figsize=plot.figsize)
         fig, ax = plt.subplots(1, 1)
 
-        costumMatplotlib.subImshow(ax, matrix, title)
+        CustomMatplotlib.subImshow(ax, matrix, title)
 
         fig.tight_layout()
 
@@ -282,7 +282,7 @@ class costumMatplotlib:
                     subplot_title: str = ""
 
                 ax.set_title(subplot_title)
-                costumMatplotlib.subScatter(
+                CustomMatplotlib.subScatter(
                     ax,
                     data[img_index],
                     label=labels[img_index] if labels is not None else None,
@@ -311,11 +311,11 @@ class costumMatplotlib:
         # save_path = os.path.join(save_dir, f"NN_E_PCA_plot_{file_name}.png")
 
         # mkdir(os.path.dirname(save_dir), os.path.basename(save_dir))
-        costumMatplotlib.saveFig(
+        CustomMatplotlib.saveFig(
             fig,
             save_dir=save_dir,
             title=title,
-            func=costumMatplotlib.square_multi_subplot,
+            func=CustomMatplotlib.square_multi_subplot,
         )
 
         return fig

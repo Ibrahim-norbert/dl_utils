@@ -62,10 +62,10 @@ class BaseModelClass(pl.LightningModule):
     def collate_fn(**kwargs):
         return default_collate(**kwargs)
 
-    def whatDevice(self):
+    def get_device(self):
         return next(self.parameters()).device
 
-    def setsave_dir(self):
+    def set_save_dir(self):
 
         dirName = (self.__class__.__name__,)
 

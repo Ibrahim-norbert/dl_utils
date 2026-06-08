@@ -1,6 +1,12 @@
 # =============================================================================
 # Import third-party libraries
 import skimage.io
+
+# Column layout for BBoxes arrays: [label, z_min, z_max, y_min, y_max, x_min, x_max]
+BBOX_LABEL_IDX = 0
+BBOX_Z_MIN, BBOX_Z_MAX = 1, 2
+BBOX_Y_MIN, BBOX_Y_MAX = 3, 4
+BBOX_X_MIN, BBOX_X_MAX = 5, 6
 from numpy import ndarray
 from skimage import io, transform, exposure
 import numpy as np
@@ -73,22 +79,18 @@ class BBoxes:
         :param box2: Numpy array with the second bounding box.
         :return: A float with the IoU value between the two bounding boxes.
         """
-        # Calculate the intersection box
-        x1 = max(box1[1], box2[1])
-        x2 = min(box1[2], box2[2])
-        y1 = max(box1[3], box2[3])
-        y2 = min(box1[4], box2[4])
+        z_min = max(box1[BBOX_Z_MIN], box2[BBOX_Z_MIN])
+        z_max = min(box1[BBOX_Z_MAX], box2[BBOX_Z_MAX])
+        y_min = max(box1[BBOX_Y_MIN], box2[BBOX_Y_MIN])
+        y_max = min(box1[BBOX_Y_MAX], box2[BBOX_Y_MAX])
 
-        # Calculate intersection area
-        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        intersection = max(0, z_max - z_min) * max(0, y_max - y_min)
 
-        # If intersection is 0 IoU is 0
         if intersection == 0:
             return 0
 
-        # Calculate union area
-        area1 = (box1[2] - box1[1]) * (box1[4] - box1[3])
-        area2 = (box2[2] - box2[1]) * (box2[4] - box2[3])
+        area1 = (box1[BBOX_Z_MAX] - box1[BBOX_Z_MIN]) * (box1[BBOX_Y_MAX] - box1[BBOX_Y_MIN])
+        area2 = (box2[BBOX_Z_MAX] - box2[BBOX_Z_MIN]) * (box2[BBOX_Y_MAX] - box2[BBOX_Y_MIN])
         union = area1 + area2 - intersection
 
         # Calculate and return IoU
@@ -134,8 +136,7 @@ class BBoxes:
         # Get the IoU matrix
         overlapping = np.where(self.iou_matrix > 0)
 
-        # Get the identities from the overlapping indexes
-        identities = self.bboxes[np.unique(overlapping), 0]
+        identities = self.bboxes[np.unique(overlapping), BBOX_LABEL_IDX]
 
         return identities
 
@@ -244,14 +245,14 @@ class BBoxes:
         Returns the identities of the bounding boxes.
         :return: numpy array with the identities of the bounding boxes.
         """
-        return self.bboxes[:, 0]
+        return self.bboxes[:, BBOX_LABEL_IDX]
 
     def idx(self) -> np.array:
         """
         Returns the indexes in base 0 for the bounding boxes.
         :return: numpy array with the indexes of the bounding boxes.
         """
-        return self.bboxes[:, 0] - 1
+        return self.bboxes[:, BBOX_LABEL_IDX] - 1
 
     # Bounding box properties
     def get_sides(self) -> np.array:
@@ -259,31 +260,30 @@ class BBoxes:
         Returns the sides of the bounding boxes.
         :return: numpy array with the sides of the bounding boxes.
         """
-        # Get the sides of the bounding boxes
-        return np.array([self.bboxes[:, 0],
-                         self.bboxes[:, 2] - self.bboxes[:, 1],
-                         self.bboxes[:, 4] - self.bboxes[:, 3],
-                         self.bboxes[:, 6] - self.bboxes[:, 5]]).T
+        return np.array([self.bboxes[:, BBOX_LABEL_IDX],
+                         self.bboxes[:, BBOX_Z_MAX] - self.bboxes[:, BBOX_Z_MIN],
+                         self.bboxes[:, BBOX_Y_MAX] - self.bboxes[:, BBOX_Y_MIN],
+                         self.bboxes[:, BBOX_X_MAX] - self.bboxes[:, BBOX_X_MIN]]).T
 
     def get_volume(self) -> np.ndarray:
         """
-        Returns the areas of the bounding boxes.
-        :return: numpy array with the areas of the bounding boxes.
+        Returns the volumes of the bounding boxes.
+        :return: numpy array with the volumes of the bounding boxes.
         """
-        # Get the areas of the bounding boxes
-        return np.array([self.bboxes[:, 0],
-                         (self.bboxes[:, 2] - self.bboxes[:, 1]) *
-                         (self.bboxes[:, 4] - self.bboxes[:, 3]) * (self.bboxes[:, 6] - self.bboxes[:, 5])]).T
+        return np.array([self.bboxes[:, BBOX_LABEL_IDX],
+                         (self.bboxes[:, BBOX_Z_MAX] - self.bboxes[:, BBOX_Z_MIN]) *
+                         (self.bboxes[:, BBOX_Y_MAX] - self.bboxes[:, BBOX_Y_MIN]) *
+                         (self.bboxes[:, BBOX_X_MAX] - self.bboxes[:, BBOX_X_MIN])]).T
 
     def get_ratios(self) -> np.ndarray:
         """
         Returns the aspect ratios of the bounding boxes.
         :return: numpy array with the aspect ratios of the bounding boxes.
         """
-        # Get the aspect ratios of the bounding boxes
-        ratios = np.array((self.bboxes[:, 2] - self.bboxes[:, 1]) / (self.bboxes[:, 4] - self.bboxes[:, 3]))
+        ratios = np.array((self.bboxes[:, BBOX_Z_MAX] - self.bboxes[:, BBOX_Z_MIN]) /
+                          (self.bboxes[:, BBOX_Y_MAX] - self.bboxes[:, BBOX_Y_MIN]))
 
-        return np.array(([self.bboxes[:, 0], ratios]))
+        return np.array(([self.bboxes[:, BBOX_LABEL_IDX], ratios]))
 
     def get_centers(self) -> np.ndarray:
         """
@@ -291,16 +291,10 @@ class BBoxes:
         :return: numpy array with the centers of the bounding boxes.
         """
 
-        x1 = self.bboxes[:, -2][0]
-        x2 = self.bboxes[:, -1][0]
-
-        # Get the centers of the bounding boxes
-        values = np.stack([self.bboxes[:, 0],
-                         np.floor((self.bboxes[:, -6] + self.bboxes[:, -5]) / 2).astype(int),
-                         np.floor((self.bboxes[:, -4] + self.bboxes[:, -3]) / 2).astype(int),
-                         np.floor((self.bboxes[:, -2] + self.bboxes[:, -1]) / 2).astype(int)], axis=-1)
-
-        return values
+        return np.stack([self.bboxes[:, BBOX_LABEL_IDX],
+                         np.floor((self.bboxes[:, BBOX_Z_MIN] + self.bboxes[:, BBOX_Z_MAX]) / 2).astype(int),
+                         np.floor((self.bboxes[:, BBOX_Y_MIN] + self.bboxes[:, BBOX_Y_MAX]) / 2).astype(int),
+                         np.floor((self.bboxes[:, BBOX_X_MIN] + self.bboxes[:, BBOX_X_MAX]) / 2).astype(int)], axis=-1)
 
     def get(self,
             value: str = "area") -> np.ndarray:
@@ -336,8 +330,8 @@ class BBoxes:
         # Get elements that are not zero
         x, y = np.where(iou_matrix > 0)
         v = iou_matrix[x, y ]
-        x = self.bboxes[x, 0]
-        y = self.bboxes[y, 0]
+        x = self.bboxes[x, BBOX_LABEL_IDX]
+        y = self.bboxes[y, BBOX_LABEL_IDX]
 
         return np.array([x, y]).T, v
 
@@ -349,7 +343,7 @@ class BBoxes:
         :return: Object of type BBoxes with the subset bounding boxes.
         """
         # Find indices where the values in the first column match the filter_array
-        return BBoxes(self.bboxes[np.isin(self.bboxes[:, 0], indexes)], self.mask, self.image)
+        return BBoxes(self.bboxes[np.isin(self.bboxes[:, BBOX_LABEL_IDX], indexes)], self.mask, self.image)
 
     # Bounding box filters
     def filter(self,
@@ -380,13 +374,12 @@ class BBoxes:
         Removes the bounding boxes that are on the edge of the image.
         :return: BBoxes object with the bounding boxes that are not on the edge of the image.
         """
-        # Removes the bounding boxes that are on the edge of the image
-        idx = np.where((self.bboxes[:, 1] >= 0) &
-                       (self.bboxes[:, 2] < self.mask.shape[0]) &
-                       (self.bboxes[:, 3] > 0) &
-                       (self.bboxes[:, 4] < self.mask.shape[1]) &
-                       (self.bboxes[:, 5] > 0) &
-                       (self.bboxes[:, 6] < self.mask.shape[2]))[0]
+        idx = np.where((self.bboxes[:, BBOX_Z_MIN] >= 0) &
+                       (self.bboxes[:, BBOX_Z_MAX] < self.mask.shape[0]) &
+                       (self.bboxes[:, BBOX_Y_MIN] > 0) &
+                       (self.bboxes[:, BBOX_Y_MAX] < self.mask.shape[1]) &
+                       (self.bboxes[:, BBOX_X_MIN] > 0) &
+                       (self.bboxes[:, BBOX_X_MAX] < self.mask.shape[2]))[0]
 
         # Returns the bounding boxes
         return BBoxes(self.bboxes[idx], self.mask, self.image)
@@ -492,10 +485,14 @@ class BBoxes:
         assert isinstance(self.image, np.ndarray), "Image must be array"
 
         # Get the single cell image from either mask or image, if neither is selected raise an error
+        bb = self.bboxes[idx]
+        slices = (slice(bb[BBOX_Z_MIN], bb[BBOX_Z_MAX]),
+                  slice(bb[BBOX_Y_MIN], bb[BBOX_Y_MAX]),
+                  slice(bb[BBOX_X_MIN], bb[BBOX_X_MAX]))
         if source == "mask":
-            sc = self.mask[self.bboxes[idx][1]:self.bboxes[idx][2], self.bboxes[idx][3]:self.bboxes[idx][4], self.bboxes[idx][5]:self.bboxes[idx][6]]
+            sc = self.mask[slices]
         elif source == "image":
-            sc = self.image[self.bboxes[idx][1]:self.bboxes[idx][2], self.bboxes[idx][3]:self.bboxes[idx][4], self.bboxes[idx][5]:self.bboxes[idx][6]]
+            sc = self.image[slices]
         else:
             raise NotImplementedError("Invalid parameter, please select from 'mask' or 'image'.")
 

@@ -21,6 +21,7 @@ from torch import inf
 from torch.utils.data import DataLoader, Dataset
 
 from dl_utils import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
+from dl_utils.util_base import save2DFcolumn
 
 
 
@@ -468,54 +469,6 @@ def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
     
     print(f"The loss is {loss}")
     return output_dict
-
-def save2DFcolumn(
-    sorted_results: list,
-    sorted_nucl_labels: np.ndarray,
-    dataframe: pd.DataFrame,
-    column_name: str = "Embedding"
-) -> pd.DataFrame:
-    """
-    Adds a new column to the dataframe with values from sorted_results,
-    mapped according to sorted_nucl_labels.
-
-    Parameters:
-    - sorted_results: List of values to be added as the new column.
-    - sorted_nucl_labels: 1D or 2D numpy array of nucleus labels.
-    - dataframe: The DataFrame to which the new column will be added.
-    - column_name: The name of the new column (default is "Embedding").
-
-    Returns:
-    - Updated DataFrame with the new column.
-    """
-
-    if not isinstance(sorted_nucl_labels, np.ndarray):
-        sorted_nucl_labels = np.array(sorted_nucl_labels)
-    # Flatten sorted_nucl_labels if it has only one column (2D array with shape [n, 1])
-    if sorted_nucl_labels.ndim == 2:
-        if sorted_nucl_labels.shape[0] == 1 or sorted_nucl_labels.shape[1] == 1:
-            if len(sorted_nucl_labels) == sorted_nucl_labels.size:
-                sorted_nucl_labels = sorted_nucl_labels.flatten()
-            else:
-                raise  ValueError("Sorted nucleus labels and sorted results do not match in length")
-        else:
-            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
-
-    if isinstance(sorted_results, np.ndarray):
-
-        if sorted_results.ndim > 2:
-            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
-        else:
-            sorted_results = sorted_results.tolist()
-
-    # Create a dictionary for fast lookup of results by label
-    label_to_result = dict(zip(sorted_nucl_labels, sorted_results))
-
-    # Map each NUCLEUS_LABEL_KEY in the dataframe to its corresponding result, or NaN if not found
-    dataframe[column_name] = dataframe.label_id.map(label_to_result).fillna(np.nan)
-
-    return dataframe
-
 
 def savedataframe(dataframe, save_dir,  **kwargs):
     # Remove unnamed columns
