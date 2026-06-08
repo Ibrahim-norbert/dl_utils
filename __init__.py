@@ -1,4 +1,7 @@
 # Additional Configuration Variables
+
+
+
 RES: list[float] = [0.025, 0.01, 0.01]
 HR_SHAPE: list[int] = [11416, 25916, 27499]
 AXES: list[str] = ['z', 'y', 'x']
@@ -57,4 +60,3 @@ FEATURES_KEY = "features"
 AVG_TOKEN_FEATURES_KEY = "avg_token_feature"
 MASKED_FEATURES_KEY = "masked_features"
 MASKED_AVG_TOKEN_FEATURES_KEY = "masked_avg_token_feature"
-

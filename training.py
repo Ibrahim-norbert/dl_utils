@@ -151,6 +151,10 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
             accumulate_grad_batches=accumulate_grad_batches,
+            # Skip the pre-training sanity-check validation pass: a validation
+            # error there would otherwise abort the run before any training
+            # metric is flushed, leaving TensorBoard empty.
+            num_sanity_val_steps=1,
             **args,
         )
 
@@ -527,17 +531,40 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         self.save_dir = wandb_logger.log_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
-        
+
+        print(
+            f"\n[TensorBoard] logging to: {self.save_dir}\n"
+            f"[TensorBoard] view with:  tensorboard --logdir \"{self.save_dir}\"\n",
+            flush=True,
+        )
+
         self.saveConfig()
 
+        # Top-k best checkpoints, ranked by the monitored metric.
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.save_dir,
             save_top_k=self.hparams.ModelCheckpoint_save_top_k,
             monitor=self.hparams.ModelCheckpoint_monitor,
             mode=self.hparams.ModelCheckpoint_mode,
-            save_last=True,
             save_on_train_epoch_end=True,
+            # save_last intentionally omitted: in Lightning 2.6 a monitor-coupled
+            # callback only writes last.ckpt on epochs where a new top-k file is
+            # saved (see ModelCheckpoint.on_train_epoch_end guard), so it freezes
+            # once the metric stops improving. latest_checkpoint_callback below
+            # captures the true final-epoch model instead.
         )
+
+        # Genuine final-epoch checkpoint. monitor=None routes through
+        # _save_none_monitor_checkpoint, which saves every epoch (rolling, keeps
+        # the most recent 1) independent of the monitored metric.
+        latest_checkpoint_callback = ModelCheckpoint(
+            dirpath=self.save_dir,
+            monitor=None,
+            save_top_k=1,
+            save_on_train_epoch_end=True,
+            filename="last-{epoch:03d}-{step}",
+        )
+        self.latest_checkpoint_callback = latest_checkpoint_callback
         
         early_stopping_callback = SafeEarlyStopping(
             monitor=self.hparams.EarlyStopping_monitor,
@@ -547,7 +574,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         # TODO: Hack for now until smarter config parsing
         args = {
-            "callbacks": [checkpoint_callback, early_stopping_callback, DeviceStatsMonitor(cpu_stats=False)],
+            "callbacks": [checkpoint_callback, latest_checkpoint_callback, early_stopping_callback, DeviceStatsMonitor(cpu_stats=False)],
             "logger": wandb_logger,
         }
 
@@ -675,7 +702,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         args = cls.get_args().parse_args()
         if getattr(args, "num_workers", None) is None:
             num_threads = os.cpu_count()
-            args.num_workers = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            base = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            # Windows spawns each worker (re-importing torch's full CUDA DLL stack);
+            # too many concurrent loads exhaust the commit limit -> WinError 1114 (shm.dll).
+            cap = 4 if sys.platform == "win32" else base
+            args.num_workers = min(base, cap)
         print(f"CPU threads (num_workers): {args.num_workers}")
 
         args_dict = vars(args)
@@ -723,7 +754,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         except:
             print(f"Exited prematurely with exception: {full_stack()}")
-            self.hparams.ckptPath = self.checkpoint_callback.last_model_path
+            # latest_checkpoint_callback (monitor=None) stores its rolling
+            # final-epoch file in best_model_path; the top-k callback no longer
+            # tracks last_model_path.
+            self.hparams.ckptPath = self.latest_checkpoint_callback.best_model_path
 
         finally:
             self.saveConfig()
