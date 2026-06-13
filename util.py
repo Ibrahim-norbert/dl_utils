@@ -707,32 +707,38 @@ def remove(path):
 
 def patchify(vol, patch_size):
     """
-    Extract patches from the input volume.
+    Extract patches from the input volume, agnostic to 2D or 3D inputs.
 
     Parameters:
-    vol: numpy.ndarray of shape (Z, Y, X)
-        The input volume with equal Z, Y, X dimensions divisible by patch_size.
+    vol: numpy.ndarray of shape (Y, X) for 2D or (Z, Y, X) for 3D
+        Each spatial dimension must be divisible by patch_size.
 
     Returns:
-    numpy.ndarray of shape (L, patch_size, patch_size, patch_size)
-        L = (Z/p) * (Y/p) * (X/p)
+    numpy.ndarray of shape (L, *([patch_size] * ndim))
+        2D: (L, p, p)      with L = (Y/p) * (X/p)
+        3D: (L, p, p, p)   with L = (Z/p) * (Y/p) * (X/p)
     """
-    Z, Y, X = vol.shape
-
     p = patch_size
+    ndim = vol.ndim
 
-    assert Z == Y == X and Z % p == 0, \
-        "Input dimensions must be equal and divisible by the patch size."
+    assert all(s % p == 0 for s in vol.shape), \
+        f"Input dimensions {vol.shape} must be divisible by the patch size {p}."
 
-    d = h = w = vol.shape[1] // p
+    grid = tuple(s // p for s in vol.shape)  # patches per spatial axis
 
-    # Reshape the volume to include patch dimensions
-    x = vol.reshape(d, p, h, p, w, p)
+    # Reshape so each spatial axis splits into (grid_i, p):
+    #   2D: (h, p, w, p)      3D: (d, p, h, p, w, p)
+    split_shape = tuple(x for g in grid for x in (g, p))
+    x = vol.reshape(split_shape)
 
-    # Rearrange dimensions to group patch elements together
-    x = np.einsum('dfhpwq->dhwfpq', x)
+    # Group all grid axes first, then all patch axes:
+    #   2D: 'hpwq->hwpq'      3D: 'dfhpwq->dhwfpq'
+    src = ''.join(chr(ord('a') + i) for i in range(2 * ndim))
+    grid_axes = src[0::2]   # even positions = grid indices
+    patch_axes = src[1::2]  # odd positions = within-patch indices
+    x = np.einsum(f'{src}->{grid_axes + patch_axes}', x)
 
-    return x.reshape(d * h * w, p, p, p)
+    return x.reshape(int(np.prod(grid)), *([p] * ndim))
 
 
 def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:

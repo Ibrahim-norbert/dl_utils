@@ -179,8 +179,12 @@ class BaseVolumeCollectionDataset(BaseDataset):
                 f"Dataset CSV is missing required columns: {missing}. "
                 f"Expected: {required_cols}, found: {csv_df.columns.tolist()}"
             )
-            common = os.path.commonpath(csv_df[self.volumePathColumn].tolist())
-            self.datasetDir = common if os.path.isdir(common) else os.path.dirname(common)
+            try:
+                common = os.path.commonpath(csv_df[self.volumePathColumn].tolist())
+                self.datasetDir = common if os.path.isdir(common) else os.path.dirname(common)
+            except ValueError:
+                # Paths span multiple drives — fall back to the CSV's own directory
+                self.datasetDir = os.path.dirname(os.path.abspath(datasetDataframePath))
             self.createDatasetFromDataFramePath(datasetDataframePath)
         else:
             assert datasetDir is not None, (

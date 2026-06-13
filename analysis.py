@@ -599,7 +599,8 @@ class EmbeddingAnalysis:
             index=self.data_df.index,
         )
 
-    def UMAPResults(self, classColoumn: str | None = None):
+    def UMAPResults(self, classColoumn: str | None = None,
+                    marker_size: int = 4, background_color: str = "rgba(0,0,0,0)"):
         col = classColoumn if classColoumn is not None else self.classColumn
         self.concatDF(self.UMAP())
         return EmbeddingAnalysis.specialScatter(
@@ -609,6 +610,8 @@ class EmbeddingAnalysis:
             classColoumn=col,
             legend_title="UMAP - {}".format(self.gtColumn if self._has_gt else col),
             save_dir=self.save_dir,
+            marker_size=marker_size,
+            background_color=background_color,
         )
 
     # ------------------------------------------------------------------ #
@@ -693,7 +696,8 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./"):
+                       save_dir: str = "./", marker_size: int = 4,
+                       background_color: str = "rgba(0,0,0,0)"):
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -719,11 +723,12 @@ class EmbeddingAnalysis:
             color_discrete_map=color_map,
             category_orders={classColoumn: [_label(k) for k in classLabels]},
         )
+        fig.update_traces(marker=dict(size=marker_size))
         fig.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
-            paper_bgcolor="rgba(0,0,0,0)",
-            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor=background_color,
+            plot_bgcolor=background_color,
             showlegend=True,
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
@@ -890,6 +895,426 @@ class EmbeddingAnalysis:
             title="Symmetrised KL Divergence Between Classes",
             save_dir=self.save_dir,
         )
+        return fig
+
+    def plot_dendrogram(
+        self,
+        metric: str = "cosine",
+        linkage: str = "average",
+        save_dir: str = None,
+    ):
+        """Hierarchical clustering dendrogram of class centroids in embedding space.
+
+        Computes one centroid per class (mean of ``trainEmbeddings``), then
+        runs agglomerative clustering on the pairwise distance matrix and
+        renders an interactive Plotly dendrogram.
+
+        Parameters
+        ----------
+        metric:
+            Pairwise distance metric passed to ``scipy.spatial.distance.pdist``
+            (e.g. ``"cosine"``, ``"euclidean"``).
+        linkage:
+            Linkage method passed to ``scipy.cluster.hierarchy.linkage``
+            (e.g. ``"average"``, ``"ward"``, ``"complete"``).
+        save_dir:
+            Directory in which to save ``dendrogram.html``.  Defaults to
+            ``self.save_dir``.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+        """
+        import plotly.figure_factory as ff
+        from scipy.spatial.distance import pdist
+        import scipy.cluster.hierarchy as sch
+
+        classes = sorted(np.unique(self.traingt))
+        centroids = np.stack([
+            self.trainEmbeddings[self.traingt == c].mean(axis=0)
+            for c in classes
+        ])
+        labels = [str(self.classMapping.get(int(c), int(c))) for c in classes]
+
+        fig = ff.create_dendrogram(
+            centroids,
+            orientation="left",
+            labels=labels,
+            distfun=lambda X: pdist(X, metric=metric),
+            linkagefun=lambda d: sch.linkage(d, method=linkage),
+        )
+        fig.update_layout(
+            title_text=f"Class dendrogram — {metric} distance, {linkage} linkage",
+            template="plotly_dark",
+            width=800,
+            height=max(400, len(classes) * 40),
+            xaxis=dict(title=f"{metric} distance"),
+            yaxis=dict(title=""),
+        )
+
+        save_dir = save_dir or self.save_dir
+        if save_dir:
+            out = os.path.join(save_dir, "dendrogram.svg")
+            fig.write_image(out, format="svg")
+            print(f"[plot_dendrogram] Saved to {out}")
+
+        fig.show()
+        return fig
+
+    # ------------------------------------------------------------------ #
+    # Trajectory analysis (PAGA + diffusion pseudotime)                   #
+    # ------------------------------------------------------------------ #
+
+    def trajectory(
+        self,
+        n_neighbors: int = 15,
+        n_dcs: int = 10,
+        resolution: float = 0.5,
+        root_group: str = None,
+        distance_metric: str = "euclidean",
+        color_by: str = None,
+        save_dir: str = None,
+        use_gt: bool = False,
+    ) -> pd.DataFrame:
+        """Trajectory analysis via PAGA + diffusion pseudotime (scanpy).
+
+        Workflow mirrors SeuratExtend / Slingshot in Python:
+        1. Build a k-NN graph on ``self.embeddings``.
+        2. Leiden clustering to define cell groups.
+        3. PAGA to infer the coarse trajectory graph between groups.
+        4. Diffusion-map embedding + diffusion pseudotime (DPT) to order
+           cells along each branch.
+
+        Results are stored in ``self.data_df`` (columns ``"leiden_trajectory"``,
+        ``"dpt_pseudotime"``) and in ``self.results_df``, and a PAGA +
+        pseudotime figure is written to *save_dir* (or ``self.save_dir``).
+
+        Parameters
+        ----------
+        n_neighbors:
+            Number of neighbours for the k-NN graph.
+        n_dcs:
+            Number of diffusion components to compute.
+        resolution:
+            Leiden resolution controlling the granularity of cell groups.
+        root_group:
+            Leiden cluster label (string) to treat as the trajectory root.
+            When ``None`` the group with the lowest median pseudotime on the
+            first diffusion component is chosen automatically.
+        distance_metric:
+            Distance metric for the k-NN graph.
+        color_by:
+            Column in ``self.data_df`` used to colour the UMAP panels.
+            Defaults to ``self.gtColumn`` when available, else ``"dpt_pseudotime"``.
+        save_dir:
+            Directory in which to save the figure.  Defaults to
+            ``self.save_dir``.
+
+        Returns
+        -------
+        pd.DataFrame
+            ``self.data_df`` updated with ``"leiden_trajectory"`` and
+            ``"dpt_pseudotime"`` columns.
+        """
+        import anndata as ad
+        import scanpy as sc
+
+        save_dir = save_dir or self.save_dir
+
+        # ── 1. Build AnnData from scaled embeddings ───────────────────────
+        adata = ad.AnnData(X=self.embeddings.astype(np.float32))
+        if color_by is None:
+            color_by = self.gtColumn if self._has_gt else "dpt_pseudotime"
+
+        # Carry group labels into obs so scanpy can colour by them
+        if self._has_gt and self.gtColumn in self.data_df.columns:
+            adata.obs[self.gtColumn] = (
+                self.data_df[self.gtColumn]
+                .astype(str)
+                .values
+            )
+
+        # ── 2. k-NN graph ─────────────────────────────────────────────────
+        sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=None,
+                        metric=distance_metric, random_state=111)
+
+        # ── 3a. Group definition: GT labels or Leiden clustering ───────────
+        if use_gt and self._has_gt:
+            gt_labels = (
+                self.data_df[self.gtColumn]
+                .map(lambda v: self.classMapping.get(int(v), str(v))
+                     if pd.notna(v) and v != 0 else "unlabelled")
+                .astype(str)
+            )
+            adata.obs["leiden_trajectory"] = pd.Categorical(gt_labels)
+        else:
+            sc.tl.leiden(adata, resolution=resolution, random_state=111,
+                         key_added="leiden_trajectory")
+
+        # ── 3. PAGA (trajectory graph between Leiden groups) ──────────────
+        sc.tl.paga(adata, groups="leiden_trajectory")
+        # sc.pl.paga populates adata.uns['paga']['pos'], required by umap(init_pos='paga')
+        sc.pl.paga(adata, show=False, plot=False)
+
+        # ── 4. UMAP for visualisation ─────────────────────────────────────
+        # Reuse an already-computed UMAP when available (avoids recomputation).
+        # Fall back to a PAGA-initialised UMAP otherwise.
+        if "UMAP x" in self.data_df.columns and "UMAP y" in self.data_df.columns:
+            adata.obsm["X_umap"] = self.data_df[["UMAP x", "UMAP y"]].to_numpy()
+        else:
+            sc.tl.umap(adata, init_pos="paga", random_state=42)
+
+        # ── 5. Diffusion map + pseudotime ─────────────────────────────────
+        sc.tl.diffmap(adata, n_comps=n_dcs)
+
+        # Determine root cell: cell in root_group with lowest DC1 value
+        groups = adata.obs["leiden_trajectory"].values
+        dc1 = adata.obsm["X_diffmap"][:, 1]
+        unique_groups = np.unique(groups)
+
+        if root_group is None:
+            group_medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
+            root_group = str(min(group_medians, key=group_medians.get))
+            print(f"[trajectory] Auto-selected root group: {root_group}")
+        elif root_group not in unique_groups:
+            # root_group may be a gtColumn value rather than a Leiden label —
+            # find the Leiden cluster most enriched for that value.
+            gt_col = self.gtColumn if self._has_gt else None
+            leiden_resolved = None
+            if gt_col is not None and gt_col in self.data_df.columns:
+                gt_vals = self.data_df[gt_col].astype(str).values
+                enrichment = {
+                    g: (gt_vals[groups == g] == str(root_group)).mean()
+                    for g in unique_groups
+                }
+                leiden_resolved = max(enrichment, key=enrichment.get)
+                print(
+                    f"[trajectory] '{root_group}' not a Leiden label; "
+                    f"resolved to group '{leiden_resolved}' "
+                    f"(enrichment {enrichment[leiden_resolved]:.2f})."
+                )
+            if leiden_resolved is None:
+                print(
+                    f"[trajectory] Warning: root_group='{root_group}' not found "
+                    f"in Leiden labels {list(unique_groups)}. Falling back to auto."
+                )
+                group_medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
+                leiden_resolved = str(min(group_medians, key=group_medians.get))
+            root_group = leiden_resolved
+
+        root_mask = groups == root_group
+        dc1_vals = adata.obsm["X_diffmap"][root_mask, 1]
+        root_idx = int(np.where(root_mask)[0][np.argmin(dc1_vals)])
+        adata.uns["iroot"] = root_idx
+        sc.tl.dpt(adata, n_dcs=n_dcs)
+
+        # ── 6. Write results back to data_df / results_df ─────────────────
+        umap_coords = adata.obsm["X_umap"]
+        self.data_df["leiden_trajectory"] = adata.obs["leiden_trajectory"].astype(str).to_numpy()
+        self.data_df["dpt_pseudotime"] = adata.obs["dpt_pseudotime"].to_numpy()
+        self.data_df["traj_umap_x"] = umap_coords[:, 0]
+        self.data_df["traj_umap_y"] = umap_coords[:, 1]
+        self.results_df["leiden_trajectory"] = adata.obs["leiden_trajectory"].astype(str).to_numpy()
+        self.results_df["dpt_pseudotime"] = adata.obs["dpt_pseudotime"].to_numpy()
+        self.results_df["traj_umap_x"] = umap_coords[:, 0]
+        self.results_df["traj_umap_y"] = umap_coords[:, 1]
+
+        # Store adata so plot_trajectory can reuse it without recomputing
+        self._traj_adata = adata
+        self._traj_color_by = color_by
+        self._traj_root_group = root_group
+
+        print(f"[trajectory] Root cell index: {root_idx}  (group '{root_group}')")
+        print(f"[trajectory] Pseudotime range: "
+              f"{adata.obs['dpt_pseudotime'].min():.3f} – "
+              f"{adata.obs['dpt_pseudotime'].max():.3f}")
+
+        return self.data_df
+
+    def plot_trajectory(
+        self,
+        save_dir: str = None,
+        paga_threshold: float = 0.05,
+        **trajectory_kwargs,
+    ):
+        """Build and return an interactive Plotly figure of the trajectory results.
+
+        Layout (2 × 2 grid):
+
+        * **Top-left** – UMAP coloured by Leiden group with the PAGA
+          connectivity graph superimposed (edges scaled by weight, nodes at
+          cluster centroids).
+        * **Top-right** – UMAP coloured by ``self.gtColumn`` (only when a
+          ground-truth column is available and differs from pseudotime).
+        * **Bottom-left** – UMAP coloured by diffusion pseudotime.
+        * **Bottom-right** – Violin plot of pseudotime per Leiden group.
+
+        Parameters
+        ----------
+        save_dir:
+            If given, the figure is saved as ``trajectory_plotly.html`` there.
+        paga_threshold:
+            Minimum PAGA connectivity weight for an edge to be drawn.
+        **trajectory_kwargs:
+            Forwarded to :meth:`trajectory` when it needs to be computed.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        # ── Compute trajectory if needed ──────────────────────────────────
+        if not hasattr(self, "_traj_adata"):
+            self.trajectory(**trajectory_kwargs)
+
+        adata = self._traj_adata
+        color_by = self._traj_color_by
+        df = self.data_df
+
+        ux = df["traj_umap_x"].values
+        uy = df["traj_umap_y"].values
+        groups = df["leiden_trajectory"].astype(str).values
+        pseudotime = df["dpt_pseudotime"].values
+        unique_groups = sorted(np.unique(groups))
+
+        # Shared palette — tab20 avoids the grey-for-0 override in specialScatter
+        palette = sns.color_palette("tab20", len(unique_groups))
+        group_color = {g: f"rgb{tuple(int(c * 255) for c in palette[i])}"
+                       for i, g in enumerate(unique_groups)}
+
+        has_extra = self._has_gt and color_by != "dpt_pseudotime"
+
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "UMAP + PAGA – Leiden groups",
+                f"UMAP – {color_by}" if has_extra else "",
+                "UMAP – pseudotime",
+                "Pseudotime per group",
+            ],
+            specs=[
+                [{"type": "scatter"}, {"type": "scatter"}],
+                [{"type": "scatter"}, {"type": "violin"}],
+            ],
+        )
+
+        # ── Panel 1: UMAP (Leiden) with PAGA overlay ──────────────────────
+        # Scatter points
+        for g in unique_groups:
+            mask = groups == g
+            fig.add_trace(go.Scatter(
+                x=ux[mask], y=uy[mask],
+                mode="markers",
+                name=f"Group {g}",
+                marker=dict(size=4, color=group_color[g], opacity=0.6),
+                legendgroup=f"group_{g}",
+                hovertemplate=f"Group {g}<br>x=%{{x:.2f}}<br>y=%{{y:.2f}}<extra></extra>",
+            ), row=1, col=1)
+
+        # PAGA edges superimposed
+        conn = np.array(adata.uns["paga"]["connectivities"].todense())
+        node_x = [ux[groups == g].mean() for g in unique_groups]
+        node_y = [uy[groups == g].mean() for g in unique_groups]
+
+        for i in range(len(unique_groups)):
+            for j in range(i + 1, len(unique_groups)):
+                w = float(conn[i, j])
+                if w < paga_threshold:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=[node_x[i], node_x[j], None],
+                    y=[node_y[i], node_y[j], None],
+                    mode="lines",
+                    line=dict(width=w * 10, color="rgba(255,255,255,0.55)"),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ), row=1, col=1)
+
+        # PAGA nodes (same colors as scatter, larger markers + labels)
+        fig.add_trace(go.Scatter(
+            x=node_x, y=node_y,
+            mode="markers+text",
+            text=unique_groups,
+            textposition="top center",
+            marker=dict(
+                size=20,
+                color=[group_color[g] for g in unique_groups],
+                line=dict(width=2, color="white"),
+            ),
+            showlegend=False,
+            hovertemplate="Group %{text}<extra></extra>",
+        ), row=1, col=1)
+
+        # ── Panel 2 (optional): UMAP coloured by gtColumn ─────────────────
+        if has_extra:
+            gt_vals = df[color_by].astype(str).values
+            unique_gt = sorted(np.unique(gt_vals))
+            gt_palette = sns.color_palette("Set2", len(unique_gt))
+            gt_color = {v: f"rgb{tuple(int(c * 255) for c in gt_palette[i])}"
+                        for i, v in enumerate(unique_gt)}
+            for v in unique_gt:
+                mask = gt_vals == v
+                fig.add_trace(go.Scatter(
+                    x=ux[mask], y=uy[mask],
+                    mode="markers",
+                    name=str(v),
+                    marker=dict(size=4, color=gt_color[v], opacity=0.7),
+                    hovertemplate=f"{color_by}={v}<br>x=%{{x:.2f}}<br>y=%{{y:.2f}}<extra></extra>",
+                    legendgroup=f"gt_{v}",
+                ), row=1, col=2)
+
+        # ── Panel 3: UMAP coloured by pseudotime ─────────────────────────
+        fig.add_trace(go.Scatter(
+            x=ux, y=uy,
+            mode="markers",
+            marker=dict(
+                size=4,
+                color=pseudotime,
+                colorscale="Viridis",
+                showscale=True,
+                colorbar=dict(title="Pseudotime", x=1.02),
+                opacity=0.8,
+            ),
+            showlegend=False,
+            hovertemplate="pt=%{marker.color:.3f}<extra></extra>",
+        ), row=2, col=1)
+
+        # ── Panel 4: Violin – pseudotime per Leiden group ─────────────────
+        for g in unique_groups:
+            mask = groups == g
+            fig.add_trace(go.Violin(
+                y=pseudotime[mask],
+                name=f"Group {g}",
+                box_visible=True,
+                meanline_visible=True,
+                fillcolor=group_color[g],
+                line_color="white",
+                opacity=0.8,
+                showlegend=False,
+                legendgroup=f"group_{g}",
+            ), row=2, col=2)
+
+        # ── Layout ────────────────────────────────────────────────────────
+        fig.update_layout(
+            height=900,
+            title_text="Trajectory analysis — PAGA + diffusion pseudotime",
+            template="plotly_dark",
+            legend=dict(itemsizing="constant", font=dict(size=10)),
+        )
+        for row in (1, 2):
+            for col in (1, 2):
+                fig.update_xaxes(showgrid=False, showticklabels=False, row=row, col=col)
+                fig.update_yaxes(showgrid=False, showticklabels=False, row=row, col=col)
+
+        save_dir = save_dir or self.save_dir
+        if save_dir:
+            out = os.path.join(save_dir, "trajectory_plotly.html")
+            fig.write_html(out)
+            print(f"[plot_trajectory] Saved to {out}")
+
+        fig.show()
         return fig
 
     def getRowsByLabel(self, label):
