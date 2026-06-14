@@ -738,14 +738,11 @@ class EmbeddingAnalysis:
         # every sample to be coloured by its predicted class.
         return EmbeddingAnalysis.specialScatter(
             self,
-    def vizualisePCA(self, pcas=None, title="", **kwargs):
-        return self.specialScatter(
             xColumn="PCA x", yColumn="PCA y",
             xaxis_title="PC 1", yaxis_title="PC 2",
-            classColoumn=self.classColumn,
-            legend_title="PC - {}".format(
-                self.gtColumn if self._has_gt else self.classColumn),
-            save_dir=self.save_dir, **kwargs
+            classColoumn=col,
+            legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
+            save_dir=self.save_dir,
         )
 
     @staticmethod
