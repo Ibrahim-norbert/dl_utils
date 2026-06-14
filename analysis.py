@@ -1,4 +1,5 @@
 import base64
+from typing import Optional
 import os
 import pathlib
 import warnings
@@ -15,16 +16,15 @@ from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.linear_model import LinearRegression, RidgeClassifier
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from dl_utils import NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_KEY
+from dl_utils import LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
 from dl_utils.vizualizations import costumMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
-
 sns.set_context("poster")
 
 
@@ -87,7 +87,8 @@ class Classification:
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(save_dir, "{}confusion_matrix.png").format(gtColumn), dpi=300)
+            plt.savefig(os.path.join(
+                save_dir, "{}confusion_matrix.png").format(gtColumn), dpi=300)
         plt.close()
         return fig
 
@@ -105,7 +106,7 @@ class EmbeddingAnalysis:
     def __init__(
         self,
         df_path: str = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json",
-        type: str = EMBED_KEY,
+        type: str = EMBED_DICT_EMBED,
         instancelabelColumn: str = NUCLEUS_LABEL_KEY,
         gtColumn: str = None,
         classMapping: dict = {},
@@ -117,7 +118,7 @@ class EmbeddingAnalysis:
         leiden_n_iterations: int = 2,
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
-        metadDataFramePath: str = None,
+        metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
         **kwargs,
     ) -> None:
@@ -127,11 +128,17 @@ class EmbeddingAnalysis:
         self.df_path: str = df_path
         self.type: str = type
         self.data_df: pd.DataFrame = pd.read_json(df_path)
-        self.embeddings: np.ndarray = StandardScaler().fit_transform(
-            get_array_from_df(self.data_df, type)
-        )
-        print(f"The embedding array has shape {self.embeddings.shape} and dtype {self.embeddings.dtype}")
-        
+        print(f"Available coloumns: {self.data_df.columns.tolist()}")
+        embeddings = get_array_from_df(self.data_df, type)
+        nan_mask = np.isnan(embeddings)
+        assert not nan_mask.any(
+        ), f"Yes we have {nan_mask.sum()} nans in the array"
+
+        assert np.unique(embeddings.flatten()).__len__(
+        ) > 1, f"The embeddings are uninformative with the constant value of {np.unique(embeddings.flatten())}"
+
+        self.embeddings: np.ndarray = StandardScaler().fit_transform(embeddings)
+
         self._apply_common_setup(
             self,
             gtColumn=gtColumn,
@@ -164,7 +171,6 @@ class EmbeddingAnalysis:
         if self.classMapping and self._has_gt:
             self.plot_gromov_wasserstein_heatmap()
             self.plot_kl_divergence_heatmap()
-
 
     @classmethod
     def from_dataframe(
@@ -207,11 +213,7 @@ class EmbeddingAnalysis:
             default_class_column="cluster",
             subplots_kwargs={"s": 1},
         )
-        instance.predLabels = (
-            instance.classify(binary=binary, mapping=classMapping)
-            if instance._has_gt
-            else np.zeros(len(instance.data_df), dtype=int)
-        )
+
         return instance
 
     @classmethod
@@ -221,7 +223,7 @@ class EmbeddingAnalysis:
         meta_df: "pd.DataFrame",
         save_dir: str = None,
         gtColumn: str = None,
-        instancelabelColumn: str = NUCLEUS_LABEL_KEY,
+        instancelabelColumn: str = LABEL_KEY,
         leiden: bool = False,
         leiden_resolution: float = 1.0,
         leiden_n_iterations: int = 2,
@@ -348,20 +350,24 @@ class EmbeddingAnalysis:
         leiden_distance_metric,
         default_class_column: str = "Class",
         subplots_kwargs: dict = None,
-        metadDataFramePath: str = None,
+        metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
         **kwargs,
     ) -> None:
         instance._gtColumn_was_list = isinstance(gtColumn, list)
         instance.instancelabelColumn = instancelabelColumn
-        instance.save_dir = os.path.join(save_dir, "EmbeddingAnalysis") if save_dir is not None else None
+        instance.classMapping = classMapping
+        instance.save_dir = os.path.join(
+            save_dir, "EmbeddingAnalysis") if save_dir is not None else None
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
         instance.metadDataFramePath = metadDataFramePath
         if metadDataFramePath is not None and os.path.exists(metadDataFramePath) and metadDataFramePath.endswith((".csv", ".xlsx", ".json")):
-            data_df = pd.read_csv(metadDataFramePath) if metadDataFramePath.endswith(".csv") else pd.read_excel(metadDataFramePath)
+            data_df = pd.read_csv(metadDataFramePath) if metadDataFramePath.endswith(
+                ".csv") else pd.read_excel(metadDataFramePath)
             assert instancelabelColumn in data_df.columns, f"Instance label column '{instancelabelColumn}' not found in metadata DataFrame."
-            instance.data_df = instance.data_df.merge(data_df, on=instancelabelColumn, how="left")
+            instance.data_df = instance.data_df.merge(
+                data_df, on=instancelabelColumn, how="left")
             print(f"Metadata DataFrame loaded from: {metadDataFramePath}")
 
         # Standardise label column(s) into a single integer column before getLabels runs.
@@ -382,7 +388,8 @@ class EmbeddingAnalysis:
         instance.classification = Classification
         instance.classMappedColumn = "Mapped"
         instance.classColumn = default_class_column
-        instance.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
+        instance.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {
+            "s": 6}
         scalar_cols = [
             c for c in instance.data_df.columns
             if instance.data_df[c].dtype.kind in ("f", "i", "u", "U", "S", "O")
@@ -407,56 +414,111 @@ class EmbeddingAnalysis:
 
     def getLabels(self) -> None:
         n = len(self.data_df)
+        _gtColumn_was_list = isinstance(self.gtColumn, list)
 
-        # Label column is already a single integer column at this point —
-        # _standardise_label_column in _apply_common_setup handled list→str and str→int.
+        if isinstance(self.gtColumn, list):
+            combined_col = "_".join(self.gtColumn)
+            subset = self.data_df[self.gtColumn]
+
+            # Detect one-hot encoded columns: each column only contains 0/1
+            # (handles int, float, bool, and string variants after JSON round-trip)
+            def _is_binary(col):
+                try:
+                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
+                except (ValueError, TypeError):
+                    return False
+
+            is_onehot = all(_is_binary(subset[c]) for c in self.gtColumn)
+
+            if is_onehot:
+                # Use the active column name as label; NaN where none or multiple active
+                def _onehot_label(row):
+                    active = [c for c in self.gtColumn if float(row[c]) == 1.0]
+                    if len(active) == 1:
+                        return active[0]
+                    return np.nan  # all-zero or multi-active → treated as unlabelled
+
+                self.data_df[combined_col] = subset.apply(
+                    _onehot_label, axis=1)
+            else:
+                def _fmt(v):
+                    if pd.isna(v):
+                        return "NA"
+                    if isinstance(v, float) and v.is_integer():
+                        return str(int(v))
+                    return str(v)
+
+                self.data_df[combined_col] = (
+                    subset.apply(lambda col: col.map(_fmt))
+                    .agg("_".join, axis=1)
+                )
+
+            self.gtColumn = combined_col
+
         self.gtlabels: np.ndarray = (
             get_array_from_df(self.data_df, self.gtColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
 
-        valid_mask = ~pd.isna(self.gtlabels)
-        if 0 in self.gtlabels[valid_mask]:
-            self.gtlabels = np.where(valid_mask, self.gtlabels + 1, self.gtlabels)
+        if self._has_gt and self.gtlabels.dtype.kind in ('U', 'S', 'O'):
+            if not self.classMapping:
+                unique_vals = [v for v in pd.unique(
+                    self.gtlabels) if not pd.isna(v)]
+                str_to_int = {v: i + 1 for i,
+                              v in enumerate(sorted(unique_vals, key=str))}
+                self.classMapping = {i: v for v, i in str_to_int.items()}
+            else:
+                str_to_int = {v: k for k, v in self.classMapping.items()}
+            self.gtlabels = np.array(
+                [str_to_int.get(v, np.nan) for v in self.gtlabels], dtype=float
+            )
             self.data_df[self.gtColumn] = self.gtlabels
 
-        self.instancelabels: np.ndarray = get_array_from_df(self.data_df, self.instancelabelColumn)
-        nan_mask = ~pd.isna(self.gtlabels)
-        # When gtColumn was originally a list (one-hot), additionally exclude zero/inactive
-        # rows so that only explicitly labelled samples participate in training.
-        if self._gtColumn_was_list:
-            train_mask = nan_mask & (self.gtlabels > 0)
-        else:
-            train_mask = nan_mask
-        
+        valid_mask = ~pd.isna(self.gtlabels)
+        if 0 in self.gtlabels[valid_mask]:
+            self.gtlabels = np.where(
+                valid_mask, self.gtlabels + 1, self.gtlabels)
+            self.data_df[self.gtColumn] = self.gtlabels
 
-        # TODO: Maybe we need to standardise the labels gt and also the whole embeddings space
-        if train_mask.sum() < n:
+        self.instancelabels: np.ndarray = get_array_from_df(
+            self.data_df, self.instancelabelColumn)
+        nan_mask = ~pd.isna(self.gtlabels)
+        # When gtColumn was a list, additionally exclude zero/inactive rows so that
+        # only explicitly labelled (active) samples participate in training.
+        # Mutual exclusivity is already guaranteed upstream: _onehot_label returns
+        # NaN for multi-active rows, so they are caught by nan_mask as well.
+        # if _gtColumn_was_list:
+        #     train_mask = nan_mask & (self.gtlabels > 0)
+        # else:
+        #     train_mask = nan_mask
+        if nan_mask.sum() < n:
             warnings.warn(
-                f"Labels contain {n - train_mask.sum()} inactive/NaN value(s). "
-                f"Training on {train_mask.sum()} of {len(self.embeddings)} samples."
+                f"Labels contain {n - nan_mask.sum()} inactive/NaN value(s). "
+                f"Training on {nan_mask.sum()} of {len(self.embeddings)} samples."
             )
+            # Turn nan values to 0 but filter for training classifier
             self.gtlabels[~nan_mask] = 0
-            self.traingt = self.gtlabels[train_mask].astype(int)
-            self.trainEmbeddings = self.embeddings[train_mask]
+            self.traingt = self.gtlabels[nan_mask].astype(int)
+            self.trainEmbeddings = self.embeddings[nan_mask]
         else:
-            self.traingt = self.gtlabels.astype(int) if np.issubdtype(self.gtlabels.dtype, np.floating) else self.gtlabels
+            self.traingt = self.gtlabels.astype(int) if np.issubdtype(
+                self.gtlabels.dtype, np.floating) else self.gtlabels
             self.trainEmbeddings = self.embeddings
 
     # ------------------------------------------------------------------ #
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
-    def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights = None) -> np.ndarray:
-
+    def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights=None) -> np.ndarray:
 
         if classifier_weights is None:
             X_train, X_val, y_train, y_val = train_test_split(
                 self.trainEmbeddings, self.traingt, train_size=train_size,
                 stratify=self.traingt, random_state=42
             )
-            print(f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
+            print(
+                f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
             print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
 
             self.classifier = self.classification.train_classifier(
@@ -464,14 +526,15 @@ class EmbeddingAnalysis:
             )
 
         else:
-            self.classifier =  classifier_weights
+            self.classifier = classifier_weights
             X_val = self.trainEmbeddings
             y_val = self.traingt
 
-
-        self.train_accuracy = self.classification.getAccuracy(X_val, y_val, self.classifier)
+        self.train_accuracy = self.classification.getAccuracy(
+            X_val, y_val, self.classifier)
         print(f"Validation accuracy: {self.train_accuracy:.4f}")
         self.predLabels = self.classifier.predict(self.embeddings)
+
         self.results_df[self.classifier_method] = self.predLabels
         self.classColumn = self.classifier_method
 
@@ -481,7 +544,8 @@ class EmbeddingAnalysis:
 
         if self.classMapping is not None:
             self.results_df[self.classMappedColumn] = np.array(
-                [self.classMapping.get(label, label) for label in self.predLabels]
+                [self.classMapping.get(label, label)
+                 for label in self.predLabels]
             )
         else:
             self.classMappedColumn = self.classifier_method
@@ -496,19 +560,19 @@ class EmbeddingAnalysis:
     # Clustering                                                           #
     # ------------------------------------------------------------------ #
 
-    def performDBSCAN(self, preds, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
+    def performDBSCAN(self, embeddings, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
+        embeddings = StandardScaler().fit_transform(embeddings)
         clustering: DBSCAN = DBSCAN(
             eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)
-        ).fit(preds)
+        ).fit(embeddings)
         self.classColumn = "DBSCAN_cluster"
         labels = clustering.labels_.reshape(*shape).astype(int) + 1
-        self.results_df[self.classColumn] = labels.flatten().tolist()
-        self.predLabels = labels.flatten()
+        self.predLabels = labels
         return labels
 
     def performLeiden(
         self,
-        preds: np.ndarray,
+        embeddings: np.ndarray,
         shape: tuple,
         resolution: float = 1.0,
         n_iterations: int = 2,
@@ -517,56 +581,41 @@ class EmbeddingAnalysis:
     ) -> np.ndarray:
         import anndata as ad
         import scanpy
-
-        labels = np.zeros(preds.shape[0])
-        embedding = ad.AnnData(X=preds)
+        embeddings = StandardScaler().fit_transform(embeddings)
+        labels = np.zeros(embeddings.shape[0])
+        embedding = ad.AnnData(X=embeddings)
         scanpy.pp.neighbors(
             embedding, n_neighbors=n_neighbors, n_pcs=None,
-            metric=distance_metric, random_state=111,  # type: ignore[arg-type]
+            # type: ignore[arg-type]
+            metric=distance_metric, random_state=111, use_rep="X"
         )
         scanpy.tl.leiden(
             embedding, resolution=resolution, random_state=111, n_iterations=n_iterations,
         )
         for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
-            indices = embedding.obs[embedding.obs["leiden"] == sub_label].index.astype(int)
+            indices = embedding.obs[embedding.obs["leiden"]
+                                    == sub_label].index.astype(int)
             labels[indices] = indx
-        self.classColumn = "leiden_cluster"
         labels = labels.astype(int).reshape(*shape) + 1
-        self.results_df[self.classColumn] = labels.flatten().tolist()
         self.predLabels = labels.flatten()
         return labels
-    def getClusters(self, preds, DBSCAN_eps=0.5, DBSCAN_min_samples=10):
-        shape: tuple = preds.shape[:-1]
-        preds = StandardScaler().fit_transform(preds)
+
+    def cluster(self, embeddings=None, **kwargs):
+        shape: tuple = self.embeddings.shape[:-1]
+
+        if embeddings is None:
+            embeddings = self.embeddings
         if self.leiden:
-            return self.performLeiden(
-                preds, shape,
-                resolution=self.leiden_resolution,
-                n_iterations=self.leiden_n_iterations,
-                n_neighbors=self.leiden_n_neighbors,
-                distance_metric=self.leiden_distance_metric,
-            )
-        return self.performDBSCAN(preds=preds, shape=shape,
-                                   DBSCAN_eps=DBSCAN_eps, DBSCAN_min_samples=DBSCAN_min_samples)
+            labels = self.performLeiden(
+                embeddings=embeddings, shape=shape, **kwargs)
 
-    def clustering(self, resolution: float, n_iterations: int, n_neighbors: int,
-                   distance_metric: str = "euclidean"):
-        import anndata as ad
-        import scanpy
+        else:
+            labels = self.performDBSCAN(
+                embeddings=embeddings, shape=shape, **kwargs)
 
-        labels = np.zeros(self.embeddings.shape[0])
-        embedding = ad.AnnData(X=self.embeddings)
-        scanpy.pp.neighbors(embedding, n_neighbors=n_neighbors, n_pcs=None,
-                            metric=distance_metric, random_state=111)
-        scanpy.tl.leiden(embedding, resolution=resolution,
-                         random_state=111, n_iterations=n_iterations)
-        for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
-            indices = embedding.obs[embedding.obs["leiden"] == sub_label].index.astype(int)
-            labels[indices] = indx
-        self.predLabels = labels.astype(int) + 1
-        self.results_df[self.classColumn] = self.predLabels
-        self.classColumn = "leiden_cluster"
-        return self.predLabels
+        self.results_df[self.classColumn] = labels
+
+        return labels
 
     # ------------------------------------------------------------------ #
     # Dimensionality reduction                                             #
@@ -574,14 +623,23 @@ class EmbeddingAnalysis:
 
     def pca(self) -> np.ndarray:
         pca_model = PCA()
+        nan_mask = np.isnan(self.embeddings)
+        assert not nan_mask.any(
+        ), f"Yes we have {nan_mask.sum()} nans in the array"
         pcs = pca_model.fit_transform(self.embeddings)
-        print(f"Explained variance      : {pca_model.explained_variance_ratio_[:5].round(3)}")
-        print(f"Cumulative (first 3)    : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
+        nan_mask = np.isnan(pcs)
+        assert not nan_mask.any(
+        ), f"Yes we have {nan_mask.sum()} nans in the array"
+        print(
+            f"Explained variance      : {pca_model.explained_variance_ratio_[:5].round(3)}")
+        print(
+            f"Cumulative (first 3)    : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
         pca_df = pd.DataFrame(
             {"PCA x": pcs[:, 0], "PCA y": pcs[:, 1], "PCA z": pcs[:, 2]},
             index=self.data_df.index,
         )
-        self.explained_variance_ratio = pca_model.explained_variance_ratio_[:3].sum()
+        self.explained_variance_ratio = pca_model.explained_variance_ratio_[
+            :3].sum()
         self.concatDF(pca_df)
         return pcs
 
@@ -591,11 +649,12 @@ class EmbeddingAnalysis:
 
         reducer = umap.UMAP(
             n_neighbors=n_neighbors, min_dist=min_dist, n_components=n_components,
-            random_state=random_state, metric=metric, **kwargs,
+            random_state=random_state, metric=metric, n_jobs=10, **kwargs,
         ).fit(self.embeddings)
         umap_array = reducer.transform(self.embeddings)
         return pd.DataFrame(
-            {"UMAP x": umap_array[:, 0], "UMAP y": umap_array[:, 1], "UMAP z": umap_array[:, 2]},
+            {"UMAP x": umap_array[:, 0], "UMAP y": umap_array[:,
+                                                              1], "UMAP z": umap_array[:, 2]},
             index=self.data_df.index,
         )
 
@@ -607,11 +666,10 @@ class EmbeddingAnalysis:
             self,
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
-            classColoumn=col,
-            legend_title="UMAP - {}".format(self.gtColumn if self._has_gt else col),
-            save_dir=self.save_dir,
-            marker_size=marker_size,
-            background_color=background_color,
+            classColoumn=self.classColumn,
+            legend_title="UMAP - {}".format(
+                self.gtColumn if self._has_gt else self.classColumn),
+            save_dir=self.save_dir, **kwargs
         )
 
     # ------------------------------------------------------------------ #
@@ -680,11 +738,14 @@ class EmbeddingAnalysis:
         # every sample to be coloured by its predicted class.
         return EmbeddingAnalysis.specialScatter(
             self,
+    def vizualisePCA(self, pcas=None, title="", **kwargs):
+        return self.specialScatter(
             xColumn="PCA x", yColumn="PCA y",
             xaxis_title="PC 1", yaxis_title="PC 2",
-            classColoumn=col,
-            legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
-            save_dir=self.save_dir,
+            classColoumn=self.classColumn,
+            legend_title="PC - {}".format(
+                self.gtColumn if self._has_gt else self.classColumn),
+            save_dir=self.save_dir, **kwargs
         )
 
     @staticmethod
@@ -696,39 +757,60 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./", marker_size: int = 4,
-                       background_color: str = "rgba(0,0,0,0)"):
+                       save_dir: str = "./", precomputed_colors: bool = False,
+                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True, **kwargs):
         import plotly.express as px
         from . import MoBie_coloring
 
-        color_space = MoBie_coloring.GlasbeyARGBLut()
         plot_df = self.results_df.copy()
 
-        if classColoumn not in plot_df.columns:
-            print(f"{classColoumn} is not a column in DataFrame")
-            plot_df[classColoumn] = 0
+        if precomputed_colors:
+            # Color column already contains plotly-compatible rgba strings — use directly
+            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
+            fig.update_traces(marker=dict(
+                color=plot_df[classColoumn].tolist(), size=4))
+        else:
+            color_space = MoBie_coloring.GlasbeyARGBLut()
 
-        plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
-        classLabels = sorted(plot_df[classColoumn].unique().astype(int).tolist())
+            if classColoumn not in plot_df.columns:
+                print(f"{classColoumn} is not a column in DataFrame")
+                plot_df[classColoumn] = 0
 
-        def _label(k: int) -> str:
-            return mapping.get(k, self.classMapping.get(k, str(k)))
+            plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
+            classLabels = sorted(
+                plot_df[classColoumn].unique().astype(int).tolist())
 
-        color_map = {_label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
-        color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
-        plot_df[classColoumn] = plot_df[classColoumn].astype(int).map(_label)
+            def _label(k: int) -> str:
+                if k == 0 and color_background:
+                    return "background"
+                return mapping.get(k, self.classMapping.get(k, str(k)))
 
-        fig = px.scatter(
-            plot_df, x=xColumn, y=yColumn, color=classColoumn,
-            color_discrete_map=color_map,
-            category_orders={classColoumn: [_label(k) for k in classLabels]},
-        )
-        fig.update_traces(marker=dict(size=marker_size))
+            color_map = {
+                _label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
+            if not color_background:
+                color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
+            plot_df[classColoumn] = plot_df[classColoumn].astype(
+                int).map(_label)
+
+            fig = px.scatter(
+                plot_df, x=xColumn, y=yColumn, color=classColoumn,
+                color_discrete_map=color_map,
+                category_orders={classColoumn: [
+                    _label(k) for k in classLabels]},
+            )
+
+        if not withLegendTitle:
+            legend_title = None
+
         fig.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, visible=False),
-            paper_bgcolor=background_color,
-            plot_bgcolor=background_color,
+            xaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
+                       visible=True, showline=show_axes, linecolor="black",
+                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
+            yaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
+                       visible=True, showline=show_axes, linecolor="black",
+                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
             showlegend=True,
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
@@ -737,8 +819,13 @@ class EmbeddingAnalysis:
             legend_title_text=legend_title,
             xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
+
+        fig.update_traces(marker=dict(size=kwargs.get(
+            "markerSize", 3), opacity=kwargs.get("markerOpacity", 0.8)))
         if save_dir is not None:
-            fig.write_image(os.path.join(save_dir, f"{classColoumn}_{legend_title}.svg"))
+            os.makedirs(save_dir, exist_ok=True)
+            fig.write_image(os.path.join(
+                save_dir, f"{classColoumn}_{legend_title}.svg"))
             fig.show()
         return fig
 
@@ -747,7 +834,8 @@ class EmbeddingAnalysis:
     # ------------------------------------------------------------------ #
 
     def saveDataFrame(self, suffix: str = "_analyzed", extension: str = ".csv") -> str:
-        stem = pathlib.Path(self.df_path).stem if self.df_path is not None else "dataframe"
+        stem = pathlib.Path(
+            self.df_path).stem if self.df_path is not None else "dataframe"
         save_dir = self.save_dir if self.save_dir is not None else "."
         out_path = os.path.join(save_dir, f"{stem}{suffix}{extension}")
         self.results_df.to_csv(out_path)
@@ -759,7 +847,7 @@ class EmbeddingAnalysis:
         if not hasattr(self, "predLabels"):
             self.clustering(resolution=resolution, n_iterations=n_iterations,
                             n_neighbors=n_neighbors, distance_metric=distance_metric)
-            
+
         maskVol = skimage.io.imread(maskVolumePath)
         mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
 
@@ -770,13 +858,17 @@ class EmbeddingAnalysis:
         elif self.gtColumn == classColoumn:
             mapping_array[self.instancelabels] = self.gtlabels.astype(int)
         elif classColoumn in self.results_df.columns:
-            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(int)
+            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(
+                int)
         else:
-            raise ValueError(f"Column '{classColoumn}' not found in results DataFrame.")
-        
+            raise ValueError(
+                f"Column '{classColoumn}' not found in results DataFrame.")
+
         maskVol = mapping_array[maskVol]
-        fileName = os.path.basename(maskVolumePath).replace(".tif", f"_{classColoumn}.tif")
-        save_dir = self.save_dir if self.save_dir is not None else os.path.dirname(maskVolumePath)
+        fileName = os.path.basename(maskVolumePath).replace(
+            ".tif", f"_{classColoumn}.tif")
+        save_dir = self.save_dir if self.save_dir is not None else os.path.dirname(
+            maskVolumePath)
         path = os.path.join(save_dir, fileName)
         skimage.io.imsave(path, maskVol.astype(np.int16))
         print(f"Result saved to: {path}")
@@ -839,7 +931,8 @@ class EmbeddingAnalysis:
                 Cj /= Cj.max() + 1e-12
                 pi = np.ones(len(Xi)) / len(Xi)
                 pj = np.ones(len(Xj)) / len(Xj)
-                gw = ot.gromov.gromov_wasserstein2(Ci, Cj, pi, pj, "square_loss", verbose=False)
+                gw = ot.gromov.gromov_wasserstein2(
+                    Ci, Cj, pi, pj, "square_loss", verbose=False)
                 gw_matrix[i, j] = gw_matrix[j, i] = gw
 
         fig, _ = costumMatplotlib.simpleHeatmap(
@@ -1324,12 +1417,14 @@ class EmbeddingAnalysis:
         return np.array(self.data_df[column].tolist())
 
     def load_png_for_nucleus(self, nucleus_id, patches_dir) -> str:
-        npy_filename = os.path.join(patches_dir, f"nucleus_hr_{nucleus_id}.npy")
+        npy_filename = os.path.join(
+            patches_dir, f"nucleus_hr_{nucleus_id}.npy")
         if os.path.exists(npy_filename):
             try:
                 input_vol = np.load(npy_filename)
                 mid_z = input_vol[input_vol.shape[0] // 2]
-                mid_z = ((mid_z - mid_z.min()) / (mid_z.max() - mid_z.min()) * 255).astype(np.uint8)
+                mid_z = ((mid_z - mid_z.min()) / (mid_z.max() -
+                         mid_z.min()) * 255).astype(np.uint8)
                 img = Image.fromarray(mid_z).resize((200, 200))
                 buffered = BytesIO()
                 img.save(buffered, format="PNG")
@@ -1353,7 +1448,7 @@ if __name__ == '__main__':
     from ProjectRoot import change_wd_to_project_root
     change_wd_to_project_root()
     from dl_utils.analysis import EmbeddingAnalysis
-    from dl_utils import EMBED_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
+    from dl_utils import EMBED_DICT_EMBED, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
 
     save_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\predictedMask"
     mapping = {1: "Neuron", 2: "Glial"}

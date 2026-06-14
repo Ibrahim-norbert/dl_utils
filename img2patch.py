@@ -2,7 +2,6 @@
 # Import third-party libraries
 import skimage.io
 from numpy import ndarray
-from scipy.ndimage import laplace
 from skimage import io, transform, exposure
 import numpy as np
 from pathlib import Path

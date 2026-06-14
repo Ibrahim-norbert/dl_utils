@@ -24,7 +24,8 @@ from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
-
+from lightning.pytorch.callbacks import DeviceStatsMonitor
+import shutil
 
 
 def full_stack() -> str:
@@ -105,6 +106,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         modelConfig: typing.Union[None, dict] = None,
         datasetConfig: typing.Union[None, dict] = None,
         limit_val_batches=0,
+        accumulate_grad_batches=10,
         args={},
     ) -> types.NoneType:
 
@@ -119,7 +121,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         if self.hparams.fast_dev_run is True or self.hparams.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
-            self.device = "cpu"
+            #self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
@@ -148,9 +150,16 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             max_epochs=max_epochs,
             log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
+            accumulate_grad_batches=accumulate_grad_batches,
+            # Skip the pre-training sanity-check validation pass: a validation
+            # error there would otherwise abort the run before any training
+            # metric is flushed, leaving TensorBoard empty.
+            num_sanity_val_steps=1,
             **args,
         )
 
+
+    
     def save_hyperparameters(self) -> Namespace | types.NoneType:
         # From pytorch_lightning.core.mixins.hparams_mixin import HyperparametersMixin
         current_frame: sys.FrameType | types.NoneType = inspect.currentframe()
@@ -226,15 +235,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = torch.load(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
-        model_state = module.state_dict()
-        # strict=False alone does not protect against shape mismatches — PyTorch
-        # still errors when a key exists in both dicts with differing tensor shapes.
-        shape_skipped = [
-            k for k, v in state_dict.items()
-            if k in model_state and v.shape != model_state[k].shape
-        ]
-        compatible = {k: v for k, v in state_dict.items() if k not in shape_skipped}
-        missing, unexpected = module.load_state_dict(state_dict=compatible, strict=False)
+        missing, unexpected = module.load_state_dict(state_dict=state_dict, strict=False)
         print(f"[getModel] Loaded weights from: {ckptPath}")
         if shape_skipped:
             print(f"  Shape-mismatched keys skipped ({len(shape_skipped)}): "
@@ -259,9 +260,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"[getModel] weightsCkptPath not found: {weights_path}")
         return self.loadWeights(weights_path, module)
-
-
-
 
     def getValDataloader(self, val_ds: datasets.BaseDataset, **kwargs):
 
@@ -325,22 +323,23 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def saveConfig(self) -> types.NoneType:
         # Writing the data to a YAML file
 
-        # Save to yaml file
-        path: str = os.path.join(self.save_dir, self.__class__.__name__)
+        if os.path.exists(self.save_dir):
+            # Save to yaml file
+            path: str = os.path.join(self.save_dir, self.__class__.__name__)
 
-        # Any argparse Namespaces in hparams are converted to dicts
-        for key, value in vars(self.hparams).items():
-            if isinstance(value, argparse.Namespace):
-                setattr(self.hparams, key, vars(value))
+            # Any argparse Namespaces in hparams are converted to dicts
+            for key, value in vars(self.hparams).items():
+                if isinstance(value, argparse.Namespace):
+                    setattr(self.hparams, key, vars(value))
 
-        # TODO: Read through following for improvement:
-        # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
+            # TODO: Read through following for improvement:
+            # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
 
-        # Test if each value is acceptable to yaml
-        filpath: str = f"{path}.yaml"
-        print(f"Saving config here: {filpath}")
-        with open(filpath, "w") as file:
-            yaml.dump(vars(self.hparams), file)
+            # Test if each value is acceptable to yaml
+            filpath: str = f"{path}.yaml"
+            print(f"Saving config here: {filpath}")
+            with open(filpath, "w") as file:
+                yaml.dump(vars(self.hparams), file)
 
     def timeStampsave_dir(self) -> types.NoneType:
 
@@ -357,6 +356,23 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.save_dir: str = os.path.join(self.save_dir, self.time_string)
 
         os.makedirs(self.save_dir, exist_ok=True)
+
+    def fit(self, *args, **kwargs):
+        
+
+        try:
+            super().fit(*args, **kwargs)
+
+        except Exception:
+            save_dir = getattr(self, "save_dir", None)
+            if save_dir and os.path.isdir(save_dir):
+                files = os.listdir(save_dir)
+                if not any(
+                    any(ext in f for ext in (".pth", ".png", ".svg")) for f in files
+                ):
+                    shutil.rmtree(save_dir)
+            raise
+
 
     @torch.no_grad()
     def compute_peak_gpu_memory(self, model, dataloader):
@@ -499,6 +515,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         wandbProjectName="",
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
+        accumulate_grad_batches=10,
         **kwargs,
     ) -> types.NoneType:
 
@@ -520,17 +537,40 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         self.save_dir = wandb_logger.log_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
-        
+
+        print(
+            f"\n[TensorBoard] logging to: {self.save_dir}\n"
+            f"[TensorBoard] view with:  tensorboard --logdir \"{self.save_dir}\"\n",
+            flush=True,
+        )
+
         self.saveConfig()
 
+        # Top-k best checkpoints, ranked by the monitored metric.
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.save_dir,
             save_top_k=self.hparams.ModelCheckpoint_save_top_k,
             monitor=self.hparams.ModelCheckpoint_monitor,
             mode=self.hparams.ModelCheckpoint_mode,
-            save_last=True,
             save_on_train_epoch_end=True,
+            # save_last intentionally omitted: in Lightning 2.6 a monitor-coupled
+            # callback only writes last.ckpt on epochs where a new top-k file is
+            # saved (see ModelCheckpoint.on_train_epoch_end guard), so it freezes
+            # once the metric stops improving. latest_checkpoint_callback below
+            # captures the true final-epoch model instead.
         )
+
+        # Genuine final-epoch checkpoint. monitor=None routes through
+        # _save_none_monitor_checkpoint, which saves every epoch (rolling, keeps
+        # the most recent 1) independent of the monitored metric.
+        latest_checkpoint_callback = ModelCheckpoint(
+            dirpath=self.save_dir,
+            monitor=None,
+            save_top_k=1,
+            save_on_train_epoch_end=True,
+            filename="last-{epoch:03d}-{step}",
+        )
+        self.latest_checkpoint_callback = latest_checkpoint_callback
         
         early_stopping_callback = SafeEarlyStopping(
             monitor=self.hparams.EarlyStopping_monitor,
@@ -540,9 +580,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         # TODO: Hack for now until smarter config parsing
         args = {
-            "callbacks": [checkpoint_callback, early_stopping_callback],
+            "callbacks": [checkpoint_callback, latest_checkpoint_callback, early_stopping_callback, DeviceStatsMonitor(cpu_stats=False)],
             "logger": wandb_logger,
-            "profiler": profiler,
         }
 
         super().__init__(
@@ -559,6 +598,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             dataset=self.hparams.dataset,
             fast_dev_run=self.hparams.fast_dev_run,
             limit_val_batches=limit_val_batches,
+            accumulate_grad_batches=accumulate_grad_batches,
             args=args,
         )
 
@@ -619,10 +659,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--num_workers", type=int, default=None)
         parser.add_argument("--trainFrac", type=float, default=0.9)
         parser.add_argument("--shuffle", action="store_true", default=True)
-        parser.add_argument("--fast_dev_run", type=int, default=1)
+        parser.add_argument("--fast_dev_run", type=int, default=0)
         parser.add_argument("--reproducibility_seed", type=int, default=43)
         parser.add_argument("--dataset", default="SMLMDataset")
         parser.add_argument("--limit_val_batches", type=float, default=1.0)
+        parser.add_argument("--accumulate_grad_batches", type=int, default=1)
         # --- callbacks ---
         parser.add_argument("--ModelCheckpoint_save_top_k", type=int, default=3)
         parser.add_argument("--ModelCheckpoint_monitor", default="Train LOSS")
@@ -631,7 +672,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--EarlyStopping_mode", default="min")
         parser.add_argument("--EarlyStopping_patience", type=int, default=50)
         # --- logging ---
-        parser.add_argument("--wandbProjectName", default="")
+        # parser.add_argument("--wandbProjectName", default="")
         return parser
 
     @classmethod
@@ -667,7 +708,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         args = cls.get_args().parse_args()
         if getattr(args, "num_workers", None) is None:
             num_threads = os.cpu_count()
-            args.num_workers = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            base = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            # Windows spawns each worker (re-importing torch's full CUDA DLL stack);
+            # too many concurrent loads exhaust the commit limit -> WinError 1114 (shm.dll).
+            cap = 4 if sys.platform == "win32" else base
+            args.num_workers = min(base, cap)
         print(f"CPU threads (num_workers): {args.num_workers}")
 
         args_dict = vars(args)
@@ -715,7 +760,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         except:
             print(f"Exited prematurely with exception: {full_stack()}")
-            self.hparams.ckptPath = self.checkpoint_callback.last_model_path
+            # latest_checkpoint_callback (monitor=None) stores its rolling
+            # final-epoch file in best_model_path; the top-k callback no longer
+            # tracks last_model_path.
+            self.hparams.ckptPath = self.latest_checkpoint_callback.best_model_path
 
         finally:
             self.saveConfig()

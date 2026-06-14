@@ -1,7 +1,7 @@
+# Constants shared across the dl_utils package.
+# Import from here (not from dl_utils directly) to avoid circular imports.
+
 # Additional Configuration Variables
-
-
-
 RES: list[float] = [0.025, 0.01, 0.01]
 HR_SHAPE: list[int] = [11416, 25916, 27499]
 AXES: list[str] = ['z', 'y', 'x']
@@ -46,14 +46,9 @@ LM_DF = None
 NUCL_DICT = None
 CELL_DICT = None
 
-OLD_LABEL_KEY = "label_id"
-NUCLEUS_LABEL_KEY = OLD_LABEL_KEY
+NUCLEUS_LABEL_KEY = "label_id"
 LABEL_KEY = "labels"
 EMBED_DICT_EMBED = "Embeddings"
-EMBED_KEY = EMBED_DICT_EMBED
-PREDICTED_LABEL_KEY = "pred labels"
-GT_LABEL_KEY = "gt"
-LOSS_KEY = "loss"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
 
 TOKEN_KEY = "token"
