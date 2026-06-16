@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Union, Any
 
@@ -9,6 +10,8 @@ import yaml
 from yamlfix import fix_files
 from torch.utils.data.dataloader import default_collate
 from .util import save_model as _save_model, load_model as _load_model
+
+logger = logging.getLogger(__name__)
 
 def _install_print_tee(save_dir: str) -> None:
     """Mirror all print() calls to *log_path*, following the same closure
@@ -61,13 +64,6 @@ class BaseModelClass(pl.LightningModule):
         #_install_print_tee(save_dir)
 
     def log(self, *args, **kwargs):
-        # v = args[1]
-        # if v is not None:
-        #     if isinstance(v, torch.Tensor):
-        #         if v.ndim > 1 or v.size(0) > 1:
-        #             kwargs["batch_size"] = v.size(0)
-        #             args= (args[0], v.mean(dim=0))
-
         super().log(*args, **kwargs)
 
     @staticmethod
@@ -99,11 +95,8 @@ class BaseModelClass(pl.LightningModule):
 
     def tensor2Numpy(self, tensor: torch.Tensor) -> np.ndarray:
         if isinstance(tensor, torch.Tensor):
-
-            if self.device != "cpu":
-                tensor = tensor.cpu()
-
-            return tensor.detach().squeeze().numpy()
+            # .detach().cpu() is a no-op when already detached / on CPU, so guard-free.
+            return tensor.detach().cpu().squeeze().numpy()
         return tensor
 
     def save_model(self, args, epoch, model, model_without_ddp, optimizer, loss_scaler, wb_run):
@@ -125,7 +118,7 @@ class BaseModelClass(pl.LightningModule):
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
-            if isinstance(m, nn.Linear) and m.bias is not None:
+            if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
@@ -152,7 +145,7 @@ class BaseModelClass(pl.LightningModule):
         for buffer in self.buffers():
             total_size_bytes += buffer.nelement() * buffer.element_size()
         total_size_gb = total_size_bytes / (1024**3)
-        print(f"Model memory size: {total_size_gb} GB")
+        logger.info("Model memory size: %.4f GB", total_size_gb)
 
     def compute_batch_memory_usage(self, sample):
         """
@@ -164,11 +157,11 @@ class BaseModelClass(pl.LightningModule):
         Returns:
         - Total memory usage in gigabytes (GB).
         """
-        input_memory = sum([x.element_size() * x.nelement() for x in sample])
+        input_memory = sum(x.element_size() * x.nelement() for x in sample)
         param_memory = sum(p.element_size() * p.nelement() for p in self.parameters())
         activation_memory = input_memory * 2
         total_memory = input_memory + param_memory + activation_memory
-        print(f"Batch in memory during training: {total_memory / (1024 ** 3)}GB")
+        logger.info("Batch in memory during training: %.4f GB", total_memory / (1024 ** 3))
 
     @staticmethod
     def add_model_specific_args(parent_parser):

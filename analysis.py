@@ -28,6 +28,13 @@ from dl_utils.LM_preprocess import get_array_from_df
 sns.set_context("poster")
 
 
+def _png_buffer_to_data_url(buf: BytesIO) -> str:
+    """Encode the PNG bytes held in *buf* as a ``data:image/png;base64`` URL."""
+    buf.seek(0)
+    encoded_image = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{encoded_image}"
+
+
 def convert_array_to_data_url(path) -> str:
     array = skimage.io.imread(path)
     fig, ax = plt.subplots(figsize=(3, 3))
@@ -36,9 +43,7 @@ def convert_array_to_data_url(path) -> str:
     buf = BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
     plt.close(fig)
-    buf.seek(0)
-    encoded_image: str = base64.b64encode(buf.getvalue()).decode()
-    return f"data:image/png;base64,{encoded_image}"
+    return _png_buffer_to_data_url(buf)
 
 
 class Classification:
@@ -87,9 +92,8 @@ class Classification:
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(
-                save_dir, "{}confusion_matrix.png").format(gtColumn), dpi=300)
-        plt.close()
+            plt.savefig(os.path.join(save_dir, f"{gtColumn}_confusion_matrix.png"), dpi=300)
+        plt.close(fig)
         return fig
 
     @staticmethod
@@ -105,11 +109,11 @@ class EmbeddingAnalysis:
 
     def __init__(
         self,
-        df_path: str = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json",
+        df_path: str,
         type: str = EMBED_DICT_EMBED,
         instancelabelColumn: str = NUCLEUS_LABEL_KEY,
         gtColumn: str = None,
-        classMapping: dict = {},
+        classMapping: dict = None,
         save_dir: str = None,
         binary: bool = False,
         dbscan: bool = False,
@@ -122,7 +126,10 @@ class EmbeddingAnalysis:
         classifier_method: str = "LogisticRegression",
         **kwargs,
     ) -> None:
-        assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
+        if classMapping is None:
+            classMapping = {}
+        assert isinstance(df_path, str) and df_path.endswith(".json"), \
+            "Dataframe path must be a path to a JSON file."
         if save_dir is None:
             save_dir = os.path.dirname(df_path)
         self.df_path: str = df_path
@@ -180,7 +187,7 @@ class EmbeddingAnalysis:
         instancelabelColumn: str = NUCLEUS_LABEL_KEY,
         gtColumn: str = None,
         save_dir: str = None,
-        classMapping: dict = {},
+        classMapping: dict = None,
         binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
@@ -190,6 +197,8 @@ class EmbeddingAnalysis:
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: str = None,
     ) -> "EmbeddingAnalysis":
+        if classMapping is None:
+            classMapping = {}
         instance = cls.__new__(cls)
         instance.df_path = None
         instance.type = type
@@ -354,7 +363,7 @@ class EmbeddingAnalysis:
         classifier_method: str = "LogisticRegression",
         **kwargs,
     ) -> None:
-        instance._gtColumn_was_list = isinstance(gtColumn, list)
+        assert not kwargs, f"Unexpected keyword argument(s): {sorted(kwargs)}"
         instance.instancelabelColumn = instancelabelColumn
         instance.classMapping = classMapping
         instance.save_dir = os.path.join(
@@ -413,67 +422,23 @@ class EmbeddingAnalysis:
     # ------------------------------------------------------------------ #
 
     def getLabels(self) -> None:
+        """Derive training labels from the (already-standardised) gtColumn.
+
+        Label *derivation* — list→combined-column joining, one-hot detection,
+        and string→int mapping — is performed once upstream in
+        :meth:`_standardise_label_column` (called from ``_apply_common_setup``).
+        By the time this runs ``self.gtColumn`` is always a single column name
+        whose values are numeric, so this method only handles the remaining
+        bookkeeping: the zero-offset shift, instance labels, and the
+        NaN/train-mask split used to fit the classifier.
+        """
         n = len(self.data_df)
-        _gtColumn_was_list = isinstance(self.gtColumn, list)
-
-        if isinstance(self.gtColumn, list):
-            combined_col = "_".join(self.gtColumn)
-            subset = self.data_df[self.gtColumn]
-
-            # Detect one-hot encoded columns: each column only contains 0/1
-            # (handles int, float, bool, and string variants after JSON round-trip)
-            def _is_binary(col):
-                try:
-                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
-                except (ValueError, TypeError):
-                    return False
-
-            is_onehot = all(_is_binary(subset[c]) for c in self.gtColumn)
-
-            if is_onehot:
-                # Use the active column name as label; NaN where none or multiple active
-                def _onehot_label(row):
-                    active = [c for c in self.gtColumn if float(row[c]) == 1.0]
-                    if len(active) == 1:
-                        return active[0]
-                    return np.nan  # all-zero or multi-active → treated as unlabelled
-
-                self.data_df[combined_col] = subset.apply(
-                    _onehot_label, axis=1)
-            else:
-                def _fmt(v):
-                    if pd.isna(v):
-                        return "NA"
-                    if isinstance(v, float) and v.is_integer():
-                        return str(int(v))
-                    return str(v)
-
-                self.data_df[combined_col] = (
-                    subset.apply(lambda col: col.map(_fmt))
-                    .agg("_".join, axis=1)
-                )
-
-            self.gtColumn = combined_col
 
         self.gtlabels: np.ndarray = (
             get_array_from_df(self.data_df, self.gtColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
-
-        if self._has_gt and self.gtlabels.dtype.kind in ('U', 'S', 'O'):
-            if not self.classMapping:
-                unique_vals = [v for v in pd.unique(
-                    self.gtlabels) if not pd.isna(v)]
-                str_to_int = {v: i + 1 for i,
-                              v in enumerate(sorted(unique_vals, key=str))}
-                self.classMapping = {i: v for v, i in str_to_int.items()}
-            else:
-                str_to_int = {v: k for k, v in self.classMapping.items()}
-            self.gtlabels = np.array(
-                [str_to_int.get(v, np.nan) for v in self.gtlabels], dtype=float
-            )
-            self.data_df[self.gtColumn] = self.gtlabels
 
         valid_mask = ~pd.isna(self.gtlabels)
         if 0 in self.gtlabels[valid_mask]:
@@ -484,14 +449,6 @@ class EmbeddingAnalysis:
         self.instancelabels: np.ndarray = get_array_from_df(
             self.data_df, self.instancelabelColumn)
         nan_mask = ~pd.isna(self.gtlabels)
-        # When gtColumn was a list, additionally exclude zero/inactive rows so that
-        # only explicitly labelled (active) samples participate in training.
-        # Mutual exclusivity is already guaranteed upstream: _onehot_label returns
-        # NaN for multi-active rows, so they are caught by nan_mask as well.
-        # if _gtColumn_was_list:
-        #     train_mask = nan_mask & (self.gtlabels > 0)
-        # else:
-        #     train_mask = nan_mask
         if nan_mask.sum() < n:
             warnings.warn(
                 f"Labels contain {n - nan_mask.sum()} inactive/NaN value(s). "
@@ -659,14 +616,15 @@ class EmbeddingAnalysis:
         )
 
     def UMAPResults(self, classColoumn: str | None = None,
-                    marker_size: int = 4, background_color: str = "rgba(0,0,0,0)"):
+                    marker_size: int = 4, background_color: str = "rgba(0,0,0,0)",
+                    **kwargs):
         col = classColoumn if classColoumn is not None else self.classColumn
         self.concatDF(self.UMAP())
         return EmbeddingAnalysis.specialScatter(
             self,
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
-            classColoumn=self.classColumn,
+            classColoumn=col,
             legend_title="UMAP - {}".format(
                 self.gtColumn if self._has_gt else self.classColumn),
             save_dir=self.save_dir, **kwargs
@@ -1425,8 +1383,8 @@ class EmbeddingAnalysis:
                 img = Image.fromarray(mid_z).resize((200, 200))
                 buffered = BytesIO()
                 img.save(buffered, format="PNG")
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
+                data_url = _png_buffer_to_data_url(buffered)
+                return f'<img src="{data_url}" width="200" height="200">'
             except Exception as e:
                 return f"Error creating image: {e}"
         return "No image available"

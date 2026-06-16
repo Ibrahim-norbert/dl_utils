@@ -1,5 +1,6 @@
+"""Placeholder for an end-to-end training/segmentation pipeline.
 
-trainer:BaseModel = SMLMSegmentation()
-
-def func(model:BaseModel):
-# First step loqd dqtqset
+This module was an unfinished scratch stub (it referenced undefined names and had
+no function body, so it failed to import). It is not used anywhere in the package.
+Flesh it out here when the pipeline is implemented.
+"""

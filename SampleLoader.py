@@ -1,25 +1,14 @@
-from typing import NamedTuple, Any, Tuple, List, Optional, Literal, Union
-from data_loader.data_loader import _SpecialDictRepr, _SpecialGenRepr
-import numpy as np
-from plyfile import PlyData
-import os
-import pandas as pd
-from data_loader import DataLoader, Extensions, DLoaderException
-
-import pickle
-import json
-from functools import cached_property, partial, wraps
-from collections.abc import Mapping
-import json
-import os
-import pandas as pd
-import pickle
-from collections import deque, namedtuple
-from functools import cached_property, partial, wraps
+from collections import deque
+from functools import cached_property, partial
 from logging import Logger
-from typing import Any, Generator, Iterable, Iterator, NamedTuple, TypeVar, Union
-import data_loader.data_loader as data_loader
 from pathlib import Path
+from typing import Any, Generator, Iterable, Union
+
+from plyfile import PlyData
+
+import data_loader.data_loader as data_loader
+from data_loader import DataLoader, Extensions, DLoaderException
+from data_loader.data_loader import _SpecialDictRepr
 
 
 def load_ply(path):
@@ -29,20 +18,20 @@ def load_ply(path):
 
 
 class ExtensionsBioimage(Extensions):
-    def __init__(**kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
     @property
     def defaults(self) -> dict:
         """
-        Returns a dictionary with default file extensions and their loader methods.
+        Returns a dictionary with default file extensions and their loader methods,
+        extending the base defaults with a ``.ply`` loader.
 
         #### Returns:
             - `dict`: A dictionary with default file extensions and their loader methods.
         """
-        methods_dict = self.super().defaults()
-        my_methods = {"ply": self._ext_tuple("ply", load_ply)}
-        return methods_dict.update(my_methods)
+        # ``Extensions.defaults`` is a property; access (don't call) it, then merge.
+        return {**super().defaults, "ply": self._ext_tuple("ply", load_ply)}
 
 
 class SampleLoaderBioImage(DataLoader):
@@ -70,15 +59,10 @@ class SampleLoaderBioImage(DataLoader):
 
     @classmethod
     def loadData(cls, path) -> Any:
-        dloader = cls.dataObject(path, total_workers=1)
-        files: _SpecialDictRepr = dloader.file
-        del dloader
-        output = None
-        for k, v in files.items():
-            output = v
-
-        assert output is not None, "The loaded data is of None type"
-
+        files: _SpecialDictRepr = cls.dataObject(path, total_workers=1).file
+        # `path` resolves to a single file, so there is exactly one entry.
+        output = next(iter(files.values()), None)
+        assert output is not None, f"The loaded data is of None type for path: {path!r}"
         return output
 
     @cached_property
@@ -126,20 +110,13 @@ class SampleLoaderBioImage(DataLoader):
         #### Returns:
             - `Generator`: Files generator.
         """
-        validate_file = partial(cls._validate_file, verbose=verbose)
-        directory: Path = validate_file(directory)
-        no_dirs = lambda p: p.is_file() and not p.is_dir()
-        ext_pattern = partial(cls._compiler, defaults, escape_k=False)
-        filter_files = lambda fp: all(
-            (
-                no_dirs(fp) if files_only else True,
-                ext_pattern(cls._rm_period(fp.suffix)),
-                validate_file(fp),
-            )
-        )
+        # `directory` is actually a single validated file path in every current
+        # caller (loadData is called per-file), so we yield it directly. The check
+        # guards against a directory being passed by mistake.
+        file_path = Path(directory)
+        assert not file_path.is_dir(), \
+            f"Expected a file path, got a directory: {file_path!r}"
 
-        assert not directory.is_dir(), "Is not a directory"
+        validated_files = (fp for fp in (file_path,))
 
-        validated_files = (f for f in (directory,))
-
-        return deque(validated_files) if not generator else validated_files
+        return validated_files if generator else deque(validated_files)

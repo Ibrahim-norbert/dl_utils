@@ -1,18 +1,24 @@
+import glob
+import logging
+import numbers
+import os
 import shutil
-from dl_utils.SampleLoader import SampleLoaderBioImage
-from dl_utils import util_base as util
+
 import numpy as np
 import pandas as pd
-import os
-import glob
 import yaml
 from functools import cached_property
-from typing import Any, List, Literal, Optional, Tuple, Union
 from pathlib import Path
+from typing import Any, List, Literal, Optional, Tuple, Union
+
 from torch.utils.data import DataLoader
-from dl_utils.SampleTypes import Data, Vertices
+
 from dl_utils import LABEL_KEY
-import logging
+from dl_utils.SampleLoader import SampleLoaderBioImage
+from dl_utils.SampleTypes import Data, Vertices
+from dl_utils import util_base as util
+
+logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 class BaseDataset:
     """Base class for nuclei data
@@ -98,17 +104,13 @@ class BaseDataset:
 
         cols = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
 
-        print(df_indx)
         # Extract and ensure numerical values
         bbox_values = [df.loc[df_indx, dim] for dim in cols]
-        # print(bbox_values, "before series check")
-        # bbox_values = [val.iloc[0] if not isinstance(val, numbers.Number) else val for val in bbox_values]
-        # print(bbox_values, "after series check")
         if not all(isinstance(val, numbers.Number) for val in bbox_values):
-            raise DataclassTypeError("All bounding box values must be numeric. but got: "
-                                     f"{[type(val) for val in bbox_values]}")
+            raise TypeError("All bounding box values must be numeric, but got: "
+                            f"{[type(val) for val in bbox_values]}")
 
-        return np.array(bbox_values, dtype=int).T  # Convert to NumPy float array
+        return np.array(bbox_values, dtype=int).T  # Convert to NumPy int array
     
     @staticmethod
     def bbox2slice(bbox: np.ndarray) -> tuple[slice, slice, slice]:
@@ -563,7 +565,7 @@ class VerticesDataset(BaseDataset):
             ]
 
         if self.standardizedLabels in self.datasetDF.columns:
-            self.standardizedLabels = self.datasetDf.loc[:, self.standardizedLabels]
+            self.standardizedLabels = self.datasetDF.loc[:, self.standardizedLabels]
 
         self.verticesInstanceLabelCol: str = labels
 
@@ -616,8 +618,8 @@ class VerticesDataset(BaseDataset):
         dataCol = "filePath"
         df: pd.DataFrame = pd.DataFrame.from_dict({dataCol: files})
         path = os.path.join(save_dir, "smlm.csv")
-        print(f"Saved here: {path}")
         df.to_csv(path)
+        logger.info("Saved here: %s", path)
         return path
 
     def Sample2df_index(self, sample) -> int:
@@ -740,17 +742,11 @@ class VerticesDataset(BaseDataset):
         - Updated DataFrame with the new column.
         """
 
-        if not isinstance(sorted_nucl_labels, np.ndarray):
-            sorted_nucl_labels = np.array(sorted_nucl_labels)
-        # Flatten sorted_nucl_labels if it has only one column (2D array with shape [n, 1])
+        sorted_nucl_labels = np.asarray(sorted_nucl_labels)
+        # Accept a column/row vector (shape [n, 1] or [1, n]); reject genuine 2D label sets.
         if sorted_nucl_labels.ndim == 2:
-            if sorted_nucl_labels.shape[0] == 1 or sorted_nucl_labels.shape[1] == 1:
-                if len(sorted_nucl_labels) == sorted_nucl_labels.size:
-                    sorted_nucl_labels = sorted_nucl_labels.flatten()
-                else:
-                    raise ValueError(
-                        "Sorted nucleus labels and sorted results do not match in length"
-                    )
+            if 1 in sorted_nucl_labels.shape:
+                sorted_nucl_labels = sorted_nucl_labels.ravel()
             else:
                 raise NotImplementedError(
                     "Handling for multi-column sorted_nucl_labels is not implemented."
@@ -788,9 +784,12 @@ class VerticesDataset(BaseDataset):
                 file, verticesCol, verticesInstanceLabelCol
             )
 
-        except Exception as e:
-            print(
-                f"That is the following problem at index {index} and file : {self.getFilePathFromDF(index)}: {e}"
+        except Exception:
+            # Returning None lets collate_fn drop the sample; log with traceback.
+            logger.exception(
+                "Failed to load sample at index %s (file: %s)",
+                index, self.getFilePathFromDF(index),
             )
+            return None
 
 

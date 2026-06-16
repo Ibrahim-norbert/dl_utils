@@ -1,83 +1,57 @@
+import os
+from typing import List, Literal, Any, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.axes import Axes
 import seaborn as sns
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 from matplotlib.pyplot import cm
 from sklearn.preprocessing import MinMaxScaler
-
-from matplotlib.figure import Figure
-import os
-from ast import Tuple
-from typing import List, Literal, Any, Union
-
-
-class FeatureVizualizer:
-    def __init__(self, features) -> None:
-        self.features: Any = features
-# TODO: Continue here
-
-    def PCA(self) -> None:
-        pass
-
-
 
 
 class costumMatplotlib:
     def __init__(self, style_set_context="paper") -> None:
-
-        # self.figsize = (12,6)
         self.style_set_context = style_set_context
-        
-
-    @property
-    def colorDataFormat() -> Tuple:
-        return Tuple
 
     @staticmethod
     def array2colors(x: np.ndarray):
-        """Argument for color in sns scatter is color."""
-        x = MinMaxScaler(feature_range=(0,1), clip=True).fit_transform(x)
-        assert x.shape[-1] == 3, f"Axis y must be 3"
-        colors = []
-        for i in x:
-            colors.append(tuple(i) + (1,))
-        return colors
+        """Map an (N, 3) array to a list of opaque RGBA tuples for seaborn."""
+        x = MinMaxScaler(feature_range=(0, 1), clip=True).fit_transform(x)
+        assert x.shape[-1] == 3, "Input must have 3 columns (RGB)"
+        return [(*row, 1) for row in x]
 
     @staticmethod
     def labels2colors(
         labels: list[int], alpha=1, colormap="tab20"
     ) -> Union[list[tuple[float]], None]:
 
-        labels = np.array(labels)
-
-        # sns.color_palette(palette="tab20",n_colors=np.unique(labels).size)
+        labels = np.asarray(labels)
         assert (
             labels.ndim == 1
         ), f"Labels must be a 1D array but it is {labels.ndim} with shape {labels.shape}"
+
+        unique = np.unique(labels)
         mapper = cm.ScalarMappable(cmap=colormap)
-        d_colors = mapper.to_rgba(np.unique(labels))  # Initialize the mapper
-        colors = []
-        for label in labels:
-            i = np.where(np.unique(labels) == label)[0][0]
-            r, g, b, a = d_colors[i]
-            colors.append((r, g, b, alpha))
-        return colors
+        d_colors = mapper.to_rgba(unique)
+        # Precompute label -> color once, then look up per label (O(n) instead of O(n^2)).
+        label_to_color = {lbl: (r, g, b, alpha) for lbl, (r, g, b, _) in zip(unique, d_colors)}
+        return [label_to_color[label] for label in labels]
 
     @staticmethod
     def points2Dict(points):
-        return {
-            ["x", "y", "z"][i]: x.flatten()
-            for i, x in enumerate(np.vsplit(points.T, points.shape[-1]))
-        }
+        ndim = points.shape[-1]
+        axes = ["x", "y", "z"][:ndim]
+        assert ndim <= 3, f"points2Dict supports up to 3 dimensions, got {ndim}"
+        return {axes[i]: x.flatten() for i, x in enumerate(np.vsplit(points.T, ndim))}
 
     @classmethod
     def saveFig(cls, fig, save_dir, title, func, fileExtension="svg") -> None:
-        plt.close()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
             fig.savefig(f"{save_path}.{fileExtension}", dpi=500)
+        plt.close(fig)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
@@ -104,13 +78,11 @@ class costumMatplotlib:
         labels: Union[List[int],
                       np.ndarray[Literal["1"], np.dtype[np.int32]]] = None,
         title: str = "",
-        style_set_context="notebook",
+        style_set_context="paper",
         save_dir=None,
         **kwargs,
     ) -> tuple[Figure, Axes]:
-        # plot = cls(style_set_context)
-        # fig, ax = plt.subplots(1,1, figsize=plot.figsize)\
-        sns.set_context("paper", font_scale=0.5)
+        sns.set_context(style_set_context, font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
         if labels is not None:
             ax: Axes = costumMatplotlib.subScatter(
