@@ -47,7 +47,9 @@ class BaseModelClass(pl.LightningModule):
         space_threshold=0.5,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        # pl.LightningModule.__init__ takes no args; extra model-config kwargs are
+        # captured below by save_hyperparameters(), not forwarded to the base.
+        super().__init__()
 
         self.save_hyperparameters()
         self.__dict__.update(self.hparams)

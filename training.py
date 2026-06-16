@@ -24,7 +24,7 @@ from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
-from lightning.pytorch.callbacks import DeviceStatsMonitor
+from pytorch_lightning.callbacks import DeviceStatsMonitor
 import shutil
 
 
