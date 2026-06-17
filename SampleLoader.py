@@ -66,7 +66,10 @@ class SampleLoaderBioImage(DataLoader):
 
     @classmethod
     def dataObject(cls, path, **kwargs) -> "SampleLoaderBioImage":
-        return cls(path, generator=False, full_posix=False, **kwargs)
+        return cls(path, generator=False, full_posix=False,
+                   ext_loaders={"txt": cls.EXTENSIONS._ext_tuple(
+                "txt", lambda path: pd.read_csv(path, sep=' ', header=0)
+            )}, **kwargs)
 
     @classmethod
     def loadData(cls, path) -> Any:

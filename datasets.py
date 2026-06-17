@@ -227,7 +227,8 @@ class BaseDataset:
         slice_val: Tuple[slice[Any, Any, Any]] = BaseDataset.bbox2slice(bbox)
         return slice_val
 
-    def loadDataFrame(self, datasetPath: str) -> pd.DataFrame:
+    @staticmethod
+    def loadDataFrame(datasetPath: str) -> pd.DataFrame:
         data_df = SampleLoaderBioImage.loadData(datasetPath)
         if data_df is not None:
             assert isinstance(data_df, pd.DataFrame)
