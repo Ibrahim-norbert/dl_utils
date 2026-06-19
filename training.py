@@ -235,6 +235,17 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = torch.load(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
+        # Drop keys whose shapes don't match the module before loading, so an
+        # architecture change in the tokenizer/decoder head doesn't abort the load
+        # (load_state_dict raises on a shape mismatch even with strict=False). These
+        # are reported as `shape_skipped`; the backbone weights still load.
+        module_state = module.state_dict()
+        shape_skipped = [
+            k for k, v in state_dict.items()
+            if k in module_state and hasattr(v, "shape") and v.shape != module_state[k].shape
+        ]
+        if shape_skipped:
+            state_dict = {k: v for k, v in state_dict.items() if k not in shape_skipped}
         missing, unexpected = module.load_state_dict(state_dict=state_dict, strict=False)
         print(f"[getModel] Loaded weights from: {ckptPath}")
         if shape_skipped:
