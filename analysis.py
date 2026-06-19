@@ -617,9 +617,13 @@ class EmbeddingAnalysis:
 
     def UMAPResults(self, classColoumn: str | None = None,
                     marker_size: int = 4, background_color: str = "rgba(0,0,0,0)",
+                    umap_kwargs: dict | None = None,
                     **kwargs):
         col = classColoumn if classColoumn is not None else self.classColumn
-        self.concatDF(self.UMAP())
+        # umap_kwargs flow to UMAP() (e.g. n_neighbors); remaining kwargs to the
+        # scatter plot. UMAP requires n_neighbors < n_samples, so small feature
+        # spaces (e.g. one point per pooled sample) must pass a capped value.
+        self.concatDF(self.UMAP(**(umap_kwargs or {})))
         return EmbeddingAnalysis.specialScatter(
             self,
             xColumn="UMAP x", yColumn="UMAP y",
