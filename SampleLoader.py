@@ -66,10 +66,13 @@ class SampleLoaderBioImage(DataLoader):
 
     @classmethod
     def dataObject(cls, path, **kwargs) -> "SampleLoaderBioImage":
+        # `data_loader.Extensions.customize` expects each ext_loaders value to be a
+        # nested dict {<callable>: {param: value}} (it pulls the callable via
+        # next(iter(...)) then introspects its signature). PALMTracer .txt files are
+        # tab-delimited with a 2-line metadata header before the real column header,
+        # so skip those two rows.
         return cls(path, generator=False, full_posix=False,
-                   ext_loaders={"txt": cls.EXTENSIONS._ext_tuple(
-                "txt", lambda path: pd.read_csv(path, sep=' ', header=0)
-            )}, **kwargs)
+                   ext_loaders={"txt": {pd.read_csv: {"sep": "\t", "skiprows": 2, "header": 0}}}, **kwargs)
 
     @classmethod
     def loadData(cls, path) -> Any:
