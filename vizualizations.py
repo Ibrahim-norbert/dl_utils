@@ -73,11 +73,11 @@ class costumMatplotlib:
 
     @classmethod
     def saveFig(cls, fig, save_dir, title, func, fileExtension="svg") -> None:
-        plt.close()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
             fig.savefig(f"{save_path}.{fileExtension}", dpi=500)
+            plt.close(fig)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
@@ -288,17 +288,6 @@ class costumMatplotlib:
                     if subplots_kwargs is not None and isinstance(subplots_kwargs, list)
                     else subplots_kwargs,
                 )
-
-        # file_name = f"label_{labels[0]}"
-        # if kwargs["extra_info"] is not None:
-        #     grouping = kwargs["extra_info"]["grouping"]
-        #     if kwargs["extra_info"]["color_group"] is not None:
-        #         color_group : tuple[float, float, float, float] = kwargs["extra_info"]["color_group"]
-        #         # Highlight the figure border
-        #         fig.patch.set_edgecolor(color_group)  # Blue figure border
-        #         fig.patch.set_linewidth(50)  # Thicker border
-        #         file_name = f"grouping_{grouping}_{file_name}"
-        # Adjust layout and save the plot
 
         fig.tight_layout()
 
