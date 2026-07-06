@@ -107,10 +107,22 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         datasetConfig: typing.Union[None, dict] = None,
         limit_val_batches=0,
         accumulate_grad_batches=10,
+        use_fsdp: bool = False,
+        devices="auto",
+        num_nodes: int = 1,
+        precision=None,
+        fsdpConfig: typing.Union[None, dict] = None,
         args={},
     ) -> types.NoneType:
 
-        self.__dict__.update(locals())
+        _locals = locals()
+        # pl.Trainer exposes precision/num_nodes as read-only properties (data
+        # descriptors, which win over instance-dict entries on read), so storing
+        # them here would only add dead, confusing entries — they are forwarded
+        # explicitly to super().__init__ below instead.
+        for _prop in ("precision", "num_nodes", "devices"):
+            _locals.pop(_prop, None)
+        self.__dict__.update(_locals)
 
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
 
@@ -143,8 +155,18 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         #     self.epoch_start = max_epochs - self.epoch
         #     self.epoch_end = max_epochs
         
+        # Resolve the boolean FSDP switch into a Lightning strategy. Kept as an
+        # overridable hook: this generic base cannot build a model-aware FSDP
+        # wrap policy, so subclasses (e.g. SMLMSegmentationTraining) override
+        # _resolve_strategy to construct the real FSDPStrategy from the model class.
+        strategy = self._resolve_strategy(use_fsdp, fsdpConfig)
+
         super().__init__(
             accelerator=self.device,
+            strategy=strategy,
+            devices=devices,
+            num_nodes=num_nodes,
+            precision=precision,  # None -> Lightning default ("32-true")
             fast_dev_run=self.hparams.fast_dev_run,
             deterministic=True,
             max_epochs=max_epochs,
@@ -157,6 +179,30 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             num_sanity_val_steps=1,
             **args,
         )
+
+    def _resolve_strategy(
+        self,
+        use_fsdp: bool = False,
+        fsdpConfig: typing.Union[None, dict] = None,
+    ):
+        """Map the boolean FSDP switch to a Lightning ``strategy`` argument.
+
+        Returns ``"auto"`` (the pl.Trainer default) when ``use_fsdp`` is False.
+        The generic base deliberately refuses ``use_fsdp=True``: building an
+        FSDPStrategy without a model-aware auto-wrap policy would flatten the
+        whole LightningModule into a single FSDP unit (one giant flat parameter),
+        which breaks models relying on aligned submodule sharding (e.g. the
+        SMLMSonata teacher/student EMA). Trainer subclasses that know their model
+        family override this to construct the real strategy — see
+        ``SMLMSegmentationTraining._resolve_strategy``.
+        """
+        if use_fsdp:
+            raise NotImplementedError(
+                "use_fsdp=True needs a model-aware FSDP wrap policy; use a trainer "
+                "subclass that overrides _resolve_strategy (e.g. "
+                "SMLMSegmentationTraining)."
+            )
+        return "auto"
 
 
     
@@ -496,7 +542,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         batch_size=1,
         shuffle=True,
         fast_dev_run=1,
+        use_fsdp: bool = False,
         devices="auto",
+        num_nodes: int = 1,
+        precision=None,
+        fsdpConfig: typing.Union[dict, str, None] = None,
         profiler: str = "advanced",
         ModelCheckpoint_save_top_k=3,
         ModelCheckpoint_monitor="Train LOSS",
@@ -593,6 +643,13 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             fast_dev_run=self.hparams.fast_dev_run,
             limit_val_batches=limit_val_batches,
             accumulate_grad_batches=accumulate_grad_batches,
+            # Distributed knobs: read from hparams so a config-file YAML (merged
+            # by save_hyperparameters above) can flip them, e.g. `use_fsdp: true`.
+            use_fsdp=getattr(self.hparams, "use_fsdp", False),
+            devices=getattr(self.hparams, "devices", "auto"),
+            num_nodes=getattr(self.hparams, "num_nodes", 1),
+            precision=getattr(self.hparams, "precision", None),
+            fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
             args=args,
         )
 
@@ -658,6 +715,16 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--dataset", default="SMLMDataset")
         parser.add_argument("--limit_val_batches", type=float, default=1.0)
         parser.add_argument("--accumulate_grad_batches", type=int, default=1)
+        # --- distributed training ---
+        # Boolean switch: `use_fsdp: true` in a YAML config (or --use_fsdp on the
+        # CLI) activates FSDP; the strategy itself is built by the trainer
+        # subclass' _resolve_strategy from the model class' wrap policy.
+        parser.add_argument("--use_fsdp", action="store_true", default=False)
+        parser.add_argument("--devices", default="auto")
+        parser.add_argument("--num_nodes", type=int, default=1)
+        parser.add_argument("--precision", default=None)
+        # Nested FSDP tuning block (YAML string or dict), e.g. sharding_strategy.
+        parser.add_argument("--fsdpConfig", default=None)
         # --- callbacks ---
         parser.add_argument("--ModelCheckpoint_save_top_k", type=int, default=3)
         parser.add_argument("--ModelCheckpoint_monitor", default="Train LOSS")
@@ -720,6 +787,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         nested_model = _as_dict(args_dict.pop("modelConfig", None))
         nested_dataset = _as_dict(args_dict.pop("datasetConfig", None))
+
+        # fsdpConfig arrives as a YAML string from configargparse; normalize to a
+        # dict (or None when absent) so _resolve_strategy gets a plain mapping.
+        args_dict["fsdpConfig"] = _as_dict(args_dict.pop("fsdpConfig", None)) or None
 
         model_defaults = cls._model_config_defaults()
         dataset_defaults = cls._dataset_config_defaults()
