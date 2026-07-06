@@ -4,6 +4,7 @@ from logging import Logger
 from pathlib import Path
 from typing import Any, Generator, Iterable, Union
 
+import pandas as pd
 from plyfile import PlyData
 
 import data_loader.data_loader as data_loader
