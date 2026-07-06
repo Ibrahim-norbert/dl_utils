@@ -1,4 +1,4 @@
-from typing import NamedTuple, Any
+from typing import NamedTuple, Any, Optional
 import numpy as np
 import torch
 
@@ -42,3 +42,19 @@ class PromptData(Data):
 class SAMVertices(Vertices):
 
     promptData: PromptData
+
+
+class CellGeometry(NamedTuple):
+    """A :class:`Vertices` plus an optional per-object feature bundle.
+
+    Mirrors :class:`Vertices` (``data`` + ``filePath``) and adds ``feat`` — the
+    ``(6,)`` normalized sin/cos centre-of-mass embedding built by
+    :func:`dl_utils.cell_geometry.cell_geometry_from_row`. When present, the
+    SONATA-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
+    color+normal supplements while keeping ``coord``); when ``None`` the collate
+    falls back to the computed ``[coord, color, normal]`` features.
+    """
+
+    data: Data
+    filePath: str
+    feat: Optional[np.ndarray] = None
