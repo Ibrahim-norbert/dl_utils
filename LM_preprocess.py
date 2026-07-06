@@ -11,7 +11,13 @@ import skimage.io
 from skimage.transform import resize
 from sklearn import preprocessing
 from sklearn.preprocessing import MinMaxScaler
-import z5py
+# z5py (N5/zarr chunked-volume IO) is only needed by the EM-volume pipelines
+# below; keep it optional so light environments (e.g. the SMLM GNN env) can
+# import dl_utils.LM_preprocess for its DataFrame helpers.
+try:
+    import z5py
+except ImportError:
+    z5py = None
 
 from dl_utils import NUCLEUS_LABEL_KEY, OLD_LABEL_KEY
 from dl_utils import img2patch as img2ps
