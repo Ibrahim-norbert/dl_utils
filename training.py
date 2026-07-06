@@ -24,7 +24,8 @@ from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
-
+from lightning.pytorch.callbacks import DeviceStatsMonitor
+import shutil
 
 
 def full_stack() -> str:
@@ -105,10 +106,23 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         modelConfig: typing.Union[None, dict] = None,
         datasetConfig: typing.Union[None, dict] = None,
         limit_val_batches=0,
+        accumulate_grad_batches=10,
+        use_fsdp: bool = False,
+        devices="auto",
+        num_nodes: int = 1,
+        precision=None,
+        fsdpConfig: typing.Union[None, dict] = None,
         args={},
     ) -> types.NoneType:
 
-        self.__dict__.update(locals())
+        _locals = locals()
+        # pl.Trainer exposes precision/num_nodes as read-only properties (data
+        # descriptors, which win over instance-dict entries on read), so storing
+        # them here would only add dead, confusing entries — they are forwarded
+        # explicitly to super().__init__ below instead.
+        for _prop in ("precision", "num_nodes", "devices"):
+            _locals.pop(_prop, None)
+        self.__dict__.update(_locals)
 
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
 
@@ -119,7 +133,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         if self.hparams.fast_dev_run is True or self.hparams.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
-            self.device = "cpu"
+            #self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
@@ -141,16 +155,57 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         #     self.epoch_start = max_epochs - self.epoch
         #     self.epoch_end = max_epochs
         
+        # Resolve the boolean FSDP switch into a Lightning strategy. Kept as an
+        # overridable hook: this generic base cannot build a model-aware FSDP
+        # wrap policy, so subclasses (e.g. SMLMSegmentationTraining) override
+        # _resolve_strategy to construct the real FSDPStrategy from the model class.
+        strategy = self._resolve_strategy(use_fsdp, fsdpConfig)
+
         super().__init__(
             accelerator=self.device,
+            strategy=strategy,
+            devices=devices,
+            num_nodes=num_nodes,
+            precision=precision,  # None -> Lightning default ("32-true")
             fast_dev_run=self.hparams.fast_dev_run,
             deterministic=True,
             max_epochs=max_epochs,
             log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
+            accumulate_grad_batches=accumulate_grad_batches,
+            # Skip the pre-training sanity-check validation pass: a validation
+            # error there would otherwise abort the run before any training
+            # metric is flushed, leaving TensorBoard empty.
+            num_sanity_val_steps=1,
             **args,
         )
 
+    def _resolve_strategy(
+        self,
+        use_fsdp: bool = False,
+        fsdpConfig: typing.Union[None, dict] = None,
+    ):
+        """Map the boolean FSDP switch to a Lightning ``strategy`` argument.
+
+        Returns ``"auto"`` (the pl.Trainer default) when ``use_fsdp`` is False.
+        The generic base deliberately refuses ``use_fsdp=True``: building an
+        FSDPStrategy without a model-aware auto-wrap policy would flatten the
+        whole LightningModule into a single FSDP unit (one giant flat parameter),
+        which breaks models relying on aligned submodule sharding (e.g. the
+        SMLMSonata teacher/student EMA). Trainer subclasses that know their model
+        family override this to construct the real strategy — see
+        ``SMLMSegmentationTraining._resolve_strategy``.
+        """
+        if use_fsdp:
+            raise NotImplementedError(
+                "use_fsdp=True needs a model-aware FSDP wrap policy; use a trainer "
+                "subclass that overrides _resolve_strategy (e.g. "
+                "SMLMSegmentationTraining)."
+            )
+        return "auto"
+
+
+    
     def save_hyperparameters(self) -> Namespace | types.NoneType:
         # From pytorch_lightning.core.mixins.hparams_mixin import HyperparametersMixin
         current_frame: sys.FrameType | types.NoneType = inspect.currentframe()
@@ -225,7 +280,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = torch.load(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
-        missing, unexpected = module.load_state_dict(state_dict, strict=False)
+        missing, unexpected = module.load_state_dict(state_dict=state_dict, strict=False)
         print(f"[getModel] Loaded weights from: {ckptPath}")
         if missing:
             print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
@@ -245,9 +300,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         if not os.path.exists(weights_path):
             raise FileNotFoundError(f"[getModel] weightsCkptPath not found: {weights_path}")
         return self.loadWeights(weights_path, module)
-
-
-
 
     def getValDataloader(self, val_ds: datasets.BaseDataset, **kwargs):
 
@@ -311,22 +363,23 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def saveConfig(self) -> types.NoneType:
         # Writing the data to a YAML file
 
-        # Save to yaml file
-        path: str = os.path.join(self.save_dir, self.__class__.__name__)
+        if os.path.exists(self.save_dir):
+            # Save to yaml file
+            path: str = os.path.join(self.save_dir, self.__class__.__name__)
 
-        # Any argparse Namespaces in hparams are converted to dicts
-        for key, value in vars(self.hparams).items():
-            if isinstance(value, argparse.Namespace):
-                setattr(self.hparams, key, vars(value))
+            # Any argparse Namespaces in hparams are converted to dicts
+            for key, value in vars(self.hparams).items():
+                if isinstance(value, argparse.Namespace):
+                    setattr(self.hparams, key, vars(value))
 
-        # TODO: Read through following for improvement:
-        # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
+            # TODO: Read through following for improvement:
+            # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
 
-        # Test if each value is acceptable to yaml
-        filpath: str = f"{path}.yaml"
-        print(f"Saving config here: {filpath}")
-        with open(filpath, "w") as file:
-            yaml.dump(vars(self.hparams), file)
+            # Test if each value is acceptable to yaml
+            filpath: str = f"{path}.yaml"
+            print(f"Saving config here: {filpath}")
+            with open(filpath, "w") as file:
+                yaml.dump(vars(self.hparams), file)
 
     def timeStampsave_dir(self) -> types.NoneType:
 
@@ -343,6 +396,23 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.save_dir: str = os.path.join(self.save_dir, self.time_string)
 
         os.makedirs(self.save_dir, exist_ok=True)
+
+    def fit(self, *args, **kwargs):
+        
+
+        try:
+            super().fit(*args, **kwargs)
+
+        except Exception:
+            save_dir = getattr(self, "save_dir", None)
+            if save_dir and os.path.isdir(save_dir):
+                files = os.listdir(save_dir)
+                if not any(
+                    any(ext in f for ext in (".pth", ".png", ".svg")) for f in files
+                ):
+                    shutil.rmtree(save_dir)
+            raise
+
 
     @torch.no_grad()
     def compute_peak_gpu_memory(self, model, dataloader):
@@ -472,7 +542,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         batch_size=1,
         shuffle=True,
         fast_dev_run=1,
+        use_fsdp: bool = False,
         devices="auto",
+        num_nodes: int = 1,
+        precision=None,
+        fsdpConfig: typing.Union[dict, str, None] = None,
         profiler: str = "advanced",
         ModelCheckpoint_save_top_k=3,
         ModelCheckpoint_monitor="Train LOSS",
@@ -485,6 +559,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         wandbProjectName="",
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
+        accumulate_grad_batches=10,
         **kwargs,
     ) -> types.NoneType:
 
@@ -506,17 +581,40 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         self.save_dir = wandb_logger.log_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
-        
+
+        print(
+            f"\n[TensorBoard] logging to: {self.save_dir}\n"
+            f"[TensorBoard] view with:  tensorboard --logdir \"{self.save_dir}\"\n",
+            flush=True,
+        )
+
         self.saveConfig()
 
+        # Top-k best checkpoints, ranked by the monitored metric.
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.save_dir,
             save_top_k=self.hparams.ModelCheckpoint_save_top_k,
             monitor=self.hparams.ModelCheckpoint_monitor,
             mode=self.hparams.ModelCheckpoint_mode,
-            save_last=True,
             save_on_train_epoch_end=True,
+            # save_last intentionally omitted: in Lightning 2.6 a monitor-coupled
+            # callback only writes last.ckpt on epochs where a new top-k file is
+            # saved (see ModelCheckpoint.on_train_epoch_end guard), so it freezes
+            # once the metric stops improving. latest_checkpoint_callback below
+            # captures the true final-epoch model instead.
         )
+
+        # Genuine final-epoch checkpoint. monitor=None routes through
+        # _save_none_monitor_checkpoint, which saves every epoch (rolling, keeps
+        # the most recent 1) independent of the monitored metric.
+        latest_checkpoint_callback = ModelCheckpoint(
+            dirpath=self.save_dir,
+            monitor=None,
+            save_top_k=1,
+            save_on_train_epoch_end=True,
+            filename="last-{epoch:03d}-{step}",
+        )
+        self.latest_checkpoint_callback = latest_checkpoint_callback
         
         early_stopping_callback = SafeEarlyStopping(
             monitor=self.hparams.EarlyStopping_monitor,
@@ -526,9 +624,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         # TODO: Hack for now until smarter config parsing
         args = {
-            "callbacks": [checkpoint_callback, early_stopping_callback],
+            "callbacks": [checkpoint_callback, latest_checkpoint_callback, early_stopping_callback, DeviceStatsMonitor(cpu_stats=False)],
             "logger": wandb_logger,
-            "profiler": profiler,
         }
 
         super().__init__(
@@ -545,6 +642,14 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             dataset=self.hparams.dataset,
             fast_dev_run=self.hparams.fast_dev_run,
             limit_val_batches=limit_val_batches,
+            accumulate_grad_batches=accumulate_grad_batches,
+            # Distributed knobs: read from hparams so a config-file YAML (merged
+            # by save_hyperparameters above) can flip them, e.g. `use_fsdp: true`.
+            use_fsdp=getattr(self.hparams, "use_fsdp", False),
+            devices=getattr(self.hparams, "devices", "auto"),
+            num_nodes=getattr(self.hparams, "num_nodes", 1),
+            precision=getattr(self.hparams, "precision", None),
+            fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
             args=args,
         )
 
@@ -605,10 +710,21 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--num_workers", type=int, default=None)
         parser.add_argument("--trainFrac", type=float, default=0.9)
         parser.add_argument("--shuffle", action="store_true", default=True)
-        parser.add_argument("--fast_dev_run", type=int, default=1)
+        parser.add_argument("--fast_dev_run", type=int, default=0)
         parser.add_argument("--reproducibility_seed", type=int, default=43)
         parser.add_argument("--dataset", default="SMLMDataset")
         parser.add_argument("--limit_val_batches", type=float, default=1.0)
+        parser.add_argument("--accumulate_grad_batches", type=int, default=1)
+        # --- distributed training ---
+        # Boolean switch: `use_fsdp: true` in a YAML config (or --use_fsdp on the
+        # CLI) activates FSDP; the strategy itself is built by the trainer
+        # subclass' _resolve_strategy from the model class' wrap policy.
+        parser.add_argument("--use_fsdp", action="store_true", default=False)
+        parser.add_argument("--devices", default="auto")
+        parser.add_argument("--num_nodes", type=int, default=1)
+        parser.add_argument("--precision", default=None)
+        # Nested FSDP tuning block (YAML string or dict), e.g. sharding_strategy.
+        parser.add_argument("--fsdpConfig", default=None)
         # --- callbacks ---
         parser.add_argument("--ModelCheckpoint_save_top_k", type=int, default=3)
         parser.add_argument("--ModelCheckpoint_monitor", default="Train LOSS")
@@ -617,7 +733,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--EarlyStopping_mode", default="min")
         parser.add_argument("--EarlyStopping_patience", type=int, default=50)
         # --- logging ---
-        parser.add_argument("--wandbProjectName", default="")
+        # parser.add_argument("--wandbProjectName", default="")
         return parser
 
     @classmethod
@@ -653,7 +769,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         args = cls.get_args().parse_args()
         if getattr(args, "num_workers", None) is None:
             num_threads = os.cpu_count()
-            args.num_workers = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            base = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            # Windows spawns each worker (re-importing torch's full CUDA DLL stack);
+            # too many concurrent loads exhaust the commit limit -> WinError 1114 (shm.dll).
+            cap = 4 if sys.platform == "win32" else base
+            args.num_workers = min(base, cap)
         print(f"CPU threads (num_workers): {args.num_workers}")
 
         args_dict = vars(args)
@@ -667,6 +787,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         nested_model = _as_dict(args_dict.pop("modelConfig", None))
         nested_dataset = _as_dict(args_dict.pop("datasetConfig", None))
+
+        # fsdpConfig arrives as a YAML string from configargparse; normalize to a
+        # dict (or None when absent) so _resolve_strategy gets a plain mapping.
+        args_dict["fsdpConfig"] = _as_dict(args_dict.pop("fsdpConfig", None)) or None
 
         model_defaults = cls._model_config_defaults()
         dataset_defaults = cls._dataset_config_defaults()
@@ -701,7 +825,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         except:
             print(f"Exited prematurely with exception: {full_stack()}")
-            self.hparams.ckptPath = self.checkpoint_callback.last_model_path
+            # latest_checkpoint_callback (monitor=None) stores its rolling
+            # final-epoch file in best_model_path; the top-k callback no longer
+            # tracks last_model_path.
+            self.hparams.ckptPath = self.latest_checkpoint_callback.best_model_path
 
         finally:
             self.saveConfig()

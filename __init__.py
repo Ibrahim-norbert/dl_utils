@@ -1,4 +1,7 @@
 # Additional Configuration Variables
+
+
+
 RES: list[float] = [0.025, 0.01, 0.01]
 HR_SHAPE: list[int] = [11416, 25916, 27499]
 AXES: list[str] = ['z', 'y', 'x']
@@ -45,7 +48,11 @@ CELL_DICT = None
 
 NUCLEUS_LABEL_KEY = "label_id"
 LABEL_KEY = "labels"
-EMBED_KEY = "Embeddings"
+EMBED_DICT_EMBED = "Embeddings"
+EMBED_KEY = EMBED_DICT_EMBED
+PREDICTED_LABEL_KEY = "pred labels"
+GT_LABEL_KEY = "gt"
+LOSS_KEY = "loss"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
 
 TOKEN_KEY = "token"

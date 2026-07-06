@@ -1,4 +1,4 @@
-from typing import NamedTuple, Any, Union
+from typing import NamedTuple, Any
 import numpy as np
 import torch
 
@@ -33,3 +33,12 @@ class Vertices(NamedTuple):
 
     data: Data
     filePath: str
+
+
+class PromptData(Data):
+    pass
+
+
+class SAMVertices(Vertices):
+
+    promptData: PromptData

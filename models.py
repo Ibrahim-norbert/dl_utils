@@ -47,7 +47,9 @@ class BaseModelClass(pl.LightningModule):
         space_threshold=0.5,
         **kwargs
     ):
-        super().__init__(**kwargs)
+        # pl.LightningModule.__init__ takes no args; extra model-config kwargs are
+        # captured below by save_hyperparameters(), not forwarded to the base.
+        super().__init__()
 
         self.save_hyperparameters()
         self.__dict__.update(self.hparams)
@@ -56,11 +58,24 @@ class BaseModelClass(pl.LightningModule):
 
         self.initialize_weights()
     
-        _install_print_tee(save_dir)
+        #_install_print_tee(save_dir)
+
+    def log(self, *args, **kwargs):
+        # v = args[1]
+        # if v is not None:
+        #     if isinstance(v, torch.Tensor):
+        #         if v.ndim > 1 or v.size(0) > 1:
+        #             kwargs["batch_size"] = v.size(0)
+        #             args= (args[0], v.mean(dim=0))
+
+        super().log(*args, **kwargs)
 
     @staticmethod
-    def collate_fn(**kwargs):
-        return default_collate(**kwargs)
+    def collate_fn(batch, *args, **kwargs):
+        batch = [x for x in batch if x is not None]
+        if not batch:
+            raise ValueError("collate_fn received a batch of all-None items — check __getitem__ for errors")
+        return default_collate(batch, *args, **kwargs)
 
     def get_device(self):
         return next(self.parameters()).device
@@ -83,11 +98,13 @@ class BaseModelClass(pl.LightningModule):
         return hparams
 
     def tensor2Numpy(self, tensor: torch.Tensor) -> np.ndarray:
+        if isinstance(tensor, torch.Tensor):
 
-        if self.device != "cpu":
-            tensor = tensor.cpu()
+            if self.device != "cpu":
+                tensor = tensor.cpu()
 
-        return tensor.detach().squeeze().numpy()
+            return tensor.detach().squeeze().numpy()
+        return tensor
 
     def save_model(self, args, epoch, model, model_without_ddp, optimizer, loss_scaler, wb_run):
         _save_model(args, epoch, model, model_without_ddp, optimizer, loss_scaler, wb_run)

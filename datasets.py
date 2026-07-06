@@ -82,7 +82,17 @@ class BaseDataset:
             with z5py.File(n5_file, 'r', use_zarr_format=False) as f:
                 volume_read = f[f"{groupkey}/{key}"][:]
             logger.debug("Written volume — shape: %s, dtype: %s", volume_read.shape, volume_read.dtype)
-
+            
+    @staticmethod
+    def getDataloader(dataset, batch_size, num_workers, persistent_workers, **kwargs):
+        # print(f"All entered parameters: {locals()}")
+        return DataLoader(
+            dataset=dataset,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            **kwargs,
+        )
 
     @staticmethod
     def getbboxfromdf(df: pd.DataFrame, df_indx) -> np.ndarray:
@@ -218,7 +228,8 @@ class BaseDataset:
         slice_val: Tuple[slice[Any, Any, Any]] = BaseDataset.bbox2slice(bbox)
         return slice_val
 
-    def loadDataFrame(self, datasetPath: str) -> pd.DataFrame:
+    @staticmethod
+    def loadDataFrame(datasetPath: str) -> pd.DataFrame:
         data_df = SampleLoaderBioImage.loadData(datasetPath)
         if data_df is not None:
             assert isinstance(data_df, pd.DataFrame)
