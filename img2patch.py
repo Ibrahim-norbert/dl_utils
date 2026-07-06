@@ -7,11 +7,11 @@ BBOX_LABEL_IDX = 0
 BBOX_Z_MIN, BBOX_Z_MAX = 1, 2
 BBOX_Y_MIN, BBOX_Y_MAX = 3, 4
 BBOX_X_MIN, BBOX_X_MAX = 5, 6
-from numpy import ndarray
-from skimage import io, transform, exposure
 import numpy as np
+from numpy import ndarray
 from pathlib import Path
 from typing import Union, Tuple
+from skimage import io, transform, exposure
 from skimage.measure import regionprops_table
 
 
@@ -52,7 +52,7 @@ class BBoxes:
         :return: Object of type BBoxes.
         """
         if mask.ndim < 3:
-            raise ValueError("Must only be 2D images.")
+            raise ValueError(f"Mask must be a 3D volume (z, y, x); got ndim={mask.ndim}.")
         # Add check if mask contains any elements
         if np.max(mask) == 0:
             raise ValueError("Mask contains no elements.")
@@ -70,62 +70,51 @@ class BBoxes:
 
         return cls(bboxes, mask, image)
 
+    # Column layout of a bbox row: [id, z_min, z_max, y_min, y_max, x_min, x_max].
+    _MIN_COLS = [1, 3, 5]   # z_min, y_min, x_min
+    _MAX_COLS = [2, 4, 6]   # z_max, y_max, x_max
+
     @staticmethod
-    def iou(box1: np.array,
-            box2: np.array) -> float:
+    def iou(box1: np.ndarray,
+            box2: np.ndarray) -> float:
         """
-        Calculates the IoU for two bounding boxes.
+        Calculates the volumetric (3D) IoU for two bounding boxes.
         :param box1: Numpy array with the first bounding box.
         :param box2: Numpy array with the second bounding box.
         :return: A float with the IoU value between the two bounding boxes.
         """
-        z_min = max(box1[BBOX_Z_MIN], box2[BBOX_Z_MIN])
-        z_max = min(box1[BBOX_Z_MAX], box2[BBOX_Z_MAX])
-        y_min = max(box1[BBOX_Y_MIN], box2[BBOX_Y_MIN])
-        y_max = min(box1[BBOX_Y_MAX], box2[BBOX_Y_MAX])
+        lo = np.maximum(box1[BBoxes._MIN_COLS], box2[BBoxes._MIN_COLS])
+        hi = np.minimum(box1[BBoxes._MAX_COLS], box2[BBoxes._MAX_COLS])
 
-        intersection = max(0, z_max - z_min) * max(0, y_max - y_min)
-
+        intersection = np.prod(np.clip(hi - lo, 0, None))
         if intersection == 0:
-            return 0
+            return 0.0
 
-        area1 = (box1[BBOX_Z_MAX] - box1[BBOX_Z_MIN]) * (box1[BBOX_Y_MAX] - box1[BBOX_Y_MIN])
-        area2 = (box2[BBOX_Z_MAX] - box2[BBOX_Z_MIN]) * (box2[BBOX_Y_MAX] - box2[BBOX_Y_MIN])
-        union = area1 + area2 - intersection
-
-        # Calculate and return IoU
-        iou = intersection / union
-
-        if intersection > union:
-            print(intersection, union, iou)
-
-        return iou
+        vol1 = np.prod(box1[BBoxes._MAX_COLS] - box1[BBoxes._MIN_COLS])
+        vol2 = np.prod(box2[BBoxes._MAX_COLS] - box2[BBoxes._MIN_COLS])
+        return float(intersection / (vol1 + vol2 - intersection))
 
     @property
-    def iou_matrix(self) -> np.array:
+    def iou_matrix(self) -> np.ndarray:
         """
-        Returns the IoU matrix for the bounding boxes.
-        :return: A numpy array with the IoU values for each bounding box pair.
+        Returns the upper-triangular pairwise (3D) IoU matrix for the bounding boxes.
+        :return: An (n, n) numpy array with the IoU values for each bounding box pair.
         """
-        n = self.__len__()
-        # compute the size of the matrix based on the length of the array
-        size = n * (n - 1) // 2
+        mins = self.bboxes[:, self._MIN_COLS].astype(float)   # (n, 3)
+        maxs = self.bboxes[:, self._MAX_COLS].astype(float)    # (n, 3)
 
-        # create a 1D array of zeros to hold the upper triangular matrix
-        triangular = np.zeros(size)
+        # Pairwise overlap extents via broadcasting: (n, n, 3).
+        lo = np.maximum(mins[:, None, :], mins[None, :, :])
+        hi = np.minimum(maxs[:, None, :], maxs[None, :, :])
+        intersection = np.prod(np.clip(hi - lo, 0, None), axis=-1)  # (n, n)
 
-        # fill the upper triangular matrix with elements from the original array
-        k = 0
-        for i in range(n):
-            for j in range(i + 1, n):
-                triangular[k] = self.iou(self.bboxes[i], self.bboxes[j])
-                k += 1
+        volumes = np.prod(maxs - mins, axis=-1)                    # (n,)
+        union = volumes[:, None] + volumes[None, :] - intersection
+        with np.errstate(divide="ignore", invalid="ignore"):
+            iou = np.where(union > 0, intersection / union, 0.0)
 
-        # convert the 1D array to a 2D matrix
-        matrix: ndarray = np.zeros((n, n))
-        matrix[np.triu_indices(n, k=1)] = triangular
-
-        return matrix
+        # Keep only the strict upper triangle, matching the previous behaviour.
+        return np.triu(iou, k=1)
 
     # Bounding box IoU operations
     def are_overlapping(self) -> np.array:
@@ -206,35 +195,41 @@ class BBoxes:
         :return: Object of type BBoxes with the expanded bounding boxes.
         """
         # Expand the bounding boxes by n pixels, but not beyond the image size.
-        expanded = np.array(list(map(lambda x: np.array([x[0],
-                                                         max(x[1] - n, 0),
-                                                         min(x[2] + n, self.mask.shape[0]),
-                                                         max(x[3] - n, 0),
-                                                         min(x[4] + n, self.mask.shape[1]),
-                                                         max(x[5] - n, 0),
-                                                         min(x[6] + n, self.mask.shape[2])]), self.bboxes)))
+        z, y, x = self.mask.shape
+        expanded = self.bboxes.copy()
+        expanded[:, 1] = np.clip(self.bboxes[:, 1] - n, 0, None)        # z_min
+        expanded[:, 2] = np.clip(self.bboxes[:, 2] + n, None, z)        # z_max
+        expanded[:, 3] = np.clip(self.bboxes[:, 3] - n, 0, None)        # y_min
+        expanded[:, 4] = np.clip(self.bboxes[:, 4] + n, None, y)        # y_max
+        expanded[:, 5] = np.clip(self.bboxes[:, 5] - n, 0, None)        # x_min
+        expanded[:, 6] = np.clip(self.bboxes[:, 6] + n, None, x)        # x_max
 
         return BBoxes(expanded, self.mask, self.image)
 
     def DynamicPadding(self,
                expected: np.ndarray) -> object:
         """
-        Expands the bounding boxes by n pixels.
-        :param n: Integer with the number of pixels to expand the bounding boxes.
-        :return: Object of type BBoxes with the expanded bounding boxes.
+        Pad each bounding box so it reaches the ``expected`` size.
+
+        :param expected: 1D array of length ``len(self)`` giving, per box, the
+            target size; each box is grown symmetrically by ``(expected - size) / 2``
+            on every axis, clamped to the image bounds.
+        :return: Object of type BBoxes with the padded bounding boxes.
         """
-        # Expand the bounding boxes by n pixels, but not beyond the image size.
-        ns = expected - self.bboxes[:,2,3,4,5,6,7]
+        # Current extents per axis: (z_max - z_min, y_max - y_min, x_max - x_min).
+        sizes = self.bboxes[:, [2, 4, 6]] - self.bboxes[:, [1, 3, 5]]
+        # Per-box, per-axis padding to add on each side.
+        ns = ((expected[:, None] - sizes) / 2).astype(int)
 
         assert self.bboxes.shape[0] == ns.shape[0], "Must have same length"
 
         expanded = np.stack([np.array([x[0],
-                                max(x[1] - n, 0),
-                             min(x[2] + n, self.mask.shape[0]),
-                             max(x[3] - n, 0),
-                             min(x[4] + n, self.mask.shape[1]),
-                             max(x[5] - n, 0),
-                             min(x[6] + n, self.mask.shape[2])]) for x, n in zip(self.bboxes, ns) ], axis=0)
+                                max(x[1] - n[0], 0),
+                             min(x[2] + n[0], self.mask.shape[0]),
+                             max(x[3] - n[1], 0),
+                             min(x[4] + n[1], self.mask.shape[1]),
+                             max(x[5] - n[2], 0),
+                             min(x[6] + n[2], self.mask.shape[2])]) for x, n in zip(self.bboxes, ns) ], axis=0)
 
         assert expanded.shape == self.bboxes.shape, "Output does not have same shape"
 
@@ -480,7 +475,7 @@ class BBoxes:
         """
         # Check if image is not None
         if self.image is None and source == "image":
-            self.image = skimage.io.imread(self.img_path)
+            self.image = io.imread(self.img_path)
 
         assert isinstance(self.image, np.ndarray), "Image must be array"
 

@@ -8,7 +8,11 @@ import pandas as pd
 import psutil
 import yaml
 
-from .constants import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
+# Import the module (not the values) so that NUCL_TABLE / LM_DF are read at call
+# time. These constants start as None and are reassigned elsewhere at runtime;
+# `from .constants import NUCL_TABLE` would bind the None value permanently.
+from . import constants
+from .constants import NUCLEUS_LABEL_KEY
 
 
 def replaceFileExt(filePath : str, newExt : str):
@@ -35,24 +39,18 @@ def save2DFcolumn(
     - Updated DataFrame with the new column.
     """
 
-    if not isinstance(sorted_nucl_labels, np.ndarray):
-        sorted_nucl_labels = np.array(sorted_nucl_labels)
-    # Flatten sorted_nucl_labels if it has only one column (2D array with shape [n, 1])
+    sorted_nucl_labels = np.asarray(sorted_nucl_labels)
+    # Accept a column/row vector (shape [n, 1] or [1, n]) but reject genuine 2D label sets.
     if sorted_nucl_labels.ndim == 2:
-        if sorted_nucl_labels.shape[0] == 1 or sorted_nucl_labels.shape[1] == 1:
-            if len(sorted_nucl_labels) == sorted_nucl_labels.size:
-                sorted_nucl_labels = sorted_nucl_labels.flatten()
-            else:
-                raise  ValueError("Sorted nucleus labels and sorted results do not match in length")
+        if 1 in sorted_nucl_labels.shape:
+            sorted_nucl_labels = sorted_nucl_labels.ravel()
         else:
             raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
 
     if isinstance(sorted_results, np.ndarray):
-
         if sorted_results.ndim > 2:
-            raise NotImplementedError("Handling for multi-column sorted_nucl_labels is not implemented.")
-        else:
-            sorted_results = sorted_results.tolist()
+            raise NotImplementedError("Handling for >2D sorted_results is not implemented.")
+        sorted_results = sorted_results.tolist()
 
     # Create a dictionary for fast lookup of results by label
     label_to_result = dict(zip(sorted_nucl_labels, sorted_results))
@@ -233,32 +231,38 @@ def remove(path):
 
 def patchify(vol, patch_size):
     """
-    Extract patches from the input volume.
+    Extract patches from the input volume, agnostic to 2D or 3D inputs.
 
     Parameters:
-    vol: numpy.ndarray of shape (Z, Y, X)
-        The input volume with equal Z, Y, X dimensions divisible by patch_size.
+    vol: numpy.ndarray of shape (Y, X) for 2D or (Z, Y, X) for 3D
+        Each spatial dimension must be divisible by patch_size (they need not be equal).
 
     Returns:
-    numpy.ndarray of shape (L, patch_size, patch_size, patch_size)
-        L = (Z/p) * (Y/p) * (X/p)
+    numpy.ndarray of shape (L, *([patch_size] * ndim))
+        2D: (L, p, p)      with L = (Y/p) * (X/p)
+        3D: (L, p, p, p)   with L = (Z/p) * (Y/p) * (X/p)
     """
-    Z, Y, X = vol.shape
-
     p = patch_size
+    ndim = vol.ndim
 
-    assert Z == Y == X and Z % p == 0, \
-        "Input dimensions must be equal and divisible by the patch size."
+    assert all(s % p == 0 for s in vol.shape), \
+        f"Input dimensions {vol.shape} must be divisible by the patch size {p}."
 
-    d = h = w = vol.shape[1] // p
+    grid = tuple(s // p for s in vol.shape)  # patches per spatial axis
 
-    # Reshape the volume to include patch dimensions
-    x = vol.reshape(d, p, h, p, w, p)
+    # Reshape so each spatial axis splits into (grid_i, p):
+    #   2D: (h, p, w, p)      3D: (d, p, h, p, w, p)
+    split_shape = tuple(x for g in grid for x in (g, p))
+    x = vol.reshape(split_shape)
 
-    # Rearrange dimensions to group patch elements together
-    x = np.einsum('dfhpwq->dhwfpq', x)
+    # Group all grid axes first, then all patch axes:
+    #   2D: 'hpwq->hwpq'      3D: 'dfhpwq->dhwfpq'
+    src = ''.join(chr(ord('a') + i) for i in range(2 * ndim))
+    grid_axes = src[0::2]   # even positions = grid indices
+    patch_axes = src[1::2]  # odd positions = within-patch indices
+    x = np.einsum(f'{src}->{grid_axes + patch_axes}', x)
 
-    return x.reshape(d * h * w, p, p, p)
+    return x.reshape(int(np.prod(grid)), *([p] * ndim))
 
 
 def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -271,10 +275,12 @@ def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:
     assert "modality" in df.columns, \
         f"Please specify modality in dataframe: {list(df.columns)}"
 
-    if "EM" in df["modality"].unique().flatten():
-        left_df = NUCL_TABLE
-    else:
-        left_df = LM_DF
+    left_df = constants.NUCL_TABLE if "EM" in df["modality"].unique() else constants.LM_DF
+    if left_df is None:
+        raise RuntimeError(
+            "constants.NUCL_TABLE / constants.LM_DF is not populated; "
+            "set the relevant nucleus table before calling merge_with_nucl_table."
+        )
 
     left_df = left_df.loc[:, [
         "label_id",

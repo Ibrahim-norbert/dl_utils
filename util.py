@@ -20,8 +20,18 @@ import yaml
 from torch import inf
 from torch.utils.data import DataLoader, Dataset
 
-from dl_utils import NUCLEUS_LABEL_KEY, NUCL_TABLE, LM_DF
-from dl_utils.util_base import save2DFcolumn
+from dl_utils import NUCLEUS_LABEL_KEY
+# Shared helpers live in util_base; re-export the ones historically exposed via
+# `dl_utils.util` so existing callers (e.g. `util.save2DFcolumn`) keep working
+# without maintaining duplicate copies.
+from .util_base import (
+    save2DFcolumn,
+    savedataframe,
+    get_savedf_path,
+    readdataframe,
+    merge_with_nucl_table,
+    patchify,
+)
 
 
 
@@ -70,7 +80,8 @@ class SmoothedValue(object):
         """
         if not is_dist_avail_and_initialized():
             return
-        t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        t = torch.tensor([self.count, self.total], dtype=torch.float64, device=device)
         dist.barrier()
         dist.all_reduce(t)
         t = t.tolist()
@@ -79,13 +90,11 @@ class SmoothedValue(object):
 
     @property
     def median(self):
-        d = torch.tensor(list(self.deque))
-        return d.median().item()
+        return torch.tensor(self.deque).median().item()
 
     @property
     def avg(self):
-        d = torch.tensor(list(self.deque), dtype=torch.float32)
-        return d.mean().item()
+        return torch.tensor(self.deque, dtype=torch.float32).mean().item()
 
     @property
     def global_avg(self):
@@ -471,54 +480,9 @@ def get_output_dict(dataset, model, save_dir, df_index=7685, device="cpu"):
     print(f"The loss is {loss}")
     return output_dict
 
-def savedataframe(dataframe, save_dir,  **kwargs):
-    # Remove unnamed columns
-    dataframe = dataframe.loc[:, ~dataframe.columns.str.contains('^Unnamed')]
-    dataframe.drop(columns=dataframe.columns[dataframe.columns.duplicated()], inplace=True)
-    dataframe.drop_duplicates(subset=NUCLEUS_LABEL_KEY, inplace = True)
 
-    dataframe.reset_index(inplace=True, drop=True)
-
-    if not "modality" in dataframe.columns:
-        if "LM" in save_dir:
-            dataframe["modality"] = "LM"
-        elif "EM" in save_dir:
-            dataframe["modality"] = "EM"
-
-    dataframe.to_json(get_savedf_path(save_dir, **kwargs))
-
-def get_savedf_path(save_dir: str, typie=''):
-
-    if typie != "":
-        return os.path.join(save_dir, f"dataframe_{typie}.json")
-    else:
-        return os.path.join(save_dir, f"dataframe.json")
-
-
-def readdataframe(path: str, name='') -> pd.DataFrame:
-
-    if "json" in path and "dataframe" in path and os.path.exists(path):
-        data_df = pd.read_json(path)
-    else:
-        assert name is not None, ("If path is save_dir then please do not set parameter 'name' as None")
-
-        if os.path.exists(path):
-            path = get_savedf_path(path, typie=name)
-
-        if not os.path.exists(path):
-            print(f"Provided path does not exist: {path}")
-            return None
-
-        data_df = pd.read_json(path)
-
-    if not "modality" in data_df.columns:
-
-        if "LM" in path:
-            data_df["modality"] = "LM"
-        elif "EM" in path:
-            data_df["modality"] = "EM"
-
-    return data_df
+# save2DFcolumn, savedataframe, get_savedf_path and readdataframe are defined in
+# util_base and re-exported at the top of this module.
 
 
 def getvalidationdataloader(dataset, batch_size, num_workers, pin_memory, drop_last):
@@ -659,66 +623,5 @@ def remove(path):
         raise ValueError("file {} is not a file or dir.".format(path))
 
 
-def patchify(vol, patch_size):
-    """
-    Extract patches from the input volume.
-
-    Parameters:
-    vol: numpy.ndarray of shape (Z, Y, X)
-        The input volume with equal Z, Y, X dimensions divisible by patch_size.
-
-    Returns:
-    numpy.ndarray of shape (L, patch_size, patch_size, patch_size)
-        L = (Z/p) * (Y/p) * (X/p)
-    """
-    Z, Y, X = vol.shape
-
-    p = patch_size
-
-    assert Z == Y == X and Z % p == 0, \
-        "Input dimensions must be equal and divisible by the patch size."
-
-    d = h = w = vol.shape[1] // p
-
-    # Reshape the volume to include patch dimensions
-    x = vol.reshape(d, p, h, p, w, p)
-
-    # Rearrange dimensions to group patch elements together
-    x = np.einsum('dfhpwq->dhwfpq', x)
-
-    return x.reshape(d * h * w, p, p, p)
-
-
-def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge a nucleus DataFrame with the global nucleus table (NUCL_TABLE for EM,
-    LM_DF for LM) to attach bounding-box and anchor columns.
-
-    The DataFrame must contain a 'modality' column ('EM' or 'LM').
-    """
-    assert "modality" in df.columns, \
-        f"Please specify modality in dataframe: {list(df.columns)}"
-
-    if "EM" in df["modality"].unique().flatten():
-        left_df = NUCL_TABLE
-    else:
-        left_df = LM_DF
-
-    left_df = left_df.loc[:, [
-        "label_id",
-        "anchor_z", "anchor_x", "anchor_y",
-        "bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x",
-    ]]
-
-    assert df.label_id.isin(left_df.label_id).sum() == df.label_id.size, (
-        f"Dataframe does not have nuclei labels as label_id: "
-        f"{df.label_id.isin(left_df.label_id).sum()}/{df.label_id.size}"
-    )
-
-    df = df.merge(left_df, on="label_id", how="left", suffixes=(None, "_nucl"))
-
-    cols2drop = [col for col in df.columns if col.endswith("_nucl")]
-    if cols2drop:
-        df.drop(columns=cols2drop, inplace=True)
-
-    return df
+# patchify and merge_with_nucl_table are defined in util_base and re-exported at
+# the top of this module.

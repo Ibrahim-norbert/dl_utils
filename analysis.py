@@ -28,6 +28,13 @@ from dl_utils.LM_preprocess import get_array_from_df
 sns.set_context("poster")
 
 
+def _png_buffer_to_data_url(buf: BytesIO) -> str:
+    """Encode the PNG bytes held in *buf* as a ``data:image/png;base64`` URL."""
+    buf.seek(0)
+    encoded_image = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{encoded_image}"
+
+
 def convert_array_to_data_url(path) -> str:
     array = skimage.io.imread(path)
     fig, ax = plt.subplots(figsize=(3, 3))
@@ -36,9 +43,7 @@ def convert_array_to_data_url(path) -> str:
     buf = BytesIO()
     plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
     plt.close(fig)
-    buf.seek(0)
-    encoded_image: str = base64.b64encode(buf.getvalue()).decode()
-    return f"data:image/png;base64,{encoded_image}"
+    return _png_buffer_to_data_url(buf)
 
 
 class Classification:
@@ -87,9 +92,8 @@ class Classification:
         plt.tight_layout()
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(
-                save_dir, "{}confusion_matrix.png").format(gtColumn), dpi=300)
-        plt.close()
+            plt.savefig(os.path.join(save_dir, f"{gtColumn}_confusion_matrix.png"), dpi=300)
+        plt.close(fig)
         return fig
 
     @staticmethod
@@ -105,11 +109,11 @@ class EmbeddingAnalysis:
 
     def __init__(
         self,
-        df_path: str = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_resnet_masking_075_patches4096\results\epoch_99\dataframe_analyzed.json",
+        df_path: str,
         type: str = EMBED_DICT_EMBED,
         instancelabelColumn: str = NUCLEUS_LABEL_KEY,
         gtColumn: str = None,
-        classMapping: dict = {},
+        classMapping: dict = None,
         save_dir: str = None,
         binary: bool = False,
         dbscan: bool = False,
@@ -120,8 +124,12 @@ class EmbeddingAnalysis:
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
+        **kwargs,
     ) -> None:
-        assert df_path.endswith(".json"), "Dataframe path must be a JSON file."
+        if classMapping is None:
+            classMapping = {}
+        assert isinstance(df_path, str) and df_path.endswith(".json"), \
+            "Dataframe path must be a path to a JSON file."
         if save_dir is None:
             save_dir = os.path.dirname(df_path)
         self.df_path: str = df_path
@@ -153,7 +161,19 @@ class EmbeddingAnalysis:
             default_class_column="Class",
             metadDataFramePath=metadDataFramePath,
             classifier_method=classifier_method,
+            **kwargs
         )
+        self.predLabels = (
+            self.classify(binary=binary, mapping=classMapping)
+            if self._has_gt
+            else np.zeros(len(self.data_df), dtype=int)
+        )
+
+        # Add ground truth column as mapping
+        self.results_df["Mapping_gtColumns"] = [self.classMapping.get(label, label) for label in self.gtlabels]
+        self.results_df["gtColumns"] = self.gtlabels
+
+        print("We have the following columns in the results DataFrame:", self.results_df.columns.tolist())
 
         if self.classMapping and self._has_gt:
             self.plot_gromov_wasserstein_heatmap()
@@ -167,7 +187,7 @@ class EmbeddingAnalysis:
         instancelabelColumn: str = NUCLEUS_LABEL_KEY,
         gtColumn: str = None,
         save_dir: str = None,
-        classMapping: dict = {},
+        classMapping: dict = None,
         binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
@@ -177,6 +197,8 @@ class EmbeddingAnalysis:
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: str = None,
     ) -> "EmbeddingAnalysis":
+        if classMapping is None:
+            classMapping = {}
         instance = cls.__new__(cls)
         instance.df_path = None
         instance.type = type
@@ -228,7 +250,12 @@ class EmbeddingAnalysis:
         instance.type = None
         instance.data_df = meta_df.reset_index(drop=True).copy()
         instance.embeddings = StandardScaler().fit_transform(embeddings)
-        gt_present = gtColumn is not None and gtColumn in meta_df.columns
+        if gtColumn is None:
+            gt_present = False
+        elif isinstance(gtColumn, list):
+            gt_present = all(c in meta_df.columns for c in gtColumn)
+        else:
+            gt_present = gtColumn in meta_df.columns
         cls._apply_common_setup(
             instance,
             gtColumn=gtColumn,
@@ -241,11 +268,80 @@ class EmbeddingAnalysis:
             leiden_n_iterations=leiden_n_iterations,
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
-            default_class_column=gtColumn if gt_present else "Class",
+            default_class_column=("_".join(gtColumn) if isinstance(gtColumn, list) else gtColumn) if gt_present else "Class",
         )
         # Colour by ground-truth label; skip classifier training
         instance.predLabels = instance.gtlabels
         return instance
+
+    @staticmethod
+    def _standardise_label_column(
+        data_df: pd.DataFrame,
+        gtColumn,
+        classMapping: dict,
+    ) -> tuple["pd.DataFrame", str, dict]:
+        """Convert gtColumn (list of condition columns or single column name) into
+        a single integer label column in *data_df*.
+
+        When *gtColumn* is already a string only the string→integer mapping is
+        applied (if the column contains string values).  Returns
+        ``(data_df, new_gtColumn_name, updated_classMapping)``.
+        """
+        _df = data_df
+        _label_order: list | None = None  # tracks original list order for int assignment
+
+        if isinstance(gtColumn, list):
+            _label_order = list(gtColumn)  # preserve caller-specified order
+            combined_col = "_".join(gtColumn)
+            subset = _df[gtColumn]
+
+            def _is_binary(col):
+                try:
+                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
+                except (ValueError, TypeError):
+                    return False
+
+            _df = _df.copy()
+            if all(_is_binary(subset[c]) for c in gtColumn):
+                def _onehot_label(row):
+                    active = [c for c in gtColumn if float(row[c]) == 1.0]
+                    return active[0] if len(active) == 1 else np.nan
+                _df[combined_col] = subset.apply(_onehot_label, axis=1)
+            else:
+                def _fmt(v):
+                    if pd.isna(v):
+                        return "NA"
+                    if isinstance(v, float) and v.is_integer():
+                        return str(int(v))
+                    return str(v)
+                _df[combined_col] = (
+                    subset.apply(lambda col: col.map(_fmt)).agg("_".join, axis=1)
+                )
+            gtColumn = combined_col
+
+        if gtColumn in _df.columns:
+            col_vals = get_array_from_df(_df, gtColumn)
+            if col_vals.dtype.kind in ("U", "S", "O"):
+                unique_vals = [v for v in pd.unique(col_vals) if not pd.isna(v)]
+                if not classMapping:
+                    if _label_order is not None:
+                        # use caller-supplied list order; append any unseen values after
+                        ordered = [v for v in _label_order if v in unique_vals]
+                        ordered += [v for v in unique_vals if v not in ordered]
+                    else:
+                        # single column: preserve first-appearance order from the data
+                        ordered = unique_vals
+                    str_to_int = {v: i + 1 for i, v in enumerate(ordered)}
+                    classMapping = {i: v for v, i in str_to_int.items()}
+                else:
+                    str_to_int = {v: k for k, v in classMapping.items()}
+                if _df is data_df:
+                    _df = _df.copy()
+                _df[gtColumn] = np.array(
+                    [str_to_int.get(v, np.nan) for v in col_vals], dtype=float
+                )
+
+        return _df, gtColumn, classMapping
 
     @staticmethod
     def _apply_common_setup(
@@ -265,8 +361,9 @@ class EmbeddingAnalysis:
         subplots_kwargs: dict = None,
         metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
+        **kwargs,
     ) -> None:
-        instance.gtColumn = gtColumn
+        assert not kwargs, f"Unexpected keyword argument(s): {sorted(kwargs)}"
         instance.instancelabelColumn = instancelabelColumn
         instance.classMapping = classMapping
         instance.save_dir = os.path.join(
@@ -282,6 +379,14 @@ class EmbeddingAnalysis:
                 data_df, on=instancelabelColumn, how="left")
             print(f"Metadata DataFrame loaded from: {metadDataFramePath}")
 
+        # Standardise label column(s) into a single integer column before getLabels runs.
+        if gtColumn is not None:
+            instance.data_df, gtColumn, classMapping = EmbeddingAnalysis._standardise_label_column(
+                instance.data_df, gtColumn, classMapping or {}
+            )
+        instance.gtColumn = gtColumn
+        instance.classMapping = classMapping or {}
+
         instance.dbscan = dbscan
         instance.leiden = leiden
         instance.leiden_resolution = leiden_resolution
@@ -294,8 +399,13 @@ class EmbeddingAnalysis:
         instance.classColumn = default_class_column
         instance.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {
             "s": 6}
-        instance.results_df = pd.DataFrame(index=instance.data_df.index)
-        instance.results_df[instancelabelColumn] = instance.data_df[instancelabelColumn]
+        scalar_cols = [
+            c for c in instance.data_df.columns
+            if instance.data_df[c].dtype.kind in ("f", "i", "u", "U", "S", "O")
+            and not instance.data_df[c].apply(lambda x: isinstance(x, (list, dict, np.ndarray))).any()
+        ]
+        instance.results_df = instance.data_df[scalar_cols].copy()
+
         instance.getLabels()
         print(f"Embeddings shape: {instance.embeddings.shape}")
 
@@ -305,8 +415,6 @@ class EmbeddingAnalysis:
 
     @property
     def _has_gt(self) -> bool:
-        if isinstance(self.gtColumn, list):
-            return all(c in self.data_df.columns for c in self.gtColumn)
         return self.gtColumn is not None and self.gtColumn in self.data_df.columns
 
     # ------------------------------------------------------------------ #
@@ -314,67 +422,23 @@ class EmbeddingAnalysis:
     # ------------------------------------------------------------------ #
 
     def getLabels(self) -> None:
+        """Derive training labels from the (already-standardised) gtColumn.
+
+        Label *derivation* — list→combined-column joining, one-hot detection,
+        and string→int mapping — is performed once upstream in
+        :meth:`_standardise_label_column` (called from ``_apply_common_setup``).
+        By the time this runs ``self.gtColumn`` is always a single column name
+        whose values are numeric, so this method only handles the remaining
+        bookkeeping: the zero-offset shift, instance labels, and the
+        NaN/train-mask split used to fit the classifier.
+        """
         n = len(self.data_df)
-        _gtColumn_was_list = isinstance(self.gtColumn, list)
-
-        if isinstance(self.gtColumn, list):
-            combined_col = "_".join(self.gtColumn)
-            subset = self.data_df[self.gtColumn]
-
-            # Detect one-hot encoded columns: each column only contains 0/1
-            # (handles int, float, bool, and string variants after JSON round-trip)
-            def _is_binary(col):
-                try:
-                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
-                except (ValueError, TypeError):
-                    return False
-
-            is_onehot = all(_is_binary(subset[c]) for c in self.gtColumn)
-
-            if is_onehot:
-                # Use the active column name as label; NaN where none or multiple active
-                def _onehot_label(row):
-                    active = [c for c in self.gtColumn if float(row[c]) == 1.0]
-                    if len(active) == 1:
-                        return active[0]
-                    return np.nan  # all-zero or multi-active → treated as unlabelled
-
-                self.data_df[combined_col] = subset.apply(
-                    _onehot_label, axis=1)
-            else:
-                def _fmt(v):
-                    if pd.isna(v):
-                        return "NA"
-                    if isinstance(v, float) and v.is_integer():
-                        return str(int(v))
-                    return str(v)
-
-                self.data_df[combined_col] = (
-                    subset.apply(lambda col: col.map(_fmt))
-                    .agg("_".join, axis=1)
-                )
-
-            self.gtColumn = combined_col
 
         self.gtlabels: np.ndarray = (
             get_array_from_df(self.data_df, self.gtColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
-
-        if self._has_gt and self.gtlabels.dtype.kind in ('U', 'S', 'O'):
-            if not self.classMapping:
-                unique_vals = [v for v in pd.unique(
-                    self.gtlabels) if not pd.isna(v)]
-                str_to_int = {v: i + 1 for i,
-                              v in enumerate(sorted(unique_vals, key=str))}
-                self.classMapping = {i: v for v, i in str_to_int.items()}
-            else:
-                str_to_int = {v: k for k, v in self.classMapping.items()}
-            self.gtlabels = np.array(
-                [str_to_int.get(v, np.nan) for v in self.gtlabels], dtype=float
-            )
-            self.data_df[self.gtColumn] = self.gtlabels
 
         valid_mask = ~pd.isna(self.gtlabels)
         if 0 in self.gtlabels[valid_mask]:
@@ -385,14 +449,6 @@ class EmbeddingAnalysis:
         self.instancelabels: np.ndarray = get_array_from_df(
             self.data_df, self.instancelabelColumn)
         nan_mask = ~pd.isna(self.gtlabels)
-        # When gtColumn was a list, additionally exclude zero/inactive rows so that
-        # only explicitly labelled (active) samples participate in training.
-        # Mutual exclusivity is already guaranteed upstream: _onehot_label returns
-        # NaN for multi-active rows, so they are caught by nan_mask as well.
-        # if _gtColumn_was_list:
-        #     train_mask = nan_mask & (self.gtlabels > 0)
-        # else:
-        #     train_mask = nan_mask
         if nan_mask.sum() < n:
             warnings.warn(
                 f"Labels contain {n - nan_mask.sum()} inactive/NaN value(s). "
@@ -559,12 +615,20 @@ class EmbeddingAnalysis:
             index=self.data_df.index,
         )
 
-    def UMAPResults(self, **kwargs):
-        self.concatDF(self.UMAP())
-        return self.specialScatter(
+    def UMAPResults(self, classColoumn: str | None = None,
+                    marker_size: int = 4, background_color: str = "rgba(0,0,0,0)",
+                    umap_kwargs: dict | None = None,
+                    **kwargs):
+        col = classColoumn if classColoumn is not None else self.classColumn
+        # umap_kwargs flow to UMAP() (e.g. n_neighbors); remaining kwargs to the
+        # scatter plot. UMAP requires n_neighbors < n_samples, so small feature
+        # spaces (e.g. one point per pooled sample) must pass a capped value.
+        self.concatDF(self.UMAP(**(umap_kwargs or {})))
+        return EmbeddingAnalysis.specialScatter(
+            self,
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
-            classColoumn=self.classColumn,
+            classColoumn=col,
             legend_title="UMAP - {}".format(
                 self.gtColumn if self._has_gt else self.classColumn),
             save_dir=self.save_dir, **kwargs
@@ -574,14 +638,73 @@ class EmbeddingAnalysis:
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
 
-    def vizualisePCA(self, pcas=None, title="", **kwargs):
-        return self.specialScatter(
+    def plot_distance_matrix(self, metric: str = "cosine") -> Figure:
+        """Plot a pairwise distance matrix sorted by GT class label.
+
+        Uses the labelled training embeddings (``trainEmbeddings`` /
+        ``traingt``).  Each row is normalised to sum to 1 so relative
+        distances are comparable across rows with different scales.
+        """
+        from scipy.spatial.distance import cdist
+
+        sort = np.argsort(self.traingt)
+        feats = self.trainEmbeddings[sort]
+        labels = self.traingt[sort]
+        classes = np.unique(labels)
+        print(f"[plot_distance_matrix] {len(classes)} classes found in traingt: "
+              f"{[self.classMapping.get(int(c), int(c)) for c in classes]}")
+
+        D = cdist(feats, feats, metric=metric)  # type: ignore[call-overload]
+        D = D / (D.sum(axis=1, keepdims=True) + 1e-12)
+
+        tick_pos, tick_lbl, boundaries = [], [], []
+        for i, cls in enumerate(classes):
+            positions = np.where(labels == cls)[0]
+            tick_pos.append(positions.mean())
+            tick_lbl.append(str(self.classMapping.get(int(cls), int(cls))))
+            if i < len(classes) - 1:
+                boundaries.append(positions[-1] + 0.5)
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.grid(False)
+        im = ax.imshow(D, aspect="auto", cmap="viridis", interpolation="nearest")
+        plt.colorbar(im, ax=ax, label=f"{metric} distance (row-normalised)")
+
+        for b in boundaries:
+            ax.axhline(b, color="white", lw=0.8, alpha=0.6)
+            ax.axvline(b, color="white", lw=0.8, alpha=0.6)
+
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(tick_pos)
+        ax.set_yticklabels(tick_lbl, fontsize=8)
+        ax.set_xlabel("Class")
+        ax.set_ylabel("Class")
+        ax.set_title(
+            f"Pairwise {metric} distance matrix (row-normalised)\n"
+            f"({len(feats)} samples, sorted by GT label)"
+        )
+        plt.tight_layout()
+
+        save_dir: str | None = getattr(self, "save_dir", None)  # type: ignore[assignment]
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"distance_matrix_{metric}.png"), dpi=300)
+
+        return fig
+
+    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None):
+        col = classColoumn if classColoumn is not None else self.classColumn
+        # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
+        # columns are never temporarily zeroed by subclass overrides, allowing
+        # every sample to be coloured by its predicted class.
+        return EmbeddingAnalysis.specialScatter(
+            self,
             xColumn="PCA x", yColumn="PCA y",
             xaxis_title="PC 1", yaxis_title="PC 2",
-            classColoumn=self.classColumn,
-            legend_title="PC - {}".format(
-                self.gtColumn if self._has_gt else self.classColumn),
-            save_dir=self.save_dir, **kwargs
+            classColoumn=col,
+            legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
+            save_dir=self.save_dir,
         )
 
     @staticmethod
@@ -687,8 +810,10 @@ class EmbeddingAnalysis:
         maskVol = skimage.io.imread(maskVolumePath)
         mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
 
-        if self.classColumn == classColoumn:
-            mapping_array[self.instancelabels] = self.predLabels.astype(int)
+        if self.classColumn == classColoumn and classColoumn in self.results_df.columns:
+            # Use results_df so that predictions for all cells are reflected,
+            # including those without a ground-truth label.
+            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(int)
         elif self.gtColumn == classColoumn:
             mapping_array[self.instancelabels] = self.gtlabels.astype(int)
         elif classColoumn in self.results_df.columns:
@@ -824,6 +949,426 @@ class EmbeddingAnalysis:
         )
         return fig
 
+    def plot_dendrogram(
+        self,
+        metric: str = "cosine",
+        linkage: str = "average",
+        save_dir: str = None,
+    ):
+        """Hierarchical clustering dendrogram of class centroids in embedding space.
+
+        Computes one centroid per class (mean of ``trainEmbeddings``), then
+        runs agglomerative clustering on the pairwise distance matrix and
+        renders an interactive Plotly dendrogram.
+
+        Parameters
+        ----------
+        metric:
+            Pairwise distance metric passed to ``scipy.spatial.distance.pdist``
+            (e.g. ``"cosine"``, ``"euclidean"``).
+        linkage:
+            Linkage method passed to ``scipy.cluster.hierarchy.linkage``
+            (e.g. ``"average"``, ``"ward"``, ``"complete"``).
+        save_dir:
+            Directory in which to save ``dendrogram.html``.  Defaults to
+            ``self.save_dir``.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+        """
+        import plotly.figure_factory as ff
+        from scipy.spatial.distance import pdist
+        import scipy.cluster.hierarchy as sch
+
+        classes = sorted(np.unique(self.traingt))
+        centroids = np.stack([
+            self.trainEmbeddings[self.traingt == c].mean(axis=0)
+            for c in classes
+        ])
+        labels = [str(self.classMapping.get(int(c), int(c))) for c in classes]
+
+        fig = ff.create_dendrogram(
+            centroids,
+            orientation="left",
+            labels=labels,
+            distfun=lambda X: pdist(X, metric=metric),
+            linkagefun=lambda d: sch.linkage(d, method=linkage),
+        )
+        fig.update_layout(
+            title_text=f"Class dendrogram — {metric} distance, {linkage} linkage",
+            template="plotly_dark",
+            width=800,
+            height=max(400, len(classes) * 40),
+            xaxis=dict(title=f"{metric} distance"),
+            yaxis=dict(title=""),
+        )
+
+        save_dir = save_dir or self.save_dir
+        if save_dir:
+            out = os.path.join(save_dir, "dendrogram.svg")
+            fig.write_image(out, format="svg")
+            print(f"[plot_dendrogram] Saved to {out}")
+
+        fig.show()
+        return fig
+
+    # ------------------------------------------------------------------ #
+    # Trajectory analysis (PAGA + diffusion pseudotime)                   #
+    # ------------------------------------------------------------------ #
+
+    def trajectory(
+        self,
+        n_neighbors: int = 15,
+        n_dcs: int = 10,
+        resolution: float = 0.5,
+        root_group: str = None,
+        distance_metric: str = "euclidean",
+        color_by: str = None,
+        save_dir: str = None,
+        use_gt: bool = False,
+    ) -> pd.DataFrame:
+        """Trajectory analysis via PAGA + diffusion pseudotime (scanpy).
+
+        Workflow mirrors SeuratExtend / Slingshot in Python:
+        1. Build a k-NN graph on ``self.embeddings``.
+        2. Leiden clustering to define cell groups.
+        3. PAGA to infer the coarse trajectory graph between groups.
+        4. Diffusion-map embedding + diffusion pseudotime (DPT) to order
+           cells along each branch.
+
+        Results are stored in ``self.data_df`` (columns ``"leiden_trajectory"``,
+        ``"dpt_pseudotime"``) and in ``self.results_df``, and a PAGA +
+        pseudotime figure is written to *save_dir* (or ``self.save_dir``).
+
+        Parameters
+        ----------
+        n_neighbors:
+            Number of neighbours for the k-NN graph.
+        n_dcs:
+            Number of diffusion components to compute.
+        resolution:
+            Leiden resolution controlling the granularity of cell groups.
+        root_group:
+            Leiden cluster label (string) to treat as the trajectory root.
+            When ``None`` the group with the lowest median pseudotime on the
+            first diffusion component is chosen automatically.
+        distance_metric:
+            Distance metric for the k-NN graph.
+        color_by:
+            Column in ``self.data_df`` used to colour the UMAP panels.
+            Defaults to ``self.gtColumn`` when available, else ``"dpt_pseudotime"``.
+        save_dir:
+            Directory in which to save the figure.  Defaults to
+            ``self.save_dir``.
+
+        Returns
+        -------
+        pd.DataFrame
+            ``self.data_df`` updated with ``"leiden_trajectory"`` and
+            ``"dpt_pseudotime"`` columns.
+        """
+        import anndata as ad
+        import scanpy as sc
+
+        save_dir = save_dir or self.save_dir
+
+        # ── 1. Build AnnData from scaled embeddings ───────────────────────
+        adata = ad.AnnData(X=self.embeddings.astype(np.float32))
+        if color_by is None:
+            color_by = self.gtColumn if self._has_gt else "dpt_pseudotime"
+
+        # Carry group labels into obs so scanpy can colour by them
+        if self._has_gt and self.gtColumn in self.data_df.columns:
+            adata.obs[self.gtColumn] = (
+                self.data_df[self.gtColumn]
+                .astype(str)
+                .values
+            )
+
+        # ── 2. k-NN graph ─────────────────────────────────────────────────
+        sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=None,
+                        metric=distance_metric, random_state=111)
+
+        # ── 3a. Group definition: GT labels or Leiden clustering ───────────
+        if use_gt and self._has_gt:
+            gt_labels = (
+                self.data_df[self.gtColumn]
+                .map(lambda v: self.classMapping.get(int(v), str(v))
+                     if pd.notna(v) and v != 0 else "unlabelled")
+                .astype(str)
+            )
+            adata.obs["leiden_trajectory"] = pd.Categorical(gt_labels)
+        else:
+            sc.tl.leiden(adata, resolution=resolution, random_state=111,
+                         key_added="leiden_trajectory")
+
+        # ── 3. PAGA (trajectory graph between Leiden groups) ──────────────
+        sc.tl.paga(adata, groups="leiden_trajectory")
+        # sc.pl.paga populates adata.uns['paga']['pos'], required by umap(init_pos='paga')
+        sc.pl.paga(adata, show=False, plot=False)
+
+        # ── 4. UMAP for visualisation ─────────────────────────────────────
+        # Reuse an already-computed UMAP when available (avoids recomputation).
+        # Fall back to a PAGA-initialised UMAP otherwise.
+        if "UMAP x" in self.data_df.columns and "UMAP y" in self.data_df.columns:
+            adata.obsm["X_umap"] = self.data_df[["UMAP x", "UMAP y"]].to_numpy()
+        else:
+            sc.tl.umap(adata, init_pos="paga", random_state=42)
+
+        # ── 5. Diffusion map + pseudotime ─────────────────────────────────
+        sc.tl.diffmap(adata, n_comps=n_dcs)
+
+        # Determine root cell: cell in root_group with lowest DC1 value
+        groups = adata.obs["leiden_trajectory"].values
+        dc1 = adata.obsm["X_diffmap"][:, 1]
+        unique_groups = np.unique(groups)
+
+        if root_group is None:
+            group_medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
+            root_group = str(min(group_medians, key=group_medians.get))
+            print(f"[trajectory] Auto-selected root group: {root_group}")
+        elif root_group not in unique_groups:
+            # root_group may be a gtColumn value rather than a Leiden label —
+            # find the Leiden cluster most enriched for that value.
+            gt_col = self.gtColumn if self._has_gt else None
+            leiden_resolved = None
+            if gt_col is not None and gt_col in self.data_df.columns:
+                gt_vals = self.data_df[gt_col].astype(str).values
+                enrichment = {
+                    g: (gt_vals[groups == g] == str(root_group)).mean()
+                    for g in unique_groups
+                }
+                leiden_resolved = max(enrichment, key=enrichment.get)
+                print(
+                    f"[trajectory] '{root_group}' not a Leiden label; "
+                    f"resolved to group '{leiden_resolved}' "
+                    f"(enrichment {enrichment[leiden_resolved]:.2f})."
+                )
+            if leiden_resolved is None:
+                print(
+                    f"[trajectory] Warning: root_group='{root_group}' not found "
+                    f"in Leiden labels {list(unique_groups)}. Falling back to auto."
+                )
+                group_medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
+                leiden_resolved = str(min(group_medians, key=group_medians.get))
+            root_group = leiden_resolved
+
+        root_mask = groups == root_group
+        dc1_vals = adata.obsm["X_diffmap"][root_mask, 1]
+        root_idx = int(np.where(root_mask)[0][np.argmin(dc1_vals)])
+        adata.uns["iroot"] = root_idx
+        sc.tl.dpt(adata, n_dcs=n_dcs)
+
+        # ── 6. Write results back to data_df / results_df ─────────────────
+        umap_coords = adata.obsm["X_umap"]
+        self.data_df["leiden_trajectory"] = adata.obs["leiden_trajectory"].astype(str).to_numpy()
+        self.data_df["dpt_pseudotime"] = adata.obs["dpt_pseudotime"].to_numpy()
+        self.data_df["traj_umap_x"] = umap_coords[:, 0]
+        self.data_df["traj_umap_y"] = umap_coords[:, 1]
+        self.results_df["leiden_trajectory"] = adata.obs["leiden_trajectory"].astype(str).to_numpy()
+        self.results_df["dpt_pseudotime"] = adata.obs["dpt_pseudotime"].to_numpy()
+        self.results_df["traj_umap_x"] = umap_coords[:, 0]
+        self.results_df["traj_umap_y"] = umap_coords[:, 1]
+
+        # Store adata so plot_trajectory can reuse it without recomputing
+        self._traj_adata = adata
+        self._traj_color_by = color_by
+        self._traj_root_group = root_group
+
+        print(f"[trajectory] Root cell index: {root_idx}  (group '{root_group}')")
+        print(f"[trajectory] Pseudotime range: "
+              f"{adata.obs['dpt_pseudotime'].min():.3f} – "
+              f"{adata.obs['dpt_pseudotime'].max():.3f}")
+
+        return self.data_df
+
+    def plot_trajectory(
+        self,
+        save_dir: str = None,
+        paga_threshold: float = 0.05,
+        **trajectory_kwargs,
+    ):
+        """Build and return an interactive Plotly figure of the trajectory results.
+
+        Layout (2 × 2 grid):
+
+        * **Top-left** – UMAP coloured by Leiden group with the PAGA
+          connectivity graph superimposed (edges scaled by weight, nodes at
+          cluster centroids).
+        * **Top-right** – UMAP coloured by ``self.gtColumn`` (only when a
+          ground-truth column is available and differs from pseudotime).
+        * **Bottom-left** – UMAP coloured by diffusion pseudotime.
+        * **Bottom-right** – Violin plot of pseudotime per Leiden group.
+
+        Parameters
+        ----------
+        save_dir:
+            If given, the figure is saved as ``trajectory_plotly.html`` there.
+        paga_threshold:
+            Minimum PAGA connectivity weight for an edge to be drawn.
+        **trajectory_kwargs:
+            Forwarded to :meth:`trajectory` when it needs to be computed.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+        """
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+
+        # ── Compute trajectory if needed ──────────────────────────────────
+        if not hasattr(self, "_traj_adata"):
+            self.trajectory(**trajectory_kwargs)
+
+        adata = self._traj_adata
+        color_by = self._traj_color_by
+        df = self.data_df
+
+        ux = df["traj_umap_x"].values
+        uy = df["traj_umap_y"].values
+        groups = df["leiden_trajectory"].astype(str).values
+        pseudotime = df["dpt_pseudotime"].values
+        unique_groups = sorted(np.unique(groups))
+
+        # Shared palette — tab20 avoids the grey-for-0 override in specialScatter
+        palette = sns.color_palette("tab20", len(unique_groups))
+        group_color = {g: f"rgb{tuple(int(c * 255) for c in palette[i])}"
+                       for i, g in enumerate(unique_groups)}
+
+        has_extra = self._has_gt and color_by != "dpt_pseudotime"
+
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=[
+                "UMAP + PAGA – Leiden groups",
+                f"UMAP – {color_by}" if has_extra else "",
+                "UMAP – pseudotime",
+                "Pseudotime per group",
+            ],
+            specs=[
+                [{"type": "scatter"}, {"type": "scatter"}],
+                [{"type": "scatter"}, {"type": "violin"}],
+            ],
+        )
+
+        # ── Panel 1: UMAP (Leiden) with PAGA overlay ──────────────────────
+        # Scatter points
+        for g in unique_groups:
+            mask = groups == g
+            fig.add_trace(go.Scatter(
+                x=ux[mask], y=uy[mask],
+                mode="markers",
+                name=f"Group {g}",
+                marker=dict(size=4, color=group_color[g], opacity=0.6),
+                legendgroup=f"group_{g}",
+                hovertemplate=f"Group {g}<br>x=%{{x:.2f}}<br>y=%{{y:.2f}}<extra></extra>",
+            ), row=1, col=1)
+
+        # PAGA edges superimposed
+        conn = np.array(adata.uns["paga"]["connectivities"].todense())
+        node_x = [ux[groups == g].mean() for g in unique_groups]
+        node_y = [uy[groups == g].mean() for g in unique_groups]
+
+        for i in range(len(unique_groups)):
+            for j in range(i + 1, len(unique_groups)):
+                w = float(conn[i, j])
+                if w < paga_threshold:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=[node_x[i], node_x[j], None],
+                    y=[node_y[i], node_y[j], None],
+                    mode="lines",
+                    line=dict(width=w * 10, color="rgba(255,255,255,0.55)"),
+                    showlegend=False,
+                    hoverinfo="skip",
+                ), row=1, col=1)
+
+        # PAGA nodes (same colors as scatter, larger markers + labels)
+        fig.add_trace(go.Scatter(
+            x=node_x, y=node_y,
+            mode="markers+text",
+            text=unique_groups,
+            textposition="top center",
+            marker=dict(
+                size=20,
+                color=[group_color[g] for g in unique_groups],
+                line=dict(width=2, color="white"),
+            ),
+            showlegend=False,
+            hovertemplate="Group %{text}<extra></extra>",
+        ), row=1, col=1)
+
+        # ── Panel 2 (optional): UMAP coloured by gtColumn ─────────────────
+        if has_extra:
+            gt_vals = df[color_by].astype(str).values
+            unique_gt = sorted(np.unique(gt_vals))
+            gt_palette = sns.color_palette("Set2", len(unique_gt))
+            gt_color = {v: f"rgb{tuple(int(c * 255) for c in gt_palette[i])}"
+                        for i, v in enumerate(unique_gt)}
+            for v in unique_gt:
+                mask = gt_vals == v
+                fig.add_trace(go.Scatter(
+                    x=ux[mask], y=uy[mask],
+                    mode="markers",
+                    name=str(v),
+                    marker=dict(size=4, color=gt_color[v], opacity=0.7),
+                    hovertemplate=f"{color_by}={v}<br>x=%{{x:.2f}}<br>y=%{{y:.2f}}<extra></extra>",
+                    legendgroup=f"gt_{v}",
+                ), row=1, col=2)
+
+        # ── Panel 3: UMAP coloured by pseudotime ─────────────────────────
+        fig.add_trace(go.Scatter(
+            x=ux, y=uy,
+            mode="markers",
+            marker=dict(
+                size=4,
+                color=pseudotime,
+                colorscale="Viridis",
+                showscale=True,
+                colorbar=dict(title="Pseudotime", x=1.02),
+                opacity=0.8,
+            ),
+            showlegend=False,
+            hovertemplate="pt=%{marker.color:.3f}<extra></extra>",
+        ), row=2, col=1)
+
+        # ── Panel 4: Violin – pseudotime per Leiden group ─────────────────
+        for g in unique_groups:
+            mask = groups == g
+            fig.add_trace(go.Violin(
+                y=pseudotime[mask],
+                name=f"Group {g}",
+                box_visible=True,
+                meanline_visible=True,
+                fillcolor=group_color[g],
+                line_color="white",
+                opacity=0.8,
+                showlegend=False,
+                legendgroup=f"group_{g}",
+            ), row=2, col=2)
+
+        # ── Layout ────────────────────────────────────────────────────────
+        fig.update_layout(
+            height=900,
+            title_text="Trajectory analysis — PAGA + diffusion pseudotime",
+            template="plotly_dark",
+            legend=dict(itemsizing="constant", font=dict(size=10)),
+        )
+        for row in (1, 2):
+            for col in (1, 2):
+                fig.update_xaxes(showgrid=False, showticklabels=False, row=row, col=col)
+                fig.update_yaxes(showgrid=False, showticklabels=False, row=row, col=col)
+
+        save_dir = save_dir or self.save_dir
+        if save_dir:
+            out = os.path.join(save_dir, "trajectory_plotly.html")
+            fig.write_html(out)
+            print(f"[plot_trajectory] Saved to {out}")
+
+        fig.show()
+        return fig
+
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]
 
@@ -842,8 +1387,8 @@ class EmbeddingAnalysis:
                 img = Image.fromarray(mid_z).resize((200, 200))
                 buffered = BytesIO()
                 img.save(buffered, format="PNG")
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                return f'<img src="data:image/png;base64,{img_str}" width="200" height="200">'
+                data_url = _png_buffer_to_data_url(buffered)
+                return f'<img src="{data_url}" width="200" height="200">'
             except Exception as e:
                 return f"Error creating image: {e}"
         return "No image available"

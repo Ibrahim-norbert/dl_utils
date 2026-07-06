@@ -1,10 +1,9 @@
 import os
 
 import numpy as np
-from matplotlib import pyplot as plt
-import numpy as np
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
+from matplotlib import pyplot as plt
 
 class GlasbeyARGBLut:
     MINIMUM_RGB_DIFFERENCE = 50
@@ -17,11 +16,10 @@ class GlasbeyARGBLut:
         self.name = "GLASBEY"
 
     def get_argb(self, x):
-        try:
-            index = int(x * (self.num_colors - 1))
-            return self.indices[index]
-        except IndexError:
-            raise RuntimeError("Index out of bounds")
+        # Clamp the normalised value to [0, 1] so x == 1.0 (or slight overshoot)
+        # maps to the last colour instead of raising IndexError.
+        index = int(np.clip(x, 0.0, 1.0) * (self.num_colors - 1))
+        return self.indices[index]
 
     def get_argb_by_index(self, i):
         index = i % self.num_colors
@@ -92,7 +90,7 @@ class SeismicARGBLut(GlasbeyARGBLut):
         return indices
 
     def get_argb(self, x):
-        index = int(x * (self.num_colors - 1))
+        index = int(np.clip(x, 0.0, 1.0) * (self.num_colors - 1))
         return self.indices[index]
 
     def rgba_tuple_by_normalized(self, x: float):
@@ -138,9 +136,7 @@ class SeismicARGBLut(GlasbeyARGBLut):
         r, g, b, a = self.rgba_tuple_by_normalized(x)
         return f"rgb({r},{g},{b})"
 
-    @staticmethod
-    def rgba(r, g, b, a):
-        return (a << 24) | (r << 16) | (g << 8) | b
+    # rgba() is inherited unchanged from GlasbeyARGBLut.
 
     def get_colorgradient_plot(self, orientation="vertical", save_dir=None):
         """
@@ -179,22 +175,23 @@ class SeismicARGBLut(GlasbeyARGBLut):
             ax.set_yticklabels([str(min_val), str(median/self.num_colors), str(max_val/self.num_colors)],
                                fontsize=20, color="black")
             ax.set_xticks([])
-        plt.tight_layout()
+        fig.tight_layout()
         if save_dir:
-            plt.savefig(os.path.join(save_dir,f"{self.name}_colorbar.svg"))
+            fig.savefig(os.path.join(save_dir, f"{self.name}_colorbar.svg"))
+        plt.close(fig)
 
 
 
 class ViridisARGBLut(SeismicARGBLut):
 
     def __init__(self, alpha=255, num_colors=256):
-        super().__init__(alpha, num_colors)
         """
         Initialize the colormap with a given alpha transparency.
 
         Parameters:
         - alpha (int): Alpha value (0-255) for transparency.
         """
+        super().__init__(alpha, num_colors)
         self.alpha = alpha
         self.indices = self.argb_indices()
         self.num_colors = len(self.indices)
@@ -210,7 +207,7 @@ class ViridisARGBLut(SeismicARGBLut):
         Returns:
         - int: ARGB color as a packed integer.
         """
-        index = min(int(np.ceil(x * self.num_colors)), self.num_colors - 1)
+        index = int(np.clip(np.ceil(x * self.num_colors), 0, self.num_colors - 1))
         return self.indices[index]
 
     def argb_indices(self):

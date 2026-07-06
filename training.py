@@ -24,7 +24,7 @@ from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
-from lightning.pytorch.callbacks import DeviceStatsMonitor
+from pytorch_lightning.callbacks import DeviceStatsMonitor
 import shutil
 
 
@@ -168,7 +168,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             num_nodes=num_nodes,
             precision=precision,  # None -> Lightning default ("32-true")
             fast_dev_run=self.hparams.fast_dev_run,
-            deterministic=True,
+            deterministic="warn",
             max_epochs=max_epochs,
             log_every_n_steps=batch_size,
             limit_val_batches=limit_val_batches,
@@ -277,21 +277,38 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             self.datasetConfig = Namespace(**datasetConfig)
             return self.hparams
 
+
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = torch.load(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("state_dict", checkpoint)
+        # Drop keys whose shapes don't match the module before loading, so an
+        # architecture change in the tokenizer/decoder head doesn't abort the load
+        # (load_state_dict raises on a shape mismatch even with strict=False). These
+        # are reported as `shape_skipped`; the backbone weights still load.
+        module_state = module.state_dict()
+        shape_skipped = [
+            k for k, v in state_dict.items()
+            if k in module_state and hasattr(v, "shape") and v.shape != module_state[k].shape
+        ]
+        if shape_skipped:
+            state_dict = {k: v for k, v in state_dict.items() if k not in shape_skipped}
         missing, unexpected = module.load_state_dict(state_dict=state_dict, strict=False)
         print(f"[getModel] Loaded weights from: {ckptPath}")
+        if shape_skipped:
+            print(f"  Shape-mismatched keys skipped ({len(shape_skipped)}): "
+                  f"{shape_skipped[:5]}{'...' if len(shape_skipped) > 5 else ''}")
         if missing:
             print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
         if unexpected:
             print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
         return module
+    
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
         """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
 
         Handles both raw state dicts and Lightning checkpoints (nested under "state_dict").
-        Uses strict=False and reports missing/unexpected keys so shape mismatches are visible.
+        Filters out shape-mismatched keys before loading so architecture changes in the
+        tokenizer or decoder head don't block the backbone weights from loading.
         Raises FileNotFoundError if the path is set but does not exist.
         """
         weights_path: str = getattr(self.hparams, "weightsCkptPath", "") or ""
@@ -406,10 +423,16 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         except Exception:
             save_dir = getattr(self, "save_dir", None)
             if save_dir and os.path.isdir(save_dir):
-                files = os.listdir(save_dir)
-                if not any(
-                    any(ext in f for ext in (".pth", ".png", ".svg")) for f in files
-                ):
+                # Keep the run dir if any checkpoint (.ckpt) or visual output was
+                # saved before the crash; checkpoints may sit in a subfolder, so
+                # scan recursively. Only an output-less dir is cleaned up.
+                keep_exts = (".ckpt", ".pth", ".png", ".svg")
+                has_saved_output = any(
+                    f.endswith(keep_exts)
+                    for _root, _dirs, files in os.walk(save_dir)
+                    for f in files
+                )
+                if not has_saved_output:
                     shutil.rmtree(save_dir)
             raise
 
@@ -571,16 +594,15 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         # The result is also written into self.hparams so it ends up in the saved YAML.
         root_save_dir = self._compute_save_dir()
 
-        # Let TensorBoardLogger handle versioning (version_0, version_1, ...)
-        wandb_logger = logger(
-            save_dir=root_save_dir,
-            name=self.hparams.version_name if hasattr(self.hparams, "version_name") else None,
-        )
-
-        # Use the logger's versioned directory as the actual save_dir
-        self.save_dir = wandb_logger.log_dir
+        # Checkpoints, TB logs and config all go directly into the specified
+        # save_dir. name="" + version="" stop TensorBoardLogger from appending
+        # name/version_N, so its log_dir == root_save_dir (re-runs reuse/overwrite
+        # this dir; Lightning's ModelCheckpoint manages top-k/last files).
+        self.save_dir = root_save_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
+
+        wandb_logger = logger(save_dir=root_save_dir, name="", version="")
 
         print(
             f"\n[TensorBoard] logging to: {self.save_dir}\n"
@@ -603,6 +625,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             # once the metric stops improving. latest_checkpoint_callback below
             # captures the true final-epoch model instead.
         )
+        # NB: do not store this as self.checkpoint_callback - pl.Trainer exposes
+        # checkpoint_callback as a read-only property (the first ModelCheckpoint in
+        # the callbacks list, i.e. this top-k callback), which fit() reads directly.
 
         # Genuine final-epoch checkpoint. monitor=None routes through
         # _save_none_monitor_checkpoint, which saves every epoch (rolling, keeps

@@ -46,9 +46,14 @@ LM_DF = None
 NUCL_DICT = None
 CELL_DICT = None
 
-NUCLEUS_LABEL_KEY = "label_id"
+OLD_LABEL_KEY = "label_id"
+NUCLEUS_LABEL_KEY = OLD_LABEL_KEY
 LABEL_KEY = "labels"
 EMBED_DICT_EMBED = "Embeddings"
+EMBED_KEY = EMBED_DICT_EMBED
+PREDICTED_LABEL_KEY = "pred labels"
+GT_LABEL_KEY = "gt"
+LOSS_KEY = "loss"
 EMBED_DICT_TEXTUREMASK = "Texture_mask"
 
 TOKEN_KEY = "token"
