@@ -58,3 +58,65 @@ class CellGeometry(NamedTuple):
     data: Data
     filePath: str
     feat: Optional[np.ndarray] = None
+
+def _to_numpy(value):
+    """Tensor -> CPU ndarray; everything else passes through unchanged."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return value
+
+
+class EmbeddingsNumpy(NamedTuple):
+    """Numpy twin of :class:`Embeddings` (see :meth:`Embeddings.numpy`).
+
+    ``labels``/``pred_labels`` are optional because some forwards never see
+    labels (SSL contrastive batches, coordinate-only inputs) or predict none.
+    """
+
+    data: np.ndarray
+    labels: Optional[np.ndarray] = None
+    pred_labels: Optional[np.ndarray] = None
+    misc: Optional[dict] = None
+
+
+class Embeddings(NamedTuple):
+    """Typed output of top-level model forwards.
+
+    ``labels``/``pred_labels`` are optional because some forwards never see
+    labels (SSL contrastive batches, coordinate-only inputs) or predict none.
+    Access fields by attribute (``emb.data``), never by string key: this is a
+    NamedTuple, so ``emb[...]`` only takes integer indices.
+    """
+
+    data: torch.Tensor
+    labels: Optional[torch.Tensor] = None
+    pred_labels: Optional[torch.Tensor] = None
+    misc: Optional[dict] = None
+
+    def numpy(self) -> EmbeddingsNumpy:
+        """Return an :class:`EmbeddingsNumpy` with every tensor moved to CPU numpy.
+
+        Non-tensor values (floats, strings, nested Points) pass through; ``misc``
+        is shallow-converted (one level of tensor values).
+        """
+        return EmbeddingsNumpy(
+            data=_to_numpy(self.data),
+            labels=_to_numpy(self.labels),
+            pred_labels=_to_numpy(self.pred_labels),
+            misc=(
+                {k: _to_numpy(v) for k, v in self.misc.items()}
+                if self.misc is not None
+                else None
+            ),
+        )
+
+
+class EmbeddingsTraining(NamedTuple):
+    """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
+
+    ``loss`` is ``None`` when ``shared_step`` runs a loss-free forward (e.g. the
+    embedding path used by prediction).
+    """
+
+    loss: Optional[torch.Tensor]
+    data: Embeddings

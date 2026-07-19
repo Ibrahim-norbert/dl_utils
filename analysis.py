@@ -1,4 +1,5 @@
 import base64
+import logging
 from typing import Optional
 import os
 import pathlib
@@ -26,6 +27,15 @@ from dl_utils import LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DI
 from dl_utils.vizualizations import CustomMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
 sns.set_context("poster")
+
+# kaleido (Plotly static-image export) drives a headless Chromium via the
+# choreographer package; both loggers have no explicit level of their own, so
+# they inherit whatever the root logger is set to (e.g. logging.basicConfig
+# level=INFO in a training entrypoint) and emit browser-lifecycle chatter on
+# every fig.write_image(...) call. Pin them explicitly — an explicit per-logger
+# level always wins over inherited root level, regardless of import order.
+logging.getLogger("kaleido").setLevel(logging.WARNING)
+logging.getLogger("choreographer").setLevel(logging.WARNING)
 
 
 def _png_buffer_to_data_url(buf: BytesIO) -> str:
