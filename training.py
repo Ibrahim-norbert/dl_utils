@@ -772,6 +772,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
         accumulate_grad_batches=10,
+        gradient_clip_val = 1.,
         **kwargs,
     ) -> types.NoneType:
 
@@ -855,6 +856,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         args = {
             "callbacks": callbacks,
             "logger": wandb_logger,
+            "gradient_clip_val": gradient_clip_val,
         }
 
         super().__init__(
