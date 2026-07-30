@@ -3,7 +3,7 @@ from typing import NamedTuple, Any, Optional, ClassVar
 import numpy as np
 import torch
 from huggingface_hub import dataclasses
-from constants import LOSS_KEY 
+from .constants import LOSS_KEY
 
 class TrainingSampleLM(NamedTuple):
     features: np.ndarray
