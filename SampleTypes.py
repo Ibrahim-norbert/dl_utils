@@ -131,12 +131,11 @@ class Embeddings:
 
 @dataclass(frozen=True, eq=False)
 class EmbeddingsPrompts(Embeddings):
-    """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
-
-    ``misc['loss']`` is ``None`` when ``shared_step`` runs a loss-free forward
-    (e.g. the embedding path used by prediction).
     """
-    prev_iters: Optional[list["Embeddings"]] = None
+    Must contain prompt_target and prompt_indices
+    """
+    prompt_target : Optional[torch.Tensor] = None
+    prompt_indices : Optional[torch.Tensor] = None
 
     def detach(self) -> "EmbeddingsPrompts":
         """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
