@@ -101,7 +101,7 @@ class EmbeddingsNumpy:
 
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=False, eq=False)
 class Embeddings:
     data: torch.Tensor
     labels: Optional[torch.Tensor] = None
@@ -129,7 +129,7 @@ class Embeddings:
     def detach_cpu(self) -> "Embeddings":
         return self._apply(_t_detach_cpu)
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=False, eq=False)
 class EmbeddingsPrompts(Embeddings):
     """
     Must contain prompt_target and prompt_indices
@@ -149,7 +149,7 @@ class EmbeddingsPrompts(Embeddings):
         return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
 
 
-@dataclass(frozen=True, eq=False)
+@dataclass(frozen=False, eq=False)
 class EmbeddingsSAM(Embeddings):
     """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
 
