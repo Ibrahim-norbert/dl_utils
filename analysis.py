@@ -1,5 +1,7 @@
 import base64
+import logging
 from typing import Optional
+from dataclasses import dataclass
 import os
 import pathlib
 import warnings
@@ -26,6 +28,15 @@ from dl_utils import LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DI
 from dl_utils.vizualizations import CustomMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
 sns.set_context("poster")
+
+# kaleido (Plotly static-image export) drives a headless Chromium via the
+# choreographer package; both loggers have no explicit level of their own, so
+# they inherit whatever the root logger is set to (e.g. logging.basicConfig
+# level=INFO in a training entrypoint) and emit browser-lifecycle chatter on
+# every fig.write_image(...) call. Pin them explicitly — an explicit per-logger
+# level always wins over inherited root level, regardless of import order.
+logging.getLogger("kaleido").setLevel(logging.WARNING)
+logging.getLogger("choreographer").setLevel(logging.WARNING)
 
 
 def _png_buffer_to_data_url(buf: BytesIO) -> str:
@@ -101,6 +112,22 @@ class Classification:
         return accuracy_score(gt, classifier.predict(x))
 
 
+@dataclass
+class ClusteringConfig:
+    """DBSCAN/Leiden hyper-parameters for :meth:`EmbeddingAnalysis.cluster`.
+
+    Groups the six clustering knobs that were previously threaded as loose
+    keyword arguments through every constructor and the shared setup routine, so
+    defaults live in one place and each call site passes a single object.
+    """
+    dbscan: bool = False
+    leiden: bool = True
+    resolution: float = 1.0
+    n_iterations: int = 2
+    n_neighbors: int = 15
+    distance_metric: str = "euclidean"
+
+
 class EmbeddingAnalysis:
 
     # ------------------------------------------------------------------ #
@@ -124,6 +151,7 @@ class EmbeddingAnalysis:
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
+        greyBackground:bool = False,
         **kwargs,
     ) -> None:
         if classMapping is None:
@@ -141,27 +169,27 @@ class EmbeddingAnalysis:
         assert not nan_mask.any(
         ), f"Yes we have {nan_mask.sum()} nans in the array"
 
+        
         assert np.unique(embeddings.flatten()).__len__(
         ) > 1, f"The embeddings are uninformative with the constant value of {np.unique(embeddings.flatten())}"
 
         self.embeddings: np.ndarray = StandardScaler().fit_transform(embeddings)
 
-        self._apply_common_setup(
-            self,
+        self._init_common(
             gtColumn=gtColumn,
             instancelabelColumn=instancelabelColumn,
             classMapping=classMapping,
             save_dir=save_dir,
-            dbscan=dbscan,
-            leiden=leiden,
-            leiden_resolution=leiden_resolution,
-            leiden_n_iterations=leiden_n_iterations,
-            leiden_n_neighbors=leiden_n_neighbors,
-            leiden_distance_metric=leiden_distance_metric,
+            clustering=ClusteringConfig(
+                dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
+                n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
+                distance_metric=leiden_distance_metric,
+            ),
             default_class_column="Class",
             metadDataFramePath=metadDataFramePath,
             classifier_method=classifier_method,
-            **kwargs
+            greyBackground=greyBackground,
+            **kwargs,
         )
         self.predLabels = (
             self.classify(binary=binary, mapping=classMapping)
@@ -206,18 +234,16 @@ class EmbeddingAnalysis:
         instance.embeddings = StandardScaler().fit_transform(
             get_array_from_df(instance.data_df, type)
         )
-        cls._apply_common_setup(
-            instance,
+        instance._init_common(
             gtColumn=gtColumn,
             instancelabelColumn=instancelabelColumn,
             classMapping=classMapping,
             save_dir=save_dir,
-            dbscan=dbscan,
-            leiden=leiden,
-            leiden_resolution=leiden_resolution,
-            leiden_n_iterations=leiden_n_iterations,
-            leiden_n_neighbors=leiden_n_neighbors,
-            leiden_distance_metric=leiden_distance_metric,
+            clustering=ClusteringConfig(
+                dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
+                n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
+                distance_metric=leiden_distance_metric,
+            ),
             metadDataFramePath=metadDataFramePath,
             default_class_column="cluster",
             subplots_kwargs={"s": 1},
@@ -256,18 +282,16 @@ class EmbeddingAnalysis:
             gt_present = all(c in meta_df.columns for c in gtColumn)
         else:
             gt_present = gtColumn in meta_df.columns
-        cls._apply_common_setup(
-            instance,
+        instance._init_common(
             gtColumn=gtColumn,
             instancelabelColumn=instancelabelColumn,
             classMapping={},
             save_dir=save_dir,
-            dbscan=False,
-            leiden=leiden,
-            leiden_resolution=leiden_resolution,
-            leiden_n_iterations=leiden_n_iterations,
-            leiden_n_neighbors=leiden_n_neighbors,
-            leiden_distance_metric=leiden_distance_metric,
+            clustering=ClusteringConfig(
+                dbscan=False, leiden=leiden, resolution=leiden_resolution,
+                n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
+                distance_metric=leiden_distance_metric,
+            ),
             default_class_column=("_".join(gtColumn) if isinstance(gtColumn, list) else gtColumn) if gt_present else "Class",
         )
         # Colour by ground-truth label; skip classifier training
@@ -343,71 +367,78 @@ class EmbeddingAnalysis:
 
         return _df, gtColumn, classMapping
 
-    @staticmethod
-    def _apply_common_setup(
-        instance: "EmbeddingAnalysis",
+    def _init_common(
+        self,
         *,
         gtColumn,
         instancelabelColumn,
         classMapping,
         save_dir,
-        dbscan,
-        leiden,
-        leiden_resolution,
-        leiden_n_iterations,
-        leiden_n_neighbors,
-        leiden_distance_metric,
+        clustering: ClusteringConfig,
         default_class_column: str = "Class",
         subplots_kwargs: dict = None,
         metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
+        greyBackground: bool = False,
         **kwargs,
     ) -> None:
+        """Shared initialisation for every constructor.
+
+        Each entry point (``__init__``, :meth:`from_dataframe`,
+        :meth:`fromEmbeddingArrayAndMetaDataFrame`) first populates ``self.data_df``
+        and ``self.embeddings``, then delegates here. As a plain instance method,
+        alternate constructors call ``instance._init_common(...)`` directly rather
+        than threading ``instance`` through a static helper.
+        """
         assert not kwargs, f"Unexpected keyword argument(s): {sorted(kwargs)}"
-        instance.instancelabelColumn = instancelabelColumn
-        instance.classMapping = classMapping
-        instance.save_dir = os.path.join(
+        self.instancelabelColumn = instancelabelColumn
+        self.classMapping = classMapping
+        self.save_dir = os.path.join(
             save_dir, "EmbeddingAnalysis") if save_dir is not None else None
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-        instance.metadDataFramePath = metadDataFramePath
+        self.metadDataFramePath = metadDataFramePath
         if metadDataFramePath is not None and os.path.exists(metadDataFramePath) and metadDataFramePath.endswith((".csv", ".xlsx", ".json")):
             data_df = pd.read_csv(metadDataFramePath) if metadDataFramePath.endswith(
                 ".csv") else pd.read_excel(metadDataFramePath)
             assert instancelabelColumn in data_df.columns, f"Instance label column '{instancelabelColumn}' not found in metadata DataFrame."
-            instance.data_df = instance.data_df.merge(
+            self.data_df = self.data_df.merge(
                 data_df, on=instancelabelColumn, how="left")
             print(f"Metadata DataFrame loaded from: {metadDataFramePath}")
 
         # Standardise label column(s) into a single integer column before getLabels runs.
         if gtColumn is not None:
-            instance.data_df, gtColumn, classMapping = EmbeddingAnalysis._standardise_label_column(
-                instance.data_df, gtColumn, classMapping or {}
+            self.data_df, gtColumn, classMapping = EmbeddingAnalysis._standardise_label_column(
+                self.data_df, gtColumn, classMapping or {}
             )
-        instance.gtColumn = gtColumn
-        instance.classMapping = classMapping or {}
+        self.gtColumn = gtColumn
+        self.classMapping = classMapping or {}
 
-        instance.dbscan = dbscan
-        instance.leiden = leiden
-        instance.leiden_resolution = leiden_resolution
-        instance.leiden_n_iterations = leiden_n_iterations
-        instance.leiden_n_neighbors = leiden_n_neighbors
-        instance.leiden_distance_metric = leiden_distance_metric
-        instance.classifier_method = classifier_method
-        instance.classification = Classification
-        instance.classMappedColumn = "Mapped"
-        instance.classColumn = default_class_column
-        instance.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {
+        # Grouped config is the source of truth; the flat attributes below are
+        # kept for backwards compatibility (e.g. ``cluster()`` reads ``self.leiden``).
+        self.clustering = clustering
+        self.dbscan = clustering.dbscan
+        self.leiden = clustering.leiden
+        self.leiden_resolution = clustering.resolution
+        self.leiden_n_iterations = clustering.n_iterations
+        self.leiden_n_neighbors = clustering.n_neighbors
+        self.leiden_distance_metric = clustering.distance_metric
+        self.classifier_method = classifier_method
+        self.classification = Classification
+        self.classMappedColumn = "Mapped"
+        self.classColumn = default_class_column
+        self.greyBackground = greyBackground
+        self.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {
             "s": 6}
         scalar_cols = [
-            c for c in instance.data_df.columns
-            if instance.data_df[c].dtype.kind in ("f", "i", "u", "U", "S", "O")
-            and not instance.data_df[c].apply(lambda x: isinstance(x, (list, dict, np.ndarray))).any()
+            c for c in self.data_df.columns
+            if self.data_df[c].dtype.kind in ("f", "i", "u", "U", "S", "O")
+            and not self.data_df[c].apply(lambda x: isinstance(x, (list, dict, np.ndarray))).any()
         ]
-        instance.results_df = instance.data_df[scalar_cols].copy()
+        self.results_df = self.data_df[scalar_cols].copy()
 
-        instance.getLabels()
-        print(f"Embeddings shape: {instance.embeddings.shape}")
+        self.getLabels()
+        print(f"Embeddings shape: {self.embeddings.shape}")
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -426,7 +457,7 @@ class EmbeddingAnalysis:
 
         Label *derivation* — list→combined-column joining, one-hot detection,
         and string→int mapping — is performed once upstream in
-        :meth:`_standardise_label_column` (called from ``_apply_common_setup``).
+        :meth:`_standardise_label_column` (called from ``_init_common``).
         By the time this runs ``self.gtColumn`` is always a single column name
         whose values are numeric, so this method only handles the remaining
         bookkeeping: the zero-offset shift, instance labels, and the
@@ -440,11 +471,12 @@ class EmbeddingAnalysis:
             else np.zeros(n, dtype=int)
         )
 
-        valid_mask = ~pd.isna(self.gtlabels)
-        if 0 in self.gtlabels[valid_mask]:
-            self.gtlabels = np.where(
-                valid_mask, self.gtlabels + 1, self.gtlabels)
-            self.data_df[self.gtColumn] = self.gtlabels
+        if not self.greyBackground:
+            valid_mask = ~pd.isna(self.gtlabels)
+            if 0 in self.gtlabels[valid_mask]:
+                self.gtlabels = np.where(
+                    valid_mask, self.gtlabels + 1, self.gtlabels)
+                self.data_df[self.gtColumn] = self.gtlabels
 
         self.instancelabels: np.ndarray = get_array_from_df(
             self.data_df, self.instancelabelColumn)
@@ -693,7 +725,7 @@ class EmbeddingAnalysis:
 
         return fig
 
-    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None):
+    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None, precomputed_colors:bool=True):
         col = classColoumn if classColoumn is not None else self.classColumn
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
@@ -705,6 +737,7 @@ class EmbeddingAnalysis:
             classColoumn=col,
             legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
             save_dir=self.save_dir,
+            precomputed_colors=precomputed_colors
         )
 
     @staticmethod

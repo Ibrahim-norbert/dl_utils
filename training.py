@@ -25,7 +25,13 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 import dl_utils.datasets as datasets
 from pytorch_lightning.callbacks import DeviceStatsMonitor
+from pytorch_lightning.callbacks import LearningRateMonitor
+import gc
+import logging
 import shutil
+from datetime import timedelta
+
+_console_logger = logging.getLogger(__name__)
 
 
 def full_stack() -> str:
@@ -88,6 +94,189 @@ class PeakGPUMemoryCallback(pl.Callback):
             f"peak GPU memory: {peak_mb:.1f} MB allocated / {reserved_mb:.1f} MB reserved"
         )
         pl_module.log("gpu_peak_memory_MB", peak_mb, on_epoch=True, logger=True)
+
+
+class AverageMeter:
+    """Running average of a scalar (Pointcept's meter, trimmed)."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.val = 0.0
+        self.sum = 0.0
+        self.count = 0
+
+    def update(self, value: float, n: int = 1) -> None:
+        self.val = float(value)
+        self.sum += float(value) * n
+        self.count += n
+
+    @property
+    def avg(self) -> float:
+        return self.sum / self.count if self.count else 0.0
+
+
+def _log_scalar(experiment: Any, tag: str, value: float, step: int) -> None:
+    """Duck-typed scalar dispatch: TensorBoard (`add_scalar`) or WandB (`log`)."""
+    if hasattr(experiment, "add_scalar"):
+        experiment.add_scalar(tag, value, step)
+    elif hasattr(experiment, "log"):
+        experiment.log({tag: value}, step=step)
+
+
+class IterationInfoCallback(pl.Callback):
+    """Periodic one-line training status: loss, LR, data/batch time, ETA.
+
+    Port of Pointcept's ``InformationWriter`` + ``IterationTimer`` hooks (no
+    Pointcept dependency: its EventStorage/comm machinery is replaced by
+    :class:`AverageMeter`, ``trainer.is_global_zero`` and the trainer's own
+    logger). Every ``log_interval`` train batches (rank zero only) one INFO
+    line is emitted::
+
+        Train [ep/max][step/total] loss 1.2345 (last 1.1000) lr 4.000e-03 data 0.120s batch 0.480s eta 1:23:45
+
+    and, when ``log_scalars`` is set, ``time/data`` / ``time/batch`` scalars go
+    to the trainer's logger. Data-time measures the gap between one batch's end
+    and the next batch's start (dataloader stall); batch-time the full step.
+    The ETA extrapolates the mean batch-time over the remaining optimizer steps
+    and is approximate across partial gradient-accumulation windows.
+
+    Timers carry no checkpointed state: on resume they simply refill, and the
+    ETA is correct because ``trainer.global_step`` is restored by Lightning.
+    """
+
+    def __init__(self, log_interval: int = 10, log_scalars: bool = True) -> None:
+        self.log_interval = max(1, int(log_interval))
+        self.log_scalars = log_scalars
+        self._data_time = AverageMeter()
+        self._batch_time = AverageMeter()
+        self._loss = AverageMeter()
+        self._batch_start: typing.Optional[float] = None
+        self._last_batch_end: typing.Optional[float] = None
+        self._total_opt_steps: typing.Optional[int] = None
+        self._accum = 1
+
+    def on_train_start(self, trainer, pl_module) -> None:
+        self._total_opt_steps = int(trainer.estimated_stepping_batches)
+        self._accum = max(1, int(trainer.accumulate_grad_batches))
+        for meter in (self._data_time, self._batch_time, self._loss):
+            meter.reset()
+
+    def on_train_epoch_start(self, trainer, pl_module) -> None:
+        # Per-epoch reset (as Pointcept does) and forget the previous batch end
+        # so validation/epoch-boundary time is not counted as data-time.
+        self._data_time.reset()
+        self._batch_time.reset()
+        self._loss.reset()
+        self._last_batch_end = None
+
+    def on_train_batch_start(self, trainer, pl_module, batch, batch_idx) -> None:
+        now = time.perf_counter()
+        if self._last_batch_end is not None:
+            self._data_time.update(now - self._last_batch_end)
+        self._batch_start = now
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        now = time.perf_counter()
+        if self._batch_start is not None:
+            self._batch_time.update(now - self._batch_start)
+        self._last_batch_end = now
+
+        loss = self._extract_loss(outputs, trainer)
+        if loss is not None:
+            self._loss.update(loss)
+
+        if (batch_idx + 1) % self.log_interval or not trainer.is_global_zero:
+            return
+
+        _console_logger.info(self._format_line(trainer))
+        if self.log_scalars:
+            experiment = getattr(trainer.logger, "experiment", None)
+            if experiment is not None:
+                _log_scalar(experiment, "time/data", self._data_time.avg, trainer.global_step)
+                _log_scalar(experiment, "time/batch", self._batch_time.avg, trainer.global_step)
+
+    @staticmethod
+    def _extract_loss(outputs, trainer) -> typing.Optional[float]:
+        value = None
+        if isinstance(outputs, dict):
+            value = outputs.get("loss")
+        elif outputs is not None:
+            value = outputs
+        if value is None:
+            value = trainer.callback_metrics.get("Train LOSS")
+        try:
+            return float(value)
+        except (TypeError, ValueError, RuntimeError):
+            return None
+
+    def _format_line(self, trainer) -> str:
+        max_epochs = trainer.max_epochs if trainer.max_epochs is not None else "?"
+        total = self._total_opt_steps or 0
+        remaining = max(total - trainer.global_step, 0)
+        eta = timedelta(seconds=int(self._batch_time.avg * self._accum * remaining))
+
+        lr = float("nan")
+        if trainer.optimizers:
+            lr = trainer.optimizers[0].param_groups[0]["lr"]
+
+        return (
+            f"Train [{trainer.current_epoch + 1}/{max_epochs}]"
+            f"[{trainer.global_step}/{total}] "
+            f"loss {self._loss.avg:.4f} (last {self._loss.val:.4f}) "
+            f"lr {lr:.3e} "
+            f"data {self._data_time.avg:.3f}s batch {self._batch_time.avg:.3f}s "
+            f"eta {eta}"
+        )
+
+
+class GarbageCollectionCallback(pl.Callback):
+    """Deterministic garbage collection (port of Pointcept's ``GarbageHandler``).
+
+    Automatic GC triggers at unpredictable points and pauses every process
+    independently; disabling it and collecting manually every ``interval``
+    batches removes those stalls (per-process, so it runs on every rank).
+    Also collects after each validation run (allocation-heavy: figures,
+    clustering, probes). Unlike Pointcept, ``teardown`` re-enables automatic
+    GC — the training process keeps living after ``fit()`` and ``teardown``
+    also fires on exceptions.
+    """
+
+    def __init__(
+        self,
+        interval: int = 150,
+        disable_auto: bool = True,
+        empty_cache: bool = False,
+    ) -> None:
+        self.interval = max(1, int(interval))
+        self.disable_auto = disable_auto
+        self.empty_cache = empty_cache
+        self._disabled_here = False
+
+    def on_train_start(self, trainer, pl_module) -> None:
+        if self.disable_auto and gc.isenabled():
+            gc.disable()
+            self._disabled_here = True
+            _console_logger.info(
+                "Automatic GC disabled; collecting manually every %d batches",
+                self.interval,
+            )
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx) -> None:
+        if (batch_idx + 1) % self.interval == 0:
+            gc.collect()
+            if self.empty_cache and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+    def on_validation_end(self, trainer, pl_module) -> None:
+        gc.collect()
+
+    def teardown(self, trainer, pl_module, stage) -> None:
+        if self._disabled_here:
+            gc.collect()
+            gc.enable()
+            self._disabled_here = False
 
 
 class BaseClassTrainerAndPredictor(pl.Trainer):
@@ -583,6 +772,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
         accumulate_grad_batches=10,
+        gradient_clip_val = 1.,
         **kwargs,
     ) -> types.NoneType:
 
@@ -648,9 +838,25 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         )
 
         # TODO: Hack for now until smarter config parsing
+        callbacks = [
+            checkpoint_callback,
+            latest_checkpoint_callback,
+            early_stopping_callback,
+            DeviceStatsMonitor(cpu_stats=False),
+            # log_weight_decay also tracks per-group WD (cross-checks any
+            # weight-decay schedule the model applies to its param groups).
+            LearningRateMonitor(logging_interval="step", log_weight_decay=True),
+            IterationInfoCallback(
+                log_interval=int(self.kwargs.get("info_log_interval", 10))
+            ),
+        ]
+        gc_interval = int(self.kwargs.get("gc_collect_interval", 0))
+        if gc_interval > 0:  # opt-in: manual GC instead of automatic pauses
+            callbacks.append(GarbageCollectionCallback(interval=gc_interval))
         args = {
-            "callbacks": [checkpoint_callback, latest_checkpoint_callback, early_stopping_callback, DeviceStatsMonitor(cpu_stats=False)],
+            "callbacks": callbacks,
             "logger": wandb_logger,
+            "gradient_clip_val": gradient_clip_val,
         }
 
         super().__init__(
@@ -757,6 +963,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
         parser.add_argument("--EarlyStopping_monitor", default="Train LOSS")
         parser.add_argument("--EarlyStopping_mode", default="min")
         parser.add_argument("--EarlyStopping_patience", type=int, default=50)
+        # Iteration info line every N train batches (IterationInfoCallback).
+        parser.add_argument("--info_log_interval", type=int, default=10)
+        # >0 enables GarbageCollectionCallback with that collect interval.
+        parser.add_argument("--gc_collect_interval", type=int, default=0)
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser
