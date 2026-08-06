@@ -10,6 +10,7 @@ from io import BytesIO
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly
 import seaborn as sns
 import skimage
 from matplotlib.figure import Figure
@@ -24,7 +25,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from dl_utils import LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
+from dl_utils import LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED, MoBie_coloring
 from dl_utils.vizualizations import CustomMatplotlib
 from dl_utils.LM_preprocess import get_array_from_df
 sns.set_context("poster")
@@ -413,7 +414,7 @@ class EmbeddingAnalysis:
             )
         self.gtColumn = gtColumn
         self.classMapping = classMapping or {}
-
+        self.color_space = MoBie_coloring.GlasbeyARGBLut()
         # Grouped config is the source of truth; the flat attributes below are
         # kept for backwards compatibility (e.g. ``cluster()`` reads ``self.leiden``).
         self.clustering = clustering
@@ -750,7 +751,7 @@ class EmbeddingAnalysis:
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
                        save_dir: str = "./", precomputed_colors: bool = False,
-                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True, **kwargs):
+                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True, **kwargs) -> plotly.graph_objs.Figure:
         import plotly.express as px
         from . import MoBie_coloring
 
@@ -762,7 +763,6 @@ class EmbeddingAnalysis:
             fig.update_traces(marker=dict(
                 color=plot_df[classColoumn].tolist(), size=4))
         else:
-            color_space = MoBie_coloring.GlasbeyARGBLut()
 
             if classColoumn not in plot_df.columns:
                 print(f"{classColoumn} is not a column in DataFrame")
@@ -778,7 +778,7 @@ class EmbeddingAnalysis:
                 return mapping.get(k, self.classMapping.get(k, str(k)))
 
             color_map = {
-                _label(k): f"rgba{color_space.rgba_tuple_by_index(k)}" for k in classLabels}
+                _label(k): f"rgba{self.color_space.rgba_tuple_by_index(k)}" for k in classLabels}
             if not color_background:
                 color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
             plot_df[classColoumn] = plot_df[classColoumn].astype(
