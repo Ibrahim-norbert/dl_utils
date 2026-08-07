@@ -1,4 +1,4 @@
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, fields
 from typing import NamedTuple, Any, Optional, ClassVar
 import numpy as np
 import torch
@@ -143,6 +143,39 @@ class EmbeddingsPrompts(Embeddings):
         return self._apply(_t_detach, skip_misc_keys=(LOSS_KEY,))
 
     def detach_cpu(self) -> "EmbeddingsPrompts":
+        """New bundle with every tensor detached and moved to CPU EXCEPT
+        ``misc['loss']``, kept attached and on-device for ``backward()``.
+        ``prev_iters`` are recursed, so their GPU tensors are freed."""
+        return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
+
+@dataclass(frozen=False, eq=False)
+class EmbeddingsPromptsFeat(EmbeddingsPrompts):
+    feat: torch.Tensor = None
+    grid_size: torch.Tensor = None
+    offset: torch.Tensor = None
+
+    @classmethod
+    def from_embeddings(
+        cls,
+        emb: EmbeddingsPrompts,
+        *,
+        feat: torch.Tensor,
+        grid_size: torch.Tensor,
+        offset: torch.Tensor,
+    ) -> "EmbeddingsPromptsFeat":
+        return cls(
+            **{f.name: getattr(emb, f.name) for f in fields(EmbeddingsPrompts)},
+            feat=feat,
+            grid_size=grid_size,
+            offset=offset,
+        )
+
+    def detach(self) -> "EmbeddingsPromptsFeat":
+        """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
+        attached so ``backward()`` can still run on it."""
+        return self._apply(_t_detach, skip_misc_keys=(LOSS_KEY,))
+
+    def detach_cpu(self) -> "EmbeddingsPromptsFeat":
         """New bundle with every tensor detached and moved to CPU EXCEPT
         ``misc['loss']``, kept attached and on-device for ``backward()``.
         ``prev_iters`` are recursed, so their GPU tensors are freed."""

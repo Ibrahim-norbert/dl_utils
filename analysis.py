@@ -208,6 +208,10 @@ class EmbeddingAnalysis:
             self.plot_gromov_wasserstein_heatmap()
             self.plot_kl_divergence_heatmap()
 
+    @property
+    def color_space(self):
+        return MoBie_coloring.GlasbeyARGBLut()
+
     @classmethod
     def from_dataframe(
         cls,
@@ -414,7 +418,7 @@ class EmbeddingAnalysis:
             )
         self.gtColumn = gtColumn
         self.classMapping = classMapping or {}
-        self.color_space = MoBie_coloring.GlasbeyARGBLut()
+
         # Grouped config is the source of truth; the flat attributes below are
         # kept for backwards compatibility (e.g. ``cluster()`` reads ``self.leiden``).
         self.clustering = clustering
