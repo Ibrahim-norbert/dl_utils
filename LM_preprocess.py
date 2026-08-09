@@ -472,7 +472,7 @@ class VolumeProcessing:
         """Write *volume* and *mask* into an N5 file at *n5_file*.
 
         Both arrays are stored under ``<dapiKey>/`` with datasets
-        ``<rawKey>`` and ``<maskKey>`` respectively, using ``(32, 32, 32)``
+        ``<RAW_KEY>`` and ``<MASK_KEY>`` respectively, using ``(32, 32, 32)``
         chunks.  A channel attribute is attached to each dataset.  When
         ``DEBUG`` logging is active a read-back verification is performed.
 
