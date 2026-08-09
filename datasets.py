@@ -58,65 +58,18 @@ class BaseDataset:
         several directories (:class:`dl_utils.n5_datasets.MultiDirectoryN5Dataset`) can
         replace the contract instead of working around it.
         """
-        assert self.sampleMapperDF[self.samplePathColumn].map(os.path.dirname).nunique() <= 1, (
-            "All sample paths must be located in the same directory"
-        )
-
-
-    def writeChunkedImage(self, filePath: str, volume: np.ndarray, groupkey : str, key: str) -> None:
-        # TODO: Transfer to BaseDataset class dealing with volumes
-        """Write *volume* into an N5 file at *n5_file*.
-
-        Array is stored under the group ``groupkey/`` with datasets
-        ``key``, using ``(32, 32, 32)`` chunks. When ``DEBUG``
-        logging is active a read-back verification is performed to confirm
-        the write succeeded.
-
-        Parameters
-        ----------
-        filePath : str
-            Path to the target N5 file (created or appended).
-        volume : If necessary, scaled to
-            ``uint16`` before writing.
-        """
-
-        import z5py
-
-        n5_file = util.replaceFileExt(filePath, ".n5")
-
-        logger.debug("Volume intensity range: [%s, %s]", volume.min(), volume.max())
-        # TODO: For now ensure image is in grayscale
-        if np.issubdtype(volume.dtype, np.floating):
-            assert volume.min() >= 0 and volume.max() <= 1, f"We do not have floating point grayscale range of 0 - 1 but instead {volume.min()} - {volume.max()}"
-            # Should integer, else saving n5 file would take too long
-            volume = (volume * 65535).astype(np.uint16)
-            logger.debug("Volume intensity range after scaling: [%s, %s]", volume.min(), volume.max())
-
-        # TODO: this assertion runs AFTER the uint16 cast above, so it always fails for
-        # float input (uint16 is not in [int8, int16]) — and it rejects uint8/uint16
-        # input outright. Check the dtype before the cast, and include the unsigned types.
-        assert volume.dtype in [np.uint8, np.uint16], f"The data type of the volume must be int16 or lower but we have {volume.dtype}"
-
-        with z5py.File(n5_file, 'a', use_zarr_format=False) as f:
-            if groupkey not in f:
-                group = f.create_group(groupkey)
-            else:
-                group = f[groupkey]
-
-            volume_ds = group.require_dataset(
-                key,
-                shape=volume.shape,
-                chunks=(32, 32, 32),
-                dtype=volume.dtype,
+        if self.sampleMapperDF[self.samplePathColumn].map(os.path.dirname).nunique() > 1:
+            raise ValueError(
+                "All sample paths must be located in the same directory"
             )
-            volume_ds[:] = volume
 
-        # Verification read-back — only runs when DEBUG logging is enabled
-        if logger.isEnabledFor(logging.DEBUG):
-            with z5py.File(n5_file, 'r', use_zarr_format=False) as f:
-                volume_read = f[f"{groupkey}/{key}"][:]
-            logger.debug("Written volume — shape: %s, dtype: %s", volume_read.shape, volume_read.dtype)
-            
+
+    # NOTE: writeChunkedImage, writeVolumePair and the openVolume/readVolume/readBBox/
+    # readZSlice family were removed here. They were a second N5 implementation
+    # duplicating dl_utils.n5_datasets.BaseVolumeDataset, and the read family depended on
+    # createN5 / n5Paths / dapiKey / rawKey, none of which this class ever defined — so
+    # every call into it raised AttributeError. Use BaseVolumeDataset / BaseMaskDataset.
+
     @staticmethod
     def getDataloader(dataset, batch_size, num_workers, persistent_workers, **kwargs):
         # print(f"All entered parameters: {locals()}")
@@ -382,9 +335,10 @@ class BaseDataset:
         """Load a 3-D TIFF volume from *path*."""
         import skimage.io
         ext = os.path.splitext(path)[1].lower()
-        assert ext in (".tif", ".tiff"), (
-            f"Unsupported file format: {ext}. Supported formats are .tif, .tiff"
-        )
+        if ext not in (".tif", ".tiff"):
+            raise ValueError(
+                f"Unsupported file format: {ext}. Supported formats are .tif, .tiff"
+            )
         return skimage.io.imread(path)
 
     def prepareVolume(self, volumePath: str, maskPath: Optional[str] = None,
@@ -392,16 +346,18 @@ class BaseDataset:
                       ) -> Tuple[np.ndarray, np.ndarray]:
         """Load a raw/mask TIF pair and pre-process it, ready for N5 saving.
 
-        This is the single implementation of everything that happens between reading the
-        TIFF and writing the N5:
-
-        1. Load the raw TIF (:meth:`loadVolume`).
+        1. Load the raw TIF.
         2. Resample to isotropic voxels using *resolution* (ZYX) — order 3 for the raw
            intensities, order 0 (nearest neighbour) for the label mask, so labels survive.
         3. Min-max normalise the raw volume to ``[0, 1]``.
 
         *maskPath* may be ``None`` or missing, in which case an all-zero mask matching the
         resampled shape is returned — what raw-only consumers such as SimCLR need.
+
+        TODO: overlaps BaseVolumeDataset.prepareSampleVolume, which does the same work but
+        yields uint16 rather than float32 [0, 1]. This one survives because it serves the
+        per-volume LMTextureNucleiDataset.volume2DF pipeline, not the N5 dataset classes;
+        collapse the two once that pipeline moves onto BaseVolumeDataset.
         """
         from sklearn import preprocessing
 
@@ -426,85 +382,21 @@ class BaseDataset:
             mask: np.ndarray = self.loadtiffVolume(maskPath)
             if not isotropic:
                 nLabels = np.unique(mask).size
-                maskDtype = mask.dtype
                 mask = resize(mask, volume.shape, anti_aliasing=True, order=0)
-                assert np.unique(mask).size == nLabels, (
-                    "Label count changed during mask resampling: "
-                    f"{nLabels} -> {np.unique(mask).size}, "
-                    f"dtype before {maskDtype} after {mask.dtype}"
-                )
+                if np.unique(mask).size != nLabels:
+                    raise ValueError(
+                        "Label count changed during mask resampling: "
+                        f"{nLabels} -> {np.unique(mask).size}"
+                    )
         # TODO: Do not save an empty mask if no masks exist instead raise error
         else:
             mask = np.zeros(volume.shape, dtype=np.uint16)
 
         return volume, mask.astype(np.uint16)
 
-
-    def writeVolumePair(self, n5Path: str, volume: np.ndarray,
-                        mask: np.ndarray) -> None:
-        """Write the raw/mask pair into ``dapi/{raw,mask}`` at *n5Path*.
-
-        NOTE: deliberately separate from :meth:`writeChunkedImage`, which asserts
-        ``dtype in [int8, int16]`` after casting floats to ``uint16`` and so rejects
-        every volume this path produces.
-        """
-        import z5py
-
-        volume = (volume * 65535).astype(np.uint16)
-        mask = mask.astype(np.uint16)
-        logger.debug("Volume intensity range: [%s, %s]", volume.min(), volume.max())
-        logger.debug("Mask intensity range: [%s, %s]", mask.min(), mask.max())
-
-        with z5py.File(n5Path, "a", use_zarr_format=False) as f:
-            group = f[self.dapiKey] if self.dapiKey in f else f.create_group(self.dapiKey)
-            for key, array in ((self.rawKey, volume), (self.maskKey, mask)):
-                ds = group.require_dataset(key, shape=array.shape,
-                                           chunks=(32, 32, 32), dtype=array.dtype)
-                ds[:] = array
-                ds.attrs["channel"] = self.dapiKey
-
-    # ---- Reads -------------------------------------------------------
-
-    def openVolume(self, volumePath: str, key: Optional[str] = None):
-        """Lazily open a channel handle, converting the volume if it is not registered.
-
-        The channel *key* is a parameter — hard-coding it to the raw channel is what
-        previously made the mask unreachable and forced callers back to the TIFF.
-        """
-        import z5py
-
-        key = key or self.rawKey
-        cacheKey = (volumePath, key)
-        if not hasattr(self, "_n5Handles"):     # unpickled without __setstate__
-            self._n5Handles = {}
-        if cacheKey not in self._n5Handles:
-            n5Path = self.n5Paths.get(volumePath) or self.createN5(volumePath)
-            self._n5Handles[cacheKey] = z5py.File(n5Path, "r")[f"{self.dapiKey}/{key}"]
-        return self._n5Handles[cacheKey]
-
-    def readVolume(self, volumePath: str, key: Optional[str] = None) -> np.ndarray:
-        """Whole-channel read — the N5 replacement for ``loadVolume(<tif>)``."""
-        return np.asarray(self.openVolume(volumePath, key)[:])
-
-    def readBBox(self, volumePath: str, bbox, key: Optional[str] = None) -> np.ndarray:
-        """Sub-volume read for a tuple of slices."""
-        return np.asarray(self.openVolume(volumePath, key)[bbox])
-
-    def readZSlice(self, volumePath: str, z: int, key: Optional[str] = None) -> np.ndarray:
-        """Single-plane read — fetches one plane, never the whole stack."""
-        return np.asarray(self.openVolume(volumePath, key)[int(z)])
-
-    # ---- Multiprocessing ---------------------------------------------
-
-    def __getstate__(self) -> dict:
-        state = self.__dict__.copy()
-        state.pop("_n5Handles", None)           # z5py handles are unpicklable
-        return state
-
-    def __setstate__(self, state: dict) -> None:
-        self.__dict__.update(state)
-        self._n5Handles = {}
-
+    # NOTE: no __getstate__/__setstate__ here. They existed only to strip cached z5py
+    # handles; the N5 datasets now open a handle per read and cache nothing, so there is
+    # no unpicklable state to drop and subclasses pickle by the default protocol.
 
 
 class BaseImageCollectionDataset(BaseDataset):

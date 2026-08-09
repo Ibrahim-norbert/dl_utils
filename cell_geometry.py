@@ -27,6 +27,77 @@ COM_COLS: tuple[str, str, str] = ("com_x", "com_y", "com_z")
 SHAPE_COLS: tuple[str, str, str] = ("shape_x", "shape_y", "shape_z")
 
 
+def mask_to_surface_points(
+    mask: np.ndarray,
+    n_points: int = 2048,
+    spacing: tuple = (1.0, 1.0, 1.0),
+    sigma: float = 1.0,
+    pad: int = 2,
+    with_normals: bool = False,
+    min_extent: int = 5,
+    min_faces: int = 200,
+) -> np.ndarray:
+    """Surface points for one isolated instance, cropped to its bbox + padding.
+
+    Returns an empty array if the instance is too small or thin to produce a
+    meaningful mesh:
+      - any axis extent below `min_extent` voxels
+      - smoothed mask never crosses the 0.5 iso-surface
+      - resulting mesh has fewer than `min_faces` triangles
+
+    *spacing* defaults to isotropic because callers feed this from an N5 that
+    :meth:`BaseVolumeDataset.prepareSampleVolume` already resampled to isotropic voxels;
+    an anisotropic default would apply the correction a second time.
+    """
+    from scipy.ndimage import find_objects, gaussian_filter
+    from skimage.measure import marching_cubes
+    import trimesh
+
+    feat_dim = 6 if with_normals else 3
+    empty = np.zeros((0, feat_dim), dtype=np.float32)
+
+    if not mask.any():
+        return empty
+
+    # Reject thin/small instances that can't form a good mesh
+    coords = np.argwhere(mask)
+    extents = coords.max(0) - coords.min(0) + 1
+    if extents.min() < min_extent:
+        return empty
+
+    # Tight crop with padding so smoothing and marching cubes have breathing room
+    sl = find_objects(mask.astype(np.uint8))[0]
+    sl = tuple(
+        slice(max(s.start - pad, 0), min(s.stop + pad, mask.shape[i]))
+        for i, s in enumerate(sl)
+    )
+    sub = mask[sl]
+    offset = np.array([s.start for s in sl], dtype=np.float32) * np.asarray(spacing, dtype=np.float32)
+
+    smooth = gaussian_filter(sub.astype(np.float32), sigma=sigma)
+    if smooth.max() < 0.5:
+        return empty
+
+    verts, faces, normals, _ = marching_cubes(smooth, level=0.5, spacing=spacing)
+
+    # Reject degenerate meshes that would force heavy duplicate sampling
+    if len(faces) < min_faces:
+        return empty
+
+    verts += offset  # shift back into full-volume coordinates
+
+    mesh = trimesh.Trimesh(vertices=verts, faces=faces,
+                           vertex_normals=normals, process=False)
+
+    points, face_idx = trimesh.sample.sample_surface_even(mesh, n_points)
+    points = points.astype(np.float32)
+
+    if with_normals:
+        n = mesh.face_normals[face_idx].astype(np.float32)
+        return np.concatenate([points, n], axis=-1)
+    return points
+
+
 def compute_volume_coms(
     mask: np.ndarray,
 ) -> Tuple[Dict[int, Tuple[float, float, float]], Tuple[int, int, int]]:
