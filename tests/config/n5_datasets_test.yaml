@@ -1,0 +1,38 @@
+# Configuration for test_n5_datasets.py
+#
+#   python dl_utils/tests/test_n5_datasets.py \
+#       --config_file dl_utils/tests/config/n5_datasets_test.yaml -v
+#
+# Nothing here is test scaffolding: `datasetConfig` is the kwargs of a real run, splatted
+# straight into the class, exactly as training.py does with its own dataset configs.
+# Column names must match the columns of the sample mapper below.
+
+# Class under test, resolved out of dl_utils.n5_datasets.
+# Optional — defaults to MultiDirectoryN5Dataset, which inherits every method of
+# BaseVolumeDataset and BaseMaskDataset.
+dataset: MultiDirectoryN5Dataset
+
+datasetConfig:
+  # Sample mapper table (CSV/XLSX/...): one row per sample, carrying the raw volume path,
+  # the mask path and — optionally — the channel.
+  sampleMapperDFPath: "E:/Project 2/Neurospheres/Ihssane/dataset_extension.csv"
+
+  # Artefact root. The N5 and the key-annotated mapper land in <save_dir>/<datasetName>/.
+  # The suite converts ONE sample into a `_unittest`-suffixed sibling, so the real dataset
+  # directory and its sample mapper are never written to.
+  # null -> a temporary directory.
+  save_dir: "E:/Project 2/Neurospheres/Ihssane/n5"
+
+  # Mapper columns holding the raw volume path and the mask path. Both required.
+  volumePathColumn: sample_path
+  maskPathColumn: mask_path
+
+  # Mapper column holding the channel. null puts every sample under channelKey.
+  channelColumn: channel
+  channelKey: dapi
+
+  # ZYX voxel size the volumes are resampled to isotropy from. null -> DEFAULT_RESOLUTION.
+  resolution: [3, 1, 1]
+
+  # Dataset name. null -> the basename of the sample paths' common root.
+  datasetName: null

@@ -193,6 +193,7 @@ class BaseVolumeDataset(BaseDataset):
         """
         ceiling = np.iinfo(np.uint16).max
         if normalise:
+            # TODO: Just use Sklearn minmax but only on raw image not any masks
             low, high = float(volume.min()), float(volume.max())
             volume = ((volume - low) / (high - low) if high > low
                       else np.zeros_like(volume)) * ceiling
@@ -403,18 +404,7 @@ class BaseMaskDataset(BaseVolumeDataset):
             self.openKey(self.datasetKey(sampleVolumePath, self.MASK_KEY, channel))[:])
 
     def iter_object_clouds(self, mask: np.ndarray, surfacePoints: bool = True):
-        """Yield ``(label_id, (P, 3) [x, y, z])`` for EACH object in *mask*.
-
-        Derives every instance's bounding box with :func:`scipy.ndimage.find_objects` and
-        meshes each object **within its own crop**, which is O(volume) plus O(bbox) per
-        instance rather than O(labels x volume). Coordinates are isotropic N5 voxels,
-        shifted back out of the crop, so every channel of a sample shares one frame.
-
-        Takes the array rather than an index so both callers are served: the read path
-        passes :meth:`get_hr_mask`, index-building passes :meth:`maskOfPath`.
-
-        Objects that produce no usable surface/skeleton points are skipped.
-        """
+        # TODO: This method is not required here but in PointCloudObjects of representationlearning dataset.py
         from scipy.ndimage import find_objects
 
         # find_objects returns, for label i, the slices bounding it at position i-1.
@@ -432,7 +422,7 @@ class BaseMaskDataset(BaseVolumeDataset):
 
     @staticmethod
     def objectPoints(objectMask: np.ndarray, surfacePoints: bool) -> np.ndarray:
-        """``(P, 3) [z, y, x]`` points for one isolated object, meshed or skeletonised."""
+        # TODO: This method is not required here but in PointCloudObjects of representationlearning dataset.py
         if surfacePoints:
             from dl_utils.cell_geometry import mask_to_surface_points
             return mask_to_surface_points(objectMask, n_points=4096, sigma=1.0)
