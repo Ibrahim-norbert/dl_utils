@@ -12,7 +12,7 @@ import yaml
 # time. These constants start as None and are reassigned elsewhere at runtime;
 # `from .constants import NUCL_TABLE` would bind the None value permanently.
 from . import constants
-from .constants import NUCLEUS_LABEL_KEY
+from .constants import MOBIE_LABEL_KEY
 
 
 def replaceFileExt(filePath : str, newExt : str):
@@ -65,7 +65,7 @@ def savedataframe(dataframe, save_dir,  **kwargs):
     # Remove unnamed columns
     dataframe = dataframe.loc[:, ~dataframe.columns.str.contains('^Unnamed')]
     dataframe.drop(columns=dataframe.columns[dataframe.columns.duplicated()], inplace=True)
-    dataframe.drop_duplicates(subset=NUCLEUS_LABEL_KEY, inplace = True)
+    dataframe.drop_duplicates(subset=MOBIE_LABEL_KEY, inplace = True)
 
     dataframe.reset_index(inplace=True, drop=True)
 

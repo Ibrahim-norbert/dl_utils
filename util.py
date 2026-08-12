@@ -20,7 +20,7 @@ import yaml
 from torch import inf
 from torch.utils.data import DataLoader, Dataset
 
-from dl_utils import NUCLEUS_LABEL_KEY
+from dl_utils import MOBIE_LABEL_KEY
 # Shared helpers live in util_base; re-export the ones historically exposed via
 # `dl_utils.util` so existing callers (e.g. `util.save2DFcolumn`) keep working
 # without maintaining duplicate copies.
@@ -496,7 +496,7 @@ def getvalidationdataloader(dataset, batch_size, num_workers, pin_memory, drop_l
     # Update the dataset's DataFrame with cell type classifications
     dataset.data_df = cell_type2class_column(dataset.data_df)
 
-    labels = dataset.data_df.dropna(subset=["cell_type", NUCLEUS_LABEL_KEY]).label_id.to_numpy().flatten()
+    labels = dataset.data_df.dropna(subset=["cell_type", MOBIE_LABEL_KEY]).label_id.to_numpy().flatten()
 
     subset_dataset = dataset.subset_dataset(labels, nucl=True)
 

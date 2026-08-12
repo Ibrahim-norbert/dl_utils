@@ -36,8 +36,8 @@ import z5py
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from dl_utils import n5_datasets  # noqa: E402
-from dl_utils.n5_datasets import (  # noqa: E402
+from dl_utils import n5_processing  # noqa: E402
+from dl_utils.n5_processing import (  # noqa: E402
     BaseMaskDataset,
     BaseVolumeDataset,
     MultiDirectoryN5Dataset,
@@ -307,7 +307,7 @@ class TestVolumePreparation(N5TestCase):
 
     def test_prepareSampleVolume_resamples_a_raw_volume_to_uint16(self) -> None:
         dataset = self.fullDataset()
-        source = dataset.loadtiffVolume(self.firstVolumePath())
+        source = dataset.loadFromSamplePath(self.firstVolumePath())
         volume = dataset.prepareSampleVolume(self.firstVolumePath(),
                                              dataset.RAW_INTERPOLATION_ORDER)
         self.assertEqual(volume.dtype, np.uint16)
@@ -315,7 +315,7 @@ class TestVolumePreparation(N5TestCase):
 
     def test_prepareSampleVolume_keeps_every_label_of_a_mask(self) -> None:
         dataset = self.fullDataset()
-        source = dataset.loadtiffVolume(self.firstMaskPath())
+        source = dataset.loadFromSamplePath(self.firstMaskPath())
         mask = dataset.prepareSampleVolume(self.firstMaskPath(),
                                            dataset.MASK_INTERPOLATION_ORDER)
         self.assertEqual(mask.shape, self.resampledShape(dataset, source.shape))
@@ -401,7 +401,7 @@ class TestConversion(N5TestCase):
 
     def test_writeKeyColumn_rejects_a_missing_column(self) -> None:
         with self.assertRaises(KeyError):
-            self.fullDataset().writeKeyColumn("_absent", "raw", "key", 3)
+            self.fullDataset().__writeKeyVolumes__("_absent", "raw", "key", 3)
 
     def test_writeKeyColumn_rejects_colliding_keys(self) -> None:
         # The same row twice: one key, two samples.
@@ -461,7 +461,7 @@ class TestReads(N5TestCase):
         cls.shape = tuple(cls.dataset.openKey(cls.dataset.keyOf(0)).shape)
 
     def test_keyOf_returns_the_mapper_keys(self) -> None:
-        row = self.dataset.row(0)
+        row = self.dataset.sampleDFRow(0)
         self.assertEqual(self.dataset.keyOf(0), row[self.dataset.N5_VOLUME_KEY_COLUMN])
         self.assertEqual(self.dataset.keyOf(0, self.dataset.N5_MASK_KEY_COLUMN),
                          row[self.dataset.N5_MASK_KEY_COLUMN])
@@ -478,7 +478,7 @@ class TestReads(N5TestCase):
         bbox = tuple(slice(0, max(size // 2, 1)) for size in self.shape)
         volume = self.dataset.get_hr_vol(0)
         self.assertEqual(volume.shape, self.shape)
-        np.testing.assert_array_equal(self.dataset.get_hr_vol(0, bbox), volume[bbox])
+        np.testing.assert_array_equal(self.dataset.get_hr_vol(0), volume[bbox])
 
     def test_get_hr_mask_isolates_a_single_label(self) -> None:
         mask = self.dataset.get_hr_mask(0)
@@ -486,7 +486,7 @@ class TestReads(N5TestCase):
         labels = [label for label in np.unique(mask).tolist() if label]
         if not labels:
             self.skipTest("the first sample's mask carries no instance label")
-        isolated = self.dataset.get_hr_mask(0, label=labels[0])
+        isolated = self.dataset.get_hr_mask(0)
         self.assertEqual(set(np.unique(isolated).tolist()), {0, labels[0]})
 
     def test_get_masked_hr_vol_zeroes_the_background(self) -> None:
@@ -497,9 +497,9 @@ class TestReads(N5TestCase):
         np.testing.assert_array_equal(masked[mask != 0], volume[mask != 0])
 
     def test_maskOfPath_matches_the_positional_read(self) -> None:
-        row = self.dataset.row(0)
+        row = self.dataset.sampleDFRow(0)
         np.testing.assert_array_equal(
-            self.dataset.maskOfPath(row[self.dataset.samplePathColumn],
+            self.dataset.maskOfPath(row[self.dataset.SAMPLE_PATH_COLUMN],
                                     self.dataset.channelOf(row)),
             self.dataset.get_hr_mask(0))
 
@@ -575,7 +575,7 @@ class TestMultiDirectoryContract(N5TestCase):
     def test_validateSamplePaths_accepts_the_configured_layout(self) -> None:
         dataset = self.fullDataset()
         self.assertEqual(len(dataset.sampleMapperDF), len(MAPPER))
-        for column in (dataset.samplePathColumn, dataset.SAMPLE_MASK_PATH_COLUMN):
+        for column in (dataset.SAMPLE_PATH_COLUMN, dataset.SAMPLE_MASK_PATH_COLUMN):
             self.assertIn(column, dataset.sampleMapperDF.columns)
 
     def test_validateSamplePaths_rejects_a_missing_column(self) -> None:
@@ -592,9 +592,9 @@ class TestMultiDirectoryContract(N5TestCase):
     def test_validateSamplePaths_allows_no_channel_column(self) -> None:
         # channelOf documents None as supported; validation must not look it up.
         dataset = self.fullDataset(channelColumn=None)
-        row = dataset.row(0)
+        row = dataset.sampleDFRow(0)
         self.assertEqual(dataset.channelOf(row), dataset.channelKey)
-        path = str(row[dataset.samplePathColumn])
+        path = str(row[dataset.SAMPLE_PATH_COLUMN])
         self.assertEqual(
             dataset.datasetKey(path, dataset.RAW_KEY, dataset.channelOf(row)),
             f"{dataset.sampleKey(path)}/{dataset.channelKey}/{dataset.RAW_KEY}")

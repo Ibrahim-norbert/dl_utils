@@ -24,9 +24,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from dl_utils import LABEL_KEY, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
+from dl_utils import LABEL_KEY, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
 from dl_utils.vizualizations import CustomMatplotlib
-from dl_utils.LM_preprocess import get_array_from_df
+from dl_utils.n5_processing import getArrayFromDF
+
 sns.set_context("poster")
 
 # kaleido (Plotly static-image export) drives a headless Chromium via the
@@ -138,7 +139,7 @@ class EmbeddingAnalysis:
         self,
         df_path: str,
         type: str = EMBED_DICT_EMBED,
-        instancelabelColumn: str = NUCLEUS_LABEL_KEY,
+        instancelabelColumn: str = MOBIE_LABEL_KEY,
         gtColumn: str = None,
         classMapping: dict = None,
         save_dir: str = None,
@@ -164,7 +165,7 @@ class EmbeddingAnalysis:
         self.type: str = type
         self.data_df: pd.DataFrame = pd.read_json(df_path)
         print(f"Available coloumns: {self.data_df.columns.tolist()}")
-        embeddings = get_array_from_df(self.data_df, type)
+        embeddings = getArrayFromDF(self.data_df, type)
         nan_mask = np.isnan(embeddings)
         assert not nan_mask.any(
         ), f"Yes we have {nan_mask.sum()} nans in the array"
@@ -212,7 +213,7 @@ class EmbeddingAnalysis:
         cls,
         data_df: pd.DataFrame,
         type: str = MASKED_FEATURES_KEY,
-        instancelabelColumn: str = NUCLEUS_LABEL_KEY,
+        instancelabelColumn: str = MOBIE_LABEL_KEY,
         gtColumn: str = None,
         save_dir: str = None,
         classMapping: dict = None,
@@ -232,7 +233,7 @@ class EmbeddingAnalysis:
         instance.type = type
         instance.data_df = data_df.copy()
         instance.embeddings = StandardScaler().fit_transform(
-            get_array_from_df(instance.data_df, type)
+            getArrayFromDF(instance.data_df, type)
         )
         instance._init_common(
             gtColumn=gtColumn,
@@ -344,7 +345,7 @@ class EmbeddingAnalysis:
             gtColumn = combined_col
 
         if gtColumn in _df.columns:
-            col_vals = get_array_from_df(_df, gtColumn)
+            col_vals = getArrayFromDF(_df, gtColumn)
             if col_vals.dtype.kind in ("U", "S", "O"):
                 unique_vals = [v for v in pd.unique(col_vals) if not pd.isna(v)]
                 if not classMapping:
@@ -466,7 +467,7 @@ class EmbeddingAnalysis:
         n = len(self.data_df)
 
         self.gtlabels: np.ndarray = (
-            get_array_from_df(self.data_df, self.gtColumn)
+            getArrayFromDF(self.data_df, self.gtColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
@@ -478,7 +479,7 @@ class EmbeddingAnalysis:
                     valid_mask, self.gtlabels + 1, self.gtlabels)
                 self.data_df[self.gtColumn] = self.gtlabels
 
-        self.instancelabels: np.ndarray = get_array_from_df(
+        self.instancelabels: np.ndarray = getArrayFromDF(
             self.data_df, self.instancelabelColumn)
         nan_mask = ~pd.isna(self.gtlabels)
         if nan_mask.sum() < n:
@@ -1403,7 +1404,7 @@ class EmbeddingAnalysis:
         return fig
 
     def getRowsByLabel(self, label):
-        return self.data_df[self.data_df[NUCLEUS_LABEL_KEY] == label]
+        return self.data_df[self.data_df[MOBIE_LABEL_KEY] == label]
 
     def get_array_from_df(self, column):
         return np.array(self.data_df[column].tolist())
@@ -1440,7 +1441,7 @@ if __name__ == '__main__':
     from ProjectRoot import change_wd_to_project_root
     change_wd_to_project_root()
     from dl_utils.analysis import EmbeddingAnalysis
-    from dl_utils import EMBED_DICT_EMBED, NUCLEUS_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
+    from dl_utils import EMBED_DICT_EMBED, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
 
     save_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\predictedMask"
     mapping = {1: "Neuron", 2: "Glial"}
