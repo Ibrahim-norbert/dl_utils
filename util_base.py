@@ -79,7 +79,10 @@ def savedataframe(dataframe, save_dir,  **kwargs):
 
 def get_savedf_path(save_dir: str, typie=''):
 
+    os.makedirs(save_dir, exist_ok=True)
+
     if typie != "":
+
         return os.path.join(save_dir, f"dataframe_{typie}.json")
     else:
         return os.path.join(save_dir, f"dataframe.json")

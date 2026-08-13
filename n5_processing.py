@@ -296,7 +296,7 @@ class BaseVolumeDataset(BaseDataset):
     @cached_property
     def datasetDir(self) -> str:
         """Artefact root for this dataset — resolved only; :meth:`run` creates it."""
-        return self.save_dir
+        return os.path.join(self.save_dir, "training_processed")
 
     @cached_property
     def n5Path(self) -> str:
@@ -437,7 +437,8 @@ class BaseVolumeDataset(BaseDataset):
     def loadFromSamplePath(path: str) -> np.ndarray:
         """Load a 3-D TIFF volume from *path*."""
         volume : np.ndarray = SampleLoaderBioImage.loadData(path)
-        assert isinstance(volume, np.ndarray), f"BaseVolumeDataset currently only supports loading {np.ndarray.__class__}"
+        assert isinstance(volume, np.ndarray), (f"BaseVolumeDataset currently only supports loading {np.ndarray.__class__}"
+         + f" not {volume.__class__} from {path}")
         d = volume.ndim
         if not d == 3:
             raise ValueError(
@@ -524,7 +525,7 @@ class BaseVolumeDataset(BaseDataset):
                 f"Sample mapper maps several rows onto the same N5 key: {duplicates[:5]}")
 
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
-            for key, (_, row) in zip(keys, self.sampleMapperDF.iterrows()):
+            for key, (i, row) in zip(keys, self.sampleMapperDF.iterrows()):
                 if self.containsKey(n5File, key):
                     # Still validated: the check reads metadata only, and skipping it on
                     # resume meant an existing dataset was never checked against its pair.
@@ -532,8 +533,9 @@ class BaseVolumeDataset(BaseDataset):
                         validate(n5File, key, None)
                     logger.debug("Already in N5, skipping: %s", key)
                     continue
-
+                print(f"Writing {key} of indx {i} keys to N5 file {self.n5Path}")
                 volume: np.ndarray = self.prepareSampleVolume(row[pathColumn], interpolationOrder)["volume"]
+
                 if validate is not None:
                     validate(n5File, key, volume)
                 self.writeN5Dataset(n5File, key, volume, self.channelOf(row))
@@ -618,7 +620,7 @@ class BaseMaskDataset(BaseVolumeDataset):
 
         pathColumn = self.SAMPLE_MASK_PATH_COLUMN
         subkey = self.MASK_KEY
-        keyColumn = self.N5_VOLUME_KEY_COLUMN
+        keyColumn = self.N5_MASK_KEY_COLUMN
         validate = self.assertPairsWithRaw
         interpolationOrder = self.MASK_INTERPOLATION_ORDER
 
@@ -937,7 +939,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
         pathColumn = self.SAMPLE_MASK_PATH_COLUMN
         subkey= self.MASK_KEY
-        keyColumn= self.N5_VOLUME_KEY_COLUMN
+        keyColumn= self.N5_MASK_KEY_COLUMN
         validate = self.assertPairsWithRaw
         interpolationOrder = self.MASK_INTERPOLATION_ORDER
 
@@ -960,7 +962,8 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
                 f"Sample mapper maps several rows onto the same N5 key: {duplicates[:5]}")
 
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
-            for key, (_, row) in zip(keys, self.sampleMapperDF.iterrows()):
+
+            for key, (i, row) in zip(keys, self.sampleMapperDF.iterrows()):
                 if self.containsKey(n5File, key):
                     # Still validated: the check reads metadata only, and skipping it on
                     # resume meant an existing dataset was never checked against its pair.
@@ -968,7 +971,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
                         validate(n5File, key, None)
                     logger.debug("Already in N5, skipping: %s", key)
                     continue
-
+                print(f"Writing {key} of indx {i} keys to N5 file {self.n5Path}")
                 prepared_dict: dict = self.prepareSampleVolume(row[pathColumn], interpolationOrder)
 
                 volume: np.ndarray = prepared_dict.pop("volume")
@@ -985,7 +988,10 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
                 # NOTE: Save each key to map objects to samples
                 dataFrameObject[keyColumn] = key
-                dataFrameObject[BaseDataset.SAMPLE_LABEL_COLUMN] = key
+                dataFrameObject[BaseDataset.SAMPLE_LABEL_COLUMN] = i
+                p = row[pathColumn]
+                dataFrameObject.to_json(p.replace(os.path.splitext(p)[-1], ".json") if isinstance(p, str)
+                                                                                       and os.path.exists(p) else key.replace(os.path.splitext(key)[-1], ".json"))
                 self.objectMapperDF.append(dataFrameObject)
 
         self.sampleMapperDF[keyColumn] = keys.to_numpy()
@@ -1031,9 +1037,10 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         object; without, the full label volume comes through unchanged.
         """
         sample_idx: int = self.objectDFRow(idx)[self.SAMPLE_LABEL_COLUMN]
+        object_label: int = self.objectDFRow(idx)[MOBIE_LABEL_KEY]
         Mask = self._ensure_open(sample_idx, self.N5_MASK_KEY_COLUMN)
         bbox = self.getBBOXSlice(self.objectMapperDF, idx)
-        return Mask[bbox]
+        return (Mask[bbox] == object_label).astype(np.int16)
 
 
     def run(self) -> None:

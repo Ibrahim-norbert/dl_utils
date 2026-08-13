@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Generator, Iterable, Union
 
 import pandas as pd
+import skimage.io
 from plyfile import PlyData
 
 import data_loader.data_loader as data_loader
@@ -62,7 +63,9 @@ class SampleLoaderBioImage(DataLoader):
         # tab-delimited with a 2-line metadata header before the real column header,
         # so skip those two rows.
         return cls(path, generator=False, full_posix=False,
-                   ext_loaders={"txt": {pd.read_csv: {"sep": "\t", "skiprows": 2, "header": 0}}}, **kwargs)
+                   ext_loaders={"txt": {pd.read_csv: {"sep": "\t", "skiprows": 2, "header": 0}},
+                                "tiff": {skimage.io.imread: {}}, "Tiff": {skimage.io.imread: {}},
+                                "TIFF": {skimage.io.imread: {}}, "tif": {skimage.io.imread: {}}}, **kwargs)
 
     @classmethod
     def loadData(cls, path) -> Any:
