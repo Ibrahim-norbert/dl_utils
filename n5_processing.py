@@ -21,7 +21,6 @@ their handle per call, so no unpicklable state is carried across a DataLoader fo
 import logging
 import numbers
 import os
-from cgitb import reset
 from functools import cached_property
 from typing import Any, Callable, List, Optional, Tuple, Union, Hashable
 
@@ -862,7 +861,8 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
     objectMapperDF : Optional[Union[pd.DataFrame, list]] = []
     BBOX_COLUMNS = BBOX_COLUMNS
     BBOX_SLICE_COLUMN = "bbox_slices"
-    LABEL_COLUMN = MOBIE_LABEL_KEY
+    OBJECT_LABEL_COLUMN = MOBIE_LABEL_KEY
+    OBJECT_DF_PATH_COLUMN = "objectDF_path"
 
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
                  channelColumn: str = "channel",
@@ -872,6 +872,11 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
     # TODO: Label logic we could transfer to a torch.Dataset class ??? Which would ensure this class
     # TODO: have had processed to N5 beforehand ???
+
+
+    # TODO: Maybe add method property to dynamically find objectMapperDF using self.datasetDir ?
+
+
 
     def __obtainAllObjectBBOX__(self):
         keys = pd.Index(
@@ -885,8 +890,8 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
                     # NOTE: Only can compute after resampled volume. If placed before, computation will be wrong
                     dataFrameObject: pd.DataFrame = mask2BBOXDF(mask)
                     # NOTE: Save each key to map objects to samples
-                    dataFrameObject[self.N5_MASK_KEY_COLUMN] = key
-                    dataFrameObject[BaseDataset.SAMPLE_LABEL_COLUMN] = row[BaseDataset.SAMPLE_LABEL_COLUMN]
+                    self.registerSample2SingleVolumeObjectDF(dataFrameObject, self.N5_MASK_KEY_COLUMN, key,
+                                                             sample_row=row)
                     self.objectMapperDF.append(dataFrameObject)
                 else:
                     print(f"{key} not in column {self.N5_MASK_KEY_COLUMN} instead we have {row[self.N5_MASK_KEY_COLUMN]}")
@@ -925,6 +930,51 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         mid_slice = hr_vol.shape[0] // 2
         CustomMatplotlib.subImshow(ax[0], hr_vol[mid_slice], label="Raw object volume", vmin=0, vmax=hr_vol[mid_slice].max())
         CustomMatplotlib.subImshow(ax[1], masked_hr_vol[mid_slice], label="Masked raw object volume", vmin=0, vmax=masked_hr_vol[mid_slice].max())
+
+
+    @cached_property
+    def objectDFDir(self):
+        p = os.path.join(self.datasetDir, "tables") #training_processed/tables/
+        os.makedirs(p, exist_ok=True)
+        return p
+
+    @cached_property
+    def objectDFPath(self) -> str:
+        """Return the path to the cleaned nucleus-table JSON file.
+        """
+        return util.get_savedf_path(self.objectDFDir, typie=self.datasetDirName)
+
+
+    def experimentRelativeDir(self, samplePath)->str:
+        sampleSubDir = os.path.dirname(samplePath).replace(self.sampleRoot, "")  # ......\condition
+        dirs = sampleSubDir.replace(self.datasetDirName, "")
+        return sampleSubDir
+
+    def singVolumeObjectDFPath(self, sample_idx : int, samplePath :str):
+
+        sampleFileName = os.path.splitext(os.path.basename(samplePath))[0]
+
+        dirs = f"{self.objectDFDir}{self.experimentRelativeDir(samplePath)}"
+        path = util.get_savedf_path(dirs,
+                                    typie=sampleFileName) # #training_processed/tables/single_volume/bbox_sampleFileName.json
+
+        self.sampleMapperDF.loc[sample_idx, self.OBJECT_DF_PATH_COLUMN] = path
+
+        return path
+
+    def registerSample2SingleVolumeObjectDF(self, dataFrameObject, keyColumn, n5VolumeKey, sample_row : pd.Series):
+        dataFrameObject[keyColumn] = n5VolumeKey
+        dataFrameObject[BaseDataset.SAMPLE_LABEL_COLUMN] = sample_row.name
+        return dataFrameObject
+
+
+
+    def checkpointSingleVolumeObjectDF(self, dataFrameObject: pd.DataFrame, keyColumn, n5VolumeKey, pathColumn, sample_row : pd.Series) -> pd.DataFrame:
+        # TODO: Later, create a function gathering all the dataframes if os.path.exists(self.objectDFPath)
+        dataFrameObject = self.registerSample2SingleVolumeObjectDF(dataFrameObject, keyColumn, n5VolumeKey, sample_row)
+        dataFrameObject.to_json(self.singVolumeObjectDFPath(int(sample_row.name), sample_row[pathColumn]))
+
+        return dataFrameObject
 
     def __writeKeyMask__(self) -> None:
         """Write one dataset per sample under *subkey*; record its key in *keyColumn*.
@@ -987,17 +1037,15 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
                 logger.info("Wrote %s <- %s", key, row[pathColumn])
 
                 # NOTE: Save each key to map objects to samples
-                dataFrameObject[keyColumn] = key
-                dataFrameObject[BaseDataset.SAMPLE_LABEL_COLUMN] = i
-                p = row[pathColumn]
-                dataFrameObject.to_json(p.replace(os.path.splitext(p)[-1], ".json") if isinstance(p, str)
-                                                                                       and os.path.exists(p) else key.replace(os.path.splitext(key)[-1], ".json"))
-                self.objectMapperDF.append(dataFrameObject)
+                self.objectMapperDF.append(self.checkpointSingleVolumeObjectDF(dataFrameObject,
+                                                                      keyColumn, key, pathColumn, row))
 
         self.sampleMapperDF[keyColumn] = keys.to_numpy()
 
         self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge(objectDF=pd.concat(self.objectMapperDF, axis=0),
                                                                         sampleDF=self.sampleMapperDF, on=[keyColumn, BaseDataset.SAMPLE_LABEL_COLUMN])
+
+        self.removeSegmentationErrors()
 
     @staticmethod
     def sampleDF2ObjectDFMerge(objectDF, sampleDF, on : list[str]) -> pd.DataFrame:
@@ -1010,7 +1058,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
     def createDatasetN5File(self) -> None:
         super().createDatasetN5File()
-        self.objectMapperDF.to_json(self.getObjectDFPath)
+        self.objectMapperDF.to_json(self.objectDFPath)
 
 
     def objectDFRow(self, idx: int) -> pd.Series:
@@ -1050,32 +1098,31 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
     @staticmethod
     def getAllLabels(df)-> np.ndarray[Any, np.int16]:
-        return df[BaseObjectDataset.LABEL_COLUMN].dropna().to_numpy().astype(np.int16).flatten()
+        return df[BaseObjectDataset.OBJECT_LABEL_COLUMN].dropna().to_numpy().astype(np.int16).flatten()
 
     @staticmethod
     def dfBBOXIndex2Label(df, df_indx) -> int:
         indices = df.index.to_numpy()
         if df_indx in indices:
-            out = df.loc[df_indx, BaseObjectDataset.LABEL_COLUMN]
+            out = df.loc[df_indx, BaseObjectDataset.OBJECT_LABEL_COLUMN]
             if isinstance(out, pd.Series):
                 return int(out.iloc[0])
             return out
         else:
             raise KeyError(f"Label {df_indx} does not exist in dataset")
 
+
+
     @staticmethod
     def label2DFBBOXIndex(df, label)-> int:
+        # TODO: Need to adjust for MultiDirectory object dataframe
         labels = BaseObjectDataset.getAllLabels(df)
         if label in labels:
-            return df.loc[df[BaseObjectDataset.LABEL_COLUMN] == label, :].index.tolist()[0]
+            assert (labels == label).sum() == 1, f"The label {label} is more than once ({(labels == label).sum()}) in the object dataframe"
+            return df.loc[df[BaseObjectDataset.OBJECT_LABEL_COLUMN] == label, :].index.tolist()[0]
         else:
             raise KeyError(f"Label {label} does not exist in dataset")
 
-    @cached_property
-    def getObjectDFPath(self) -> str:
-        """Return the path to the cleaned nucleus-table JSON file.
-        """
-        return util.get_savedf_path(os.path.join(self.datasetDir, "tables"), typie=f"bbox")
 
     @staticmethod
     def transformBBOXDF2Slice(df: pd.DataFrame, df_indx):
@@ -1338,3 +1385,12 @@ class VolumeProcessing:
         vol = self.get_hr_vol(df, nucl_label)
         mask = self.get_hr_mask(df, nucl_label)
         return vol * (mask != 0)
+
+
+if __name__ == "__main__":
+
+    save_dir = r"E:\Project 2\Neurospheres\Ihssane\data"
+    sampleMapperDFPath = os.path.join(save_dir, "sample_mapper_crop_cleaned.csv")
+
+    inst = BaseObjectDataset(sampleMapperDFPath, save_dir)
+    inst.run()

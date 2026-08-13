@@ -15,6 +15,8 @@ from . import constants
 from .constants import MOBIE_LABEL_KEY
 
 
+dfFileNamePrefix = "bbox"
+
 def replaceFileExt(filePath : str, newExt : str):
     fileExt = os.path.splitext(filePath)[-1]
     return filePath.replace(fileExt, newExt)
@@ -26,13 +28,13 @@ def save2DFcolumn(
     column_name: str = "Embedding"
 ) -> pd.DataFrame:
     """
-    Adds a new column to the dataframe with values from sorted_results,
+    Adds a new column to the {dfFileNamePrefix} with values from sorted_results,
     mapped according to sorted_nucl_labels.
 
     Parameters:
     - sorted_results: List of values to be added as the new column.
     - sorted_nucl_labels: 1D or 2D numpy array of nucleus labels.
-    - dataframe: The DataFrame to which the new column will be added.
+    - {dfFileNamePrefix}: The DataFrame to which the new column will be added.
     - column_name: The name of the new column (default is "Embedding").
 
     Returns:
@@ -83,14 +85,14 @@ def get_savedf_path(save_dir: str, typie=''):
 
     if typie != "":
 
-        return os.path.join(save_dir, f"dataframe_{typie}.json")
+        return os.path.join(save_dir, f"{dfFileNamePrefix}_{typie}.json")
     else:
-        return os.path.join(save_dir, f"dataframe.json")
+        return os.path.join(save_dir, f"{dfFileNamePrefix}.json")
 
 
 def readdataframe(path: str, name='') -> pd.DataFrame:
 
-    if "json" in path and "dataframe" in path and os.path.exists(path):
+    if "json" in path and "{dfFileNamePrefix}" in path and os.path.exists(path):
         data_df = pd.read_json(path)
     else:
         assert name is not None, ("If path is save_dir then please do not set parameter 'name' as None")
@@ -276,7 +278,7 @@ def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:
     The DataFrame must contain a 'modality' column ('EM' or 'LM').
     """
     assert "modality" in df.columns, \
-        f"Please specify modality in dataframe: {list(df.columns)}"
+        f"Please specify modality in {dfFileNamePrefix}: {list(df.columns)}"
 
     left_df = constants.NUCL_TABLE if "EM" in df["modality"].unique() else constants.LM_DF
     if left_df is None:
