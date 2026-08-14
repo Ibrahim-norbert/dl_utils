@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from abc import ABCMeta, abstractmethod
 from argparse import Namespace
 import configargparse
-import contextlib
 import inspect
-import io
 import types
 from pathlib import Path
 import time
@@ -14,8 +13,7 @@ import sys
 import torch
 from pytorch_lightning.utilities import parsing
 import pytorch_lightning as pl
-import typing
-from typing import Any, TYPE_CHECKING
+from typing import Any
 import yaml
 from pytorch_lightning import seed_everything
 from torch.utils.data import random_split
@@ -739,7 +737,12 @@ class SafeEarlyStopping(EarlyStopping):
     
 
 
-class BaseClassTrainer(BaseClassTrainerAndPredictor):
+class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
+    _MODEL_METRIC_PREFIXES = {
+        "PointClassifier": ("train/", "val/no_promptlabels/"),
+        "SAMSerialized": ("train/", "val/no_promptlabels/"),
+    }
+
     def __init__(
         self,
         modelName="SMLMSegmentation",
@@ -1067,3 +1070,15 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         finally:
             self.saveConfig()
+
+    @abstractmethod
+    def getDataset(self, dataType, kwargs):
+        pass
+
+    @abstractmethod
+    def getModel(self, kwargs):
+        pass
+
+    @abstractmethod
+    def getTrainValDataloader(self, dataset, segmentor):
+        pass
