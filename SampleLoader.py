@@ -64,8 +64,12 @@ class SampleLoaderBioImage(DataLoader):
         # so skip those two rows.
         return cls(path, generator=False, full_posix=False,
                    ext_loaders={"txt": {pd.read_csv: {"sep": "\t", "skiprows": 2, "header": 0}},
-                                "tiff": {skimage.io.imread: {}}, "Tiff": {skimage.io.imread: {}},
-                                "TIFF": {skimage.io.imread: {}}, "tif": {skimage.io.imread: {}}}, **kwargs)
+                                "json": {pd.read_json: {}},
+                                "csv": {pd.read_csv: {}},
+                                "tiff": {skimage.io.imread: {}},
+                                "Tiff": {skimage.io.imread: {}},
+                                "TIFF": {skimage.io.imread: {}},
+                                "tif": {skimage.io.imread: {}}}, **kwargs)
 
     @classmethod
     def loadData(cls, path) -> Any:

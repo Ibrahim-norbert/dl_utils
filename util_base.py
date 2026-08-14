@@ -79,20 +79,20 @@ def savedataframe(dataframe, save_dir,  **kwargs):
 
     dataframe.to_json(get_savedf_path(save_dir, **kwargs))
 
-def get_savedf_path(save_dir: str, typie=''):
+def get_savedf_path(save_dir: str, typie='', prefix=dfFileNamePrefix, fileExtension="json"):
 
     os.makedirs(save_dir, exist_ok=True)
 
     if typie != "":
 
-        return os.path.join(save_dir, f"{dfFileNamePrefix}_{typie}.json")
+        return os.path.join(save_dir, f"{prefix}_{typie}.{fileExtension}")
     else:
-        return os.path.join(save_dir, f"{dfFileNamePrefix}.json")
+        return os.path.join(save_dir, f"{prefix}.{fileExtension}")
 
 
 def readdataframe(path: str, name='') -> pd.DataFrame:
 
-    if "json" in path and "{dfFileNamePrefix}" in path and os.path.exists(path):
+    if "json" in path and f"{dfFileNamePrefix}" in path and os.path.exists(path):
         data_df = pd.read_json(path)
     else:
         assert name is not None, ("If path is save_dir then please do not set parameter 'name' as None")

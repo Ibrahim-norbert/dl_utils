@@ -563,6 +563,7 @@ class BaseVolumeDataset(BaseDataset):
 
     def _ensure_open(self, idx: int, keyColumn: Optional[str] = None):
         """Open the dataset of sample *idx*, addressed through the mapper's key column."""
+        print(f"Opening key for sample index {idx} from column {keyColumn}")
         return self.openKey(self.keyOf(idx, keyColumn))
 
     def get_hr_vol(self, idx: int) -> np.ndarray:
@@ -890,6 +891,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
                     # NOTE: Only can compute after resampled volume. If placed before, computation will be wrong
                     dataFrameObject: pd.DataFrame = mask2BBOXDF(mask)
                     # NOTE: Save each key to map objects to samples
+                    # TODO: Maybe use the checkpoint method instead ?????
                     self.registerSample2SingleVolumeObjectDF(dataFrameObject, self.N5_MASK_KEY_COLUMN, key,
                                                              sample_row=row)
                     self.objectMapperDF.append(dataFrameObject)
@@ -947,7 +949,6 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
     def experimentRelativeDir(self, samplePath)->str:
         sampleSubDir = os.path.dirname(samplePath).replace(self.sampleRoot, "")  # ......\condition
-        dirs = sampleSubDir.replace(self.datasetDirName, "")
         return sampleSubDir
 
     def singVolumeObjectDFPath(self, sample_idx : int, samplePath :str):
@@ -1073,6 +1074,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
     def get_hr_vol(self, idx: int) -> np.ndarray:
         """Raw volume of sample *idx*, or only *bbox* (a tuple of slices) when given."""
         # TODO: objectDFRow and getBBOXSlice goes through objectMapperDF twice needlessly
+        print(f"get_hr_vol: {idx}")
         sample_idx : int = self.objectDFRow(idx)[self.SAMPLE_LABEL_COLUMN]
         Volume = self._ensure_open(sample_idx, self.N5_VOLUME_KEY_COLUMN)
         bbox = self.getBBOXSlice(self.objectMapperDF, idx)
@@ -1236,155 +1238,9 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
 
 
-class PointObjects(MultiDirectoryN5Dataset):
 
 
 
-    def iter_object_clouds(self, mask: np.ndarray, surfacePoints: bool = True):
-        # TODO: This method is not required here but in PointCloudObjects of representationlearning dataset.py
-        from scipy.ndimage import find_objects
-
-        # find_objects returns, for label i, the slices bounding it at position i-1.
-        for position, bbox in enumerate(find_objects(mask)):
-            if bbox is None:                      # label absent from the volume
-                continue
-            label_id = position + 1
-            objectMask = mask[bbox] == label_id   # isolate within the crop, not globally
-            points = self.objectPoints(objectMask, surfacePoints)
-            if points.shape[0] == 0:
-                continue
-            # The crop shifted the origin — shift back into full-volume coordinates.
-            points = points + np.array([s.start for s in bbox], dtype=np.float32)
-            yield label_id, points[:, [2, 1, 0]].astype(np.float32)   # [z,y,x] -> [x,y,z]
-
-    @staticmethod
-    def objectPoints(objectMask: np.ndarray, surfacePoints: bool) -> np.ndarray:
-        # TODO: This method is not required here but in PointCloudObjects of representationlearning dataset.py
-        if surfacePoints:
-            from dl_utils.cell_geometry import mask_to_surface_points
-            return mask_to_surface_points(objectMask, n_points=4096, sigma=1.0)
-        from skimage.morphology import skeletonize
-        return np.argwhere(skeletonize(objectMask, method="lee")).astype(np.float32)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-class VolumeProcessing:
-    """Resampling and N5 serialisation utilities for LM organoid volumes.
-
-    Encapsulates all preprocessing steps required to convert a raw ``.tif``
-    volume and its instance-segmentation mask into the N5 format expected by
-    downstream dataset classes, together with an accompanying nucleus-table
-    JSON file.
-
-    Parameters
-    ----------
-    dapiKey : str, optional
-        Top-level group name inside the N5 file.  Default ``"dapi"``.
-    rawKey : str, optional
-        Dataset name for the raw intensity channel.  Default ``"raw"``.
-    maskKey : str, optional
-        Dataset name for the instance-segmentation mask.  Default ``"mask"``.
-    resolution : list of int, optional
-        Physical voxel size ``[Z, Y, X]`` used for isotropic resampling.
-        Default ``[3, 1, 1]`` (axial resolution 3× worse than lateral).
-    """
-
-    def __init__(
-        self,
-        dapiKey: str = "dapi",
-        rawKey: str = "raw",
-        maskKey: str = "mask",
-        resolution: Optional[List[int]] = None,
-        chunkedImagePath: Optional[str] = None,
-    ) -> None:
-        self.dapiKey = dapiKey
-        self.rawKey = rawKey
-        self.maskKey = maskKey
-        self.resolution: List[int] = resolution if resolution is not None else [3, 1, 1]
-        self.chunkedImagePath: Optional[str] = chunkedImagePath
-        self._n5_file = None  # opened lazily; supports multiprocessing pickle
-
-
-
-
-
-    def get_hr_vol(self, df: pd.DataFrame,
-                   nucl_label: Optional[int] = None) -> np.ndarray:
-        """Extract the high-resolution raw crop for *nucl_label*.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Nucleus table used to look up the bounding box.
-        nucl_label : int, optional
-            Instance label of the target nucleus.
-
-        Returns
-        -------
-        np.ndarray
-            Sub-array of ``self.Volume`` cropped to the nucleus bounding box.
-        """
-        self._ensure_open()
-        bb: Tuple[slice, slice, slice] = VolumeProcessing.get_bbox_slice(df, nucl_label)
-        return np.array(self.Volume[bb])
-
-    def get_hr_mask(self, df: pd.DataFrame,
-                    nucl_label: Optional[int] = None) -> np.ndarray:
-        """Extract and isolate the binary mask for *nucl_label*.
-
-        Returns the bounding-box crop of ``self.Mask`` with all pixels that do
-        not belong to *nucl_label* zeroed out.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Nucleus table used to look up the bounding box.
-        nucl_label : int, optional
-            Instance label of the target nucleus.
-
-        Returns
-        -------
-        np.ndarray
-            Binary (or label-valued) mask crop containing only *nucl_label*.
-        """
-        self._ensure_open()
-        bb: Tuple[slice, slice, slice] = VolumeProcessing.get_bbox_slice(df, nucl_label)
-        mask: np.ndarray = np.array(self.Mask[bb])
-        return mask * (mask == nucl_label)
-
-    def get_masked_hr_vol(self, df: pd.DataFrame,
-                          nucl_label: Optional[int] = None) -> np.ndarray:
-        """Return the raw crop for *nucl_label* with background zeroed out.
-
-        Combines :meth:`get_hr_vol` and :meth:`get_hr_mask` to produce a
-        clean single-nucleus volume with all surrounding signal suppressed.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Nucleus table used to look up the bounding box.
-        nucl_label : int, optional
-            Instance label of the target nucleus.
-
-        Returns
-        -------
-        np.ndarray
-            Raw intensity crop with out-of-nucleus voxels set to zero.
-        """
-        vol = self.get_hr_vol(df, nucl_label)
-        mask = self.get_hr_mask(df, nucl_label)
-        return vol * (mask != 0)
 
 
 if __name__ == "__main__":
