@@ -780,6 +780,14 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
 
         self.kwargs = kwargs
 
+        # Metric-name prefixes each model family actually logs. Only families whose tags
+        # diverge from the trainer's defaults need an entry; anything unlisted is skipped
+        # rather than guessed at.
+        _MODEL_METRIC_PREFIXES = {
+            "PointClassifier": ("train/", "val/no_promptlabels/"),
+            "SAMSerialized": ("train/", "val/no_promptlabels/"),
+        }
+
         # Allow subclasses to customise the root save directory before versioning.
         # The result is also written into self.hparams so it ends up in the saved YAML.
         root_save_dir = self._compute_save_dir()
@@ -883,6 +891,66 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor):
             fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
             args=args,
         )
+
+    def _warn_on_unlogged_monitors(self) -> None:
+        """Flag a ModelCheckpoint/EarlyStopping monitor the chosen model never logs.
+
+        ``ModelCheckpoint`` raises ``MisconfigurationException`` at the first epoch end
+        when its monitor was never logged, which surfaces as a crash minutes into a run
+        rather than at startup. (``SafeEarlyStopping`` is forgiving and only prints, so
+        an unlogged EarlyStopping monitor silently disables early stopping instead —
+        also worth knowing.)
+
+        The trainer's own defaults — ``LinearProbe/val/f1`` and ``Validation LOSS`` —
+        are the SMLMTransformer probe/base-class tags; the prompt-conditioned models log
+        under ``train/`` and ``val/no_promptlabels/`` and match neither. See
+        ``PreliminaryGNN/configs/pointclassifier.yaml`` for a config that lines up.
+        """
+        hp = self.hparams
+        prefixes = self._MODEL_METRIC_PREFIXES.get(getattr(hp, "modelName", ""))
+        if not prefixes:
+            return
+        for setting, fatal in (
+            ("ModelCheckpoint_monitor", True),
+            ("EarlyStopping_monitor", False),
+        ):
+            monitor = str(getattr(hp, setting, "") or "")
+            if monitor and not monitor.startswith(prefixes):
+                logger.warning(
+                    "%s=%r is never logged by %s, which logs under %s. %s Set a "
+                    "matching monitor (see PreliminaryGNN/configs/pointclassifier.yaml).",
+                    setting,
+                    monitor,
+                    getattr(hp, "modelName", ""),
+                    " / ".join(repr(p) for p in prefixes),
+                    (
+                        "ModelCheckpoint will raise at the first validation epoch end."
+                        if fatal
+                        else "Early stopping will be skipped."
+                    ),
+                )
+
+
+    @classmethod
+    def get_class_name(cls):
+        return cls.__name__
+
+    @classmethod
+    def fromConfig(cls, configPath):
+        import yaml
+
+        with open(configPath, encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f)
+        # Extract top-level scalar overrides so they are passed as explicit
+        # kwargs rather than relying on config_file parsing (which only works
+        # when the trainer is launched via the CLI argument parser).
+        _scalar_keys = {
+            k: v
+            for k, v in _cfg.items()
+            if not isinstance(v, (dict, list)) and k != "config_file"
+        }
+        return cls(config_file=configPath, **_scalar_keys)
+
 
     @classmethod
     def get_args(
