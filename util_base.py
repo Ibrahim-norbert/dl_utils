@@ -12,8 +12,10 @@ import yaml
 # time. These constants start as None and are reassigned elsewhere at runtime;
 # `from .constants import NUCL_TABLE` would bind the None value permanently.
 from . import constants
-from .constants import NUCLEUS_LABEL_KEY
+from .constants import MOBIE_LABEL_KEY
 
+
+dfFileNamePrefix = "bbox"
 
 def replaceFileExt(filePath : str, newExt : str):
     fileExt = os.path.splitext(filePath)[-1]
@@ -26,13 +28,13 @@ def save2DFcolumn(
     column_name: str = "Embedding"
 ) -> pd.DataFrame:
     """
-    Adds a new column to the dataframe with values from sorted_results,
+    Adds a new column to the {dfFileNamePrefix} with values from sorted_results,
     mapped according to sorted_nucl_labels.
 
     Parameters:
     - sorted_results: List of values to be added as the new column.
     - sorted_nucl_labels: 1D or 2D numpy array of nucleus labels.
-    - dataframe: The DataFrame to which the new column will be added.
+    - {dfFileNamePrefix}: The DataFrame to which the new column will be added.
     - column_name: The name of the new column (default is "Embedding").
 
     Returns:
@@ -65,7 +67,7 @@ def savedataframe(dataframe, save_dir,  **kwargs):
     # Remove unnamed columns
     dataframe = dataframe.loc[:, ~dataframe.columns.str.contains('^Unnamed')]
     dataframe.drop(columns=dataframe.columns[dataframe.columns.duplicated()], inplace=True)
-    dataframe.drop_duplicates(subset=NUCLEUS_LABEL_KEY, inplace = True)
+    dataframe.drop_duplicates(subset=MOBIE_LABEL_KEY, inplace = True)
 
     dataframe.reset_index(inplace=True, drop=True)
 
@@ -77,17 +79,20 @@ def savedataframe(dataframe, save_dir,  **kwargs):
 
     dataframe.to_json(get_savedf_path(save_dir, **kwargs))
 
-def get_savedf_path(save_dir: str, typie=''):
+def get_savedf_path(save_dir: str, typie='', prefix=dfFileNamePrefix, fileExtension="json"):
+
+    os.makedirs(save_dir, exist_ok=True)
 
     if typie != "":
-        return os.path.join(save_dir, f"dataframe_{typie}.json")
+
+        return os.path.join(save_dir, f"{prefix}_{typie}.{fileExtension}")
     else:
-        return os.path.join(save_dir, f"dataframe.json")
+        return os.path.join(save_dir, f"{prefix}.{fileExtension}")
 
 
 def readdataframe(path: str, name='') -> pd.DataFrame:
 
-    if "json" in path and "dataframe" in path and os.path.exists(path):
+    if "json" in path and f"{dfFileNamePrefix}" in path and os.path.exists(path):
         data_df = pd.read_json(path)
     else:
         assert name is not None, ("If path is save_dir then please do not set parameter 'name' as None")
@@ -273,7 +278,7 @@ def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:
     The DataFrame must contain a 'modality' column ('EM' or 'LM').
     """
     assert "modality" in df.columns, \
-        f"Please specify modality in dataframe: {list(df.columns)}"
+        f"Please specify modality in {dfFileNamePrefix}: {list(df.columns)}"
 
     left_df = constants.NUCL_TABLE if "EM" in df["modality"].unique() else constants.LM_DF
     if left_df is None:

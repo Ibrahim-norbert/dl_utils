@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .SampleTypes import CellGeometry, Data
+from skimage.measure import marching_cubes
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,30 @@ logger = logging.getLogger(__name__)
 # both in [x, y, z] order to match the point-cloud frame.
 COM_COLS: tuple[str, str, str] = ("com_x", "com_y", "com_z")
 SHAPE_COLS: tuple[str, str, str] = ("shape_x", "shape_y", "shape_z")
+
+
+def mask_to_surface_points(
+    mask: np.ndarray,
+    spacing: tuple = (1.0, 1.0, 1.0)
+) -> np.ndarray:
+    """Surface points for one isolated instance, cropped to its bbox + padding.
+
+    Returns an empty array if the instance is too small or thin to produce a
+    meaningful mesh:
+      - any axis extent below `min_extent` voxels
+      - smoothed mask never crosses the 0.5 iso-surface
+      - resulting mesh has fewer than `min_faces` triangles
+
+    *spacing* defaults to isotropic because callers feed this from an N5 that
+    :meth:`BaseVolumeDataset.prepareSampleVolume` already resampled to isotropic voxels;
+    an anisotropic default would apply the correction a second time.
+    """
+
+    assert mask.any(), f"The mask is empty: {mask.any().sum()}"
+
+    verts, faces, normals, _ = marching_cubes(mask, level=0.5, spacing=spacing, mask=mask.bool())
+
+    return verts
 
 
 def compute_volume_coms(

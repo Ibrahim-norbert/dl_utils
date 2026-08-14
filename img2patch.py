@@ -1,6 +1,9 @@
 # =============================================================================
 # Import third-party libraries
+import pandas as pd
 import skimage.io
+
+from dl_utils import MOBIE_LABEL_KEY
 
 # Column layout for BBoxes arrays: [label, z_min, z_max, y_min, y_max, x_min, x_max]
 BBOX_LABEL_IDX = 0
@@ -14,6 +17,8 @@ from typing import Union, Tuple
 from skimage import io, transform, exposure
 from skimage.measure import regionprops_table
 
+# TODO: Not yet depended on the BBoxes class
+BBOX_COLUMNS = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
 
 # Create a bbox class
 class BBoxes:
@@ -40,11 +45,31 @@ class BBoxes:
         if isinstance(image, np.ndarray):
             self.image = image
 
+        self.dataFrame = None
+
+
+    @staticmethod
+    def regionProps2VolumeProcessorDF(regionPropsTable : dict):
+
+        # TODO: Add solution to remain cohesive with Volume processor class regarding bbox column name.
+
+        df = pd.DataFrame(regionPropsTable)
+
+        df.rename(columns={f"bbox-{i}": f"bb_{col}" for i, col in enumerate(["min_z", "min_y", "min_x", "max_z", "max_y", "max_x"])},
+                  inplace=True)
+
+        df.rename(columns={'label':MOBIE_LABEL_KEY}, inplace=True)
+
+        return df
+
+
+
     # TODO: Implement a class method to create a BBoxes object from a mask array. (outside file loading)
     @classmethod
     def from_mask(cls,
                   mask: np.ndarray,
-                  image: object = None) -> object:
+                  image: object = None,
+                  others: tuple = ()) -> "BBoxes":
         """
         Calculates the bounding boxes from the mask file.
         :param mask: A numpy array with the mask.
@@ -57,8 +82,11 @@ class BBoxes:
         if np.max(mask) == 0:
             raise ValueError("Mask contains no elements.")
 
+        if not np.issubdtype(mask.dtype, np.integer):
+            raise TypeError(f"mask must be integer-labeled; got dtype={mask.dtype}")
+
         # Get indexes of nonzero elements
-        props = regionprops_table(mask, properties=('label', 'bbox'))
+        props = regionprops_table(mask, image, properties=('label', 'bbox', "area", 'centroid', *others))
 
         if not props['label'].tolist():
             print("No coordinates for non zero elements could be deduced with 'np.nonzero'")
@@ -68,7 +96,11 @@ class BBoxes:
         bboxes = np.array([props['label'], props['bbox-0'], props['bbox-3'],
                            props['bbox-1'], props['bbox-4'], props['bbox-2'], props['bbox-5']]).T
 
-        return cls(bboxes, mask, image)
+        inst = cls(bboxes, mask, image)
+
+        inst.dataFrame = inst.regionProps2VolumeProcessorDF(props)
+
+        return inst
 
     # Column layout of a bbox row: [id, z_min, z_max, y_min, y_max, x_min, x_max].
     _MIN_COLS = [1, 3, 5]   # z_min, y_min, x_min

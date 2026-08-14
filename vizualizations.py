@@ -136,32 +136,23 @@ class CustomMatplotlib:
         return fig, ax
 
     @classmethod
-    def simpleImshow(
-        cls,
-        matrix: np.ndarray,
-        title: str = "",
-        style_set_context="notebook",
-        save_dir=None,
-        **kwargs,
-    ) -> tuple[Figure, Axes]:
+    def simpleImshow(cls, matrix: np.ndarray, title: str = "", save_dir=None, **kwargs) -> tuple[Figure, Axes]:
         # plot = cls(style_set_context)
         # fig, ax = plt.subplots(1,1, figsize=plot.figsize)
         fig, ax = plt.subplots(1, 1)
 
-        CustomMatplotlib.subImshow(ax, matrix, title)
+        CustomMatplotlib.subImshow(ax, matrix, title, **kwargs)
 
         fig.tight_layout()
 
         cls.saveFig(fig, save_dir=save_dir,
                     title=title, func=cls.simpleImshow, fileExtension="png")
-        
-        
 
         return fig, ax
 
     @staticmethod
-    def subImshow(ax, img, label, **kwargs):
-        ax.imshow(img, cmap="magma", **kwargs)
+    def subImshow(ax, img : np.ndarray, label : str, **kwargs):
+        ax.imshow(img, **kwargs)
         ax.grid(False)
         # Remove ticks
         ax.set_xticks([])
@@ -279,7 +270,3 @@ class CustomMatplotlib:
 
         return fig
 
-
-# Backward-compatible alias: downstream consumers (smlm-sonata, PreliminaryGNN)
-# import the pre-refactor name.
-costumMatplotlib = CustomMatplotlib

@@ -30,6 +30,22 @@ class Data(NamedTuple):
     label: np.ndarray[Any, np.dtype[np.int32]]
 
 
+class Volume(NamedTuple):
+    """Dense 3-D image sample — ``(C, Z, Y, X)`` voxels and the object's label.
+
+    The volumetric counterpart of :class:`Data`. ``default_collate`` rebuilds a
+    NamedTuple field-wise, so a collated ``Volume`` carries ``data`` of shape
+    ``(B, C, Z, Y, X)`` and ``label`` of ``(B,)`` without a custom collate.
+
+    ``label`` must be a real int — ``default_collate`` cannot batch ``None`` — and
+    ``data`` must be shape-stable across the batch, which the fixed
+    ``CNNVolumeDataset.TARGET_SHAPE`` window guarantees.
+    """
+
+    data: np.ndarray[Any, np.dtype[np.float32]]
+    label: int
+
+
 class Vertices(NamedTuple):
     """Container for localization data with vertices, labels, and file paths."""
 
