@@ -286,7 +286,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         reproducibility_seed=43,
         num_workers=1,
         fast_dev_run=False,
-        dataset: str = "SMLM",
+        datasetName: str = "SMLM",
         trainFrac: float = 0.8,
         batch_size=1,
         shuffle=True,
@@ -302,30 +302,32 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         args={},
     ) -> types.NoneType:
 
-        _locals = locals()
-        # pl.Trainer exposes precision/num_nodes as read-only properties (data
-        # descriptors, which win over instance-dict entries on read), so storing
-        # them here would only add dead, confusing entries — they are forwarded
-        # explicitly to super().__init__ below instead.
-        for _prop in ("precision", "num_nodes", "devices"):
-            _locals.pop(_prop, None)
-        self.__dict__.update(_locals)
+        self.save_hyperparameters()
+
 
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
-
+        self.ckptPath=ckptPath
+        self.modelName = modelName
         self.modelConfig = modelConfig
         self.datasetConfig = datasetConfig
+        self.reproducibility_seed = reproducibility_seed
+        self.num_workers = num_workers
+        self.fast_dev_run = fast_dev_run
+        self.dataset = datasetName
+        self.trainFrac = trainFrac
+        self.shuffle = shuffle
+
         # Print entries of modelConfig:
         self.device = self.modelConfig.accelerator
 
-        if self.hparams.fast_dev_run is True or self.hparams.fast_dev_run > 0:
+        if self.fast_dev_run is True or self.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
             #self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
         # Fix the seed for reproducibility
-        seed_everything(self.hparams.reproducibility_seed, workers=True)
+        seed_everything(self.reproducibility_seed, workers=True)
         # https://docs.pytorch.org/docs/2.9/notes/randomness.html#cuda-convolution-benchmarking
         # cudnn.benchmark = True
         # torch.use_deterministic_algorithms(True,
@@ -752,7 +754,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         save_dir="",
         reproducibility_seed=43,
         num_workers=1,
-        dataset: str = "SMLMDataset",
+        datasetName: str = "SMLMDataset",
         trainFrac: float = 0.9,
         batch_size=1,
         shuffle=True,
@@ -775,12 +777,22 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
         accumulate_grad_batches=10,
-        gradient_clip_val = 1.,
         **kwargs,
     ) -> types.NoneType:
 
         self.save_hyperparameters()
 
+        self.weightsCkptPath=weightsCkptPath
+        self.profiler=profiler
+        self.ModelCheckpoint_save_top_k=ModelCheckpoint_save_top_k
+        self.ModelCheckpoint_monitor=ModelCheckpoint_monitor
+        self.ModelCheckpoint_mode=ModelCheckpoint_mode
+        self.EarlyStopping_monitor=EarlyStopping_monitor
+        self.EarlyStopping_mode=EarlyStopping_mode
+        self.EarlyStopping_patience=EarlyStopping_patience
+        self.wandbProjectName=wandbProjectName
+        self.config_file=config_file
+        self.save_dir = save_dir
         self.kwargs = kwargs
 
         # Allow subclasses to customise the root save directory before versioning.
@@ -808,9 +820,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         # Top-k best checkpoints, ranked by the monitored metric.
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.save_dir,
-            save_top_k=self.hparams.ModelCheckpoint_save_top_k,
-            monitor=self.hparams.ModelCheckpoint_monitor,
-            mode=self.hparams.ModelCheckpoint_mode,
+            save_top_k=self.ModelCheckpoint_save_top_k,
+            monitor=self.ModelCheckpoint_monitor,
+            mode=self.ModelCheckpoint_mode,
             save_on_train_epoch_end=True,
             # save_last intentionally omitted: in Lightning 2.6 a monitor-coupled
             # callback only writes last.ckpt on epochs where a new top-k file is
@@ -835,9 +847,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         self.latest_checkpoint_callback = latest_checkpoint_callback
         
         early_stopping_callback = SafeEarlyStopping(
-            monitor=self.hparams.EarlyStopping_monitor,
-            mode=self.hparams.EarlyStopping_mode,
-            patience=self.hparams.EarlyStopping_patience,
+            monitor=self.EarlyStopping_monitor,
+            mode=self.EarlyStopping_mode,
+            patience=self.EarlyStopping_patience,
         )
 
         # TODO: Hack for now until smarter config parsing
@@ -858,32 +870,31 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             callbacks.append(GarbageCollectionCallback(interval=gc_interval))
         args = {
             "callbacks": callbacks,
-            "logger": wandb_logger,
-            "gradient_clip_val": gradient_clip_val,
+            "logger": wandb_logger
         }
 
         super().__init__(
             modelName=modelName,
             max_epochs=max_epochs,
-            ckptPath=self.hparams.ckptPath,
-            reproducibility_seed=self.hparams.reproducibility_seed,
-            num_workers=self.hparams.num_workers,
-            batch_size=self.hparams.batch_size,
-            trainFrac=self.hparams.trainFrac,
-            shuffle=self.hparams.shuffle,
-            datasetConfig=self.hparams.datasetConfig,
-            modelConfig=self.modelConfig,
-            dataset=self.hparams.dataset,
-            fast_dev_run=self.hparams.fast_dev_run,
+            ckptPath=ckptPath,
+            reproducibility_seed=reproducibility_seed,
+            num_workers=num_workers,
+            batch_size=batch_size,
+            trainFrac=trainFrac,
+            shuffle=shuffle,
+            datasetConfig=datasetConfig,
+            modelConfig=modelConfig,
+            datasetName=datasetName,
+            fast_dev_run=fast_dev_run,
             limit_val_batches=limit_val_batches,
             accumulate_grad_batches=accumulate_grad_batches,
             # Distributed knobs: read from hparams so a config-file YAML (merged
             # by save_hyperparameters above) can flip them, e.g. `use_fsdp: true`.
-            use_fsdp=getattr(self.hparams, "use_fsdp", False),
-            devices=getattr(self.hparams, "devices", "auto"),
-            num_nodes=getattr(self.hparams, "num_nodes", 1),
-            precision=getattr(self.hparams, "precision", None),
-            fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
+            use_fsdp= use_fsdp,
+            devices= devices,
+            num_nodes= num_nodes,
+            precision= precision,
+            fsdpConfig=fsdpConfig,
             args=args,
         )
 
@@ -981,6 +992,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         These keys are popped from the flat args namespace and merged into
         ``modelConfig`` by :meth:`parse_args`.
         """
+        # TODO: To finish
         return {}
 
     @classmethod
@@ -990,6 +1002,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         These keys are popped from the flat args namespace and merged into
         ``datasetConfig`` by :meth:`parse_args`.
         """
+        # TODO: To finish
         return {}
 
     @classmethod

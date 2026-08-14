@@ -42,8 +42,9 @@ class Volume(NamedTuple):
     ``CNNVolumeDataset.TARGET_SHAPE`` window guarantees.
     """
 
-    data: np.ndarray[Any, np.dtype[np.float32]]
-    label: int
+    data: torch.Tensor
+
+    label: torch.Tensor
 
 
 class Vertices(NamedTuple):
