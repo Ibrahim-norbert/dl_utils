@@ -791,6 +791,8 @@ class EmbeddingAnalysis:
 
         fig.update_traces(marker=dict(size=kwargs.get(
             "markerSize", 3), opacity=kwargs.get("markerOpacity", 0.8)))
+
+
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             fig.write_image(os.path.join(
