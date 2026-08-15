@@ -155,15 +155,20 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             if not values:
                 continue
             first = values[0]
+            # 0-dim values are per-batch metrics: average them. Anything with a sample
+            # axis is per-point / per-sample: concatenate. The test is ``ndim``, not the
+            # element count — a batch that happens to hold ONE sample still carries a
+            # sample axis, and averaging it would fold that batch's labels (or its single
+            # embedding) into one number, corrupting the epoch's concatenation. That is
+            # reachable from any DataLoader whose first validation batch has one item,
+            # batch_size=1 included.
             if isinstance(first, torch.Tensor):
-                # Scalar (0-dim / single-element) tensors are per-batch metrics:
-                # average them. Multi-row tensors are per-point: concatenate.
-                if first.ndim == 0 or first.numel() == 1:
+                if first.ndim == 0:
                     reduced[key] = torch.stack([v.detach().cpu().reshape(()) for v in values]).mean()
                 else:
                     reduced[key] = torch.cat([v.detach().cpu() for v in values], dim=0)
             elif isinstance(first, np.ndarray):
-                if first.ndim == 0 or first.size == 1:
+                if first.ndim == 0:
                     reduced[key] = float(np.mean([np.asarray(v).reshape(()) for v in values]))
                 else:
                     reduced[key] = np.concatenate(values, axis=0)
@@ -507,15 +512,18 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
                 batch_size=self.batch_size,
             )
 
-    @abstractmethod
     def _is_global_zero(self):
         """True on rank 0 or when detached from any Trainer (manual/offline use).
 
         Guards output-only work (figures, file writes) in multi-rank runs. Reads
         ``_trainer`` directly because the ``LightningModule.trainer`` property
         raises ``RuntimeError`` on a detached module.
+
+        Concrete, not abstract: the docstring fully determines the body, so every
+        subclass would have written the same three lines.
         """
-        pass
+        trainer = getattr(self, "_trainer", None)
+        return trainer is None or trainer.is_global_zero
 
     @abstractmethod
     def build_collate_fn(self, train):
@@ -540,9 +548,14 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         """
         pass
 
-    @abstractmethod
     def _collate_fn(self, batch, grid_size, forward_transform, batch_collate_fn):
         """Single-process collate convenience — instance method, overridable.
+
+        Optional seam, not abstract: the signature is the point-cloud pipeline's
+        (``grid_size`` / ``forward_transform`` are SONATA transform arguments). Dense
+        models — e.g. ``representationlearning.models.SimCLR3DModel``, whose samples are
+        fixed-shape volumes that ``default_collate`` stacks as-is — express their whole
+        collate through :meth:`build_collate_fn` and never touch this.
 
         Not used by DataLoader workers (those get the picklable callable from
         :meth:`build_collate_fn`); it exists for manual, in-process collation such as
@@ -596,12 +609,20 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         """Phase 5 — compute metrics, log F1, and run the full visual analysis."""
         pass
 
-    @abstractmethod
+    # The two hooks below load the *fixed* probe sample described on
+    # :meth:`run_linear_probe` and turn it into embeddings. Optional seams, not abstract:
+    # they only exist for models whose probe comes from a file outside the training data
+    # (SONATA's annotated localization crop). A model whose probe rides on the real
+    # validation DataLoader — the embeddings already flow through ``validation_step``, and
+    # the sample metadata is reachable from ``self.trainer.val_dataloaders`` — has nothing
+    # to load and overrides neither.
+
     def _VAL_PROBE2Localization(self):
+        """Read the fixed probe file into the model's sample type."""
         pass
 
-    @abstractmethod
     def _VAL_PROBE2embdding(self):
+        """Embed what :meth:`_VAL_PROBE2Localization` returned."""
         pass
 
     @abstractmethod
