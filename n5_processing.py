@@ -17,7 +17,7 @@ follow the ``LMTextureNucleiDataset`` convention (:meth:`~BaseVolumeDataset.get_
 :meth:`~BaseMaskDataset.get_hr_mask`, :meth:`~BaseMaskDataset.get_masked_hr_vol`) and open
 their handle per call, so no unpicklable state is carried across a DataLoader fork.
 """
-
+import glob
 import logging
 import numbers
 import os
@@ -871,6 +871,8 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
                          channelColumn=channelColumn, **kwargs)
 
+        self.sampleMapperDF = SampleLoaderBioImage.loadData(self.sampleMapperOutPath)
+
     # TODO: Label logic we could transfer to a torch.Dataset class ??? Which would ensure this class
     # TODO: have had processed to N5 beforehand ???
 
@@ -879,7 +881,27 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
 
 
+    def __concatAllObjectBBOX__(self):
+
+        # TODO: Need to test
+
+        bboxPaths : list[str] = glob.glob(os.path.join(
+            self.objectDFDir, "*", "**", "bbox_*.json"), recursive=True)
+
+        assert bboxPaths.__len__() == self.sampleMapperDF.shape[0], f"Instead we have {bboxPaths.__len__()}/{self.sampleMapperDF.shape[0]}"
+
+        objectMapperDF : list[pd.DataFrame] = [SampleLoaderBioImage.loadData(path) for path in bboxPaths]
+
+        self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge(objectDF=pd.concat(objectMapperDF, axis=0),
+                                                                        sampleDF=self.sampleMapperDF, on=[self.N5_MASK_KEY_COLUMN,
+                                                                                                          BaseDataset.SAMPLE_LABEL_COLUMN])
+
+        self.objectMapperDF.to_json(self.objectDFPath)
+
+    @NotImplementedError
     def __obtainAllObjectBBOX__(self):
+        # TODO: Need to test
+
         keys = pd.Index(
             [self.datasetKey(row[self.SAMPLE_PATH_COLUMN], channel=self.channelOf(row), subkey=self.MASK_KEY)
              for _, row in self.sampleMapperDF.iterrows()])
@@ -892,7 +914,8 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
                     dataFrameObject: pd.DataFrame = mask2BBOXDF(mask)
                     # NOTE: Save each key to map objects to samples
                     # TODO: Maybe use the checkpoint method instead ?????
-                    self.registerSample2SingleVolumeObjectDF(dataFrameObject, self.N5_MASK_KEY_COLUMN, key,
+                    dataFrameObject = self.registerSample2SingleVolumeObjectDF(dataFrameObject,
+                                                                               self.N5_MASK_KEY_COLUMN, key,
                                                              sample_row=row)
                     self.objectMapperDF.append(dataFrameObject)
                 else:
@@ -1055,7 +1078,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
         return objectDF.merge(sampleDF, on=on
                                   ,how="left",
-                                  validate="many_to_one", suffixes=("","sample_"))
+                                  validate="many_to_one", suffixes=("","_sample"))
 
     def createDatasetN5File(self) -> None:
         super().createDatasetN5File()
