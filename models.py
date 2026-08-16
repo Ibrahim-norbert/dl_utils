@@ -6,6 +6,7 @@ from abc import ABCMeta, abstractmethod
 from typing import Union, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
@@ -85,6 +86,11 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         # Per-batch validation outputs accumulated across one validation epoch.
         # validation_step appends a dict here; on_validation_epoch_end reduces it.
         self.validation_step_outputs: list[dict] = []
+
+        # Per-sample metadata the epoch-end probe labels against, handed over by the
+        # trainer — see attachValidationMetadata. None until then, and permanently None
+        # for models whose probe reads a fixed file instead.
+        self.validation_metadata: Optional[pd.DataFrame] = None
 
         #_install_print_tee(save_dir)
 
@@ -613,9 +619,9 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     # :meth:`run_linear_probe` and turn it into embeddings. Optional seams, not abstract:
     # they only exist for models whose probe comes from a file outside the training data
     # (SONATA's annotated localization crop). A model whose probe rides on the real
-    # validation DataLoader — the embeddings already flow through ``validation_step``, and
-    # the sample metadata is reachable from ``self.trainer.val_dataloaders`` — has nothing
-    # to load and overrides neither.
+    # validation DataLoader has nothing to load and overrides neither: its embeddings
+    # already flow through ``validation_step``, and its sample metadata arrives through
+    # :meth:`attachValidationMetadata` below.
 
     def _VAL_PROBE2Localization(self):
         """Read the fixed probe file into the model's sample type."""
@@ -624,6 +630,31 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     def _VAL_PROBE2embdding(self):
         """Embed what :meth:`_VAL_PROBE2Localization` returned."""
         pass
+
+    def attachValidationMetadata(self, metadata: pd.DataFrame) -> None:
+        """Hand the module the per-sample table its epoch-end probe labels against.
+
+        The counterpart of :meth:`_VAL_PROBE2Localization` for the *other* probe family
+        named above: a model whose probe rides on the real validation DataLoader needs no
+        fixed file, only the metadata rows its embeddings came from.
+
+        The trainer owns the split, so the trainer owns this call — see
+        ``TextureTraining.getTrainValDataloader``. Pushing the table down beats having the
+        module walk back up ``trainer.val_dataloaders`` -> ``Subset`` -> dataset internals:
+        that walk is legitimate (the loader is public ``Trainer`` state) but it is a chain
+        of optional attribute lookups, so any structural change degrades it to ``None`` and
+        the probe — and with it the only held-out metric a contrastive run has — silently
+        stops running.
+
+        *metadata* is the FULL object table, not the validation subset's slice of it: the
+        probe addresses rows by the *position* each sample carries as its label, and those
+        positions index the whole dataset (``Subset`` preserves them).
+
+        Concrete rather than abstract: a model that never receives a call keeps
+        ``validation_metadata=None``, which its ``run_linear_probe`` is expected to treat as
+        "no probe this run" rather than as an error.
+        """
+        self.validation_metadata = metadata
 
     @abstractmethod
     def run_linear_probe(self, emb, save_dir):
