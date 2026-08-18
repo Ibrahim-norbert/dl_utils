@@ -12,85 +12,63 @@ import pandas as pd
 import yaml
 from functools import cached_property
 from pathlib import Path
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 from torch.utils.data import DataLoader
 
-from dl_utils import LABEL_KEY
+from dl_utils import LABEL_KEY, MOBIE_LABEL_KEY
 from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils.SampleTypes import Data, Vertices
 from dl_utils import util_base as util
 
 logger = logging.getLogger(__name__)
-logger = logging.getLogger(__name__)
 class BaseDataset:
-    """Base class for nuclei data
-    Calculates general properties, loads low resoltion (s3) nuclei"""
+    """Base class sample mapper
+    based datasets. Where a sample mapper is a dataframe
+    with "sample_path" column containing paths to unique samples. The samples can
+     only derive from a single dataset i.e. must all be saved in the same directory.
+     Currently, class is datatype agnostic."""
 
-    def __init__(self, datasetPath: str, sampleColumn: str, **kwargs) -> None:
-        
-        self.datasetPath=datasetPath
-        self.sampleColumn: str = sampleColumn
-        self.datasetDF: pd.DataFrame = self.loadDataFrame(
-            datasetPath=datasetPath)
-        
-        if sampleColumn == "index":
-            self.datasetDF[sampleColumn] = self.datasetDF.index
-            
-        self.samples: np.ndarray[Literal["1"], np.dtype[np.int32]] = np.unique(
-            self.get_all_labels(self.datasetDF, self.sampleColumn)
+    # Class-scoped so subclasses and constructors can retarget them; assigning these in
+    # __init__ silently overwrote the overrides subclasses declare (see
+    # BaseImageCollectionDataset.sampleColumn).
+    SAMPLE_PATH_COLUMN: str = "sample_path"
+    SAMPLE_LABEL_COLUMN: str = f"sample_{MOBIE_LABEL_KEY}"
+
+    def __init__(self, sampleMapperDFPath: str, save_dir: str, samplePathRegex: str = None, **kwargs) -> None:
+
+        self.sampleMapperDFPath = sampleMapperDFPath
+
+        # NOTE: Dataset dataframe must be a sample mapper, where each sample a path is
+        self.sampleMapperDF: pd.DataFrame = self.loadDataFrame(sampleMapperDFPath)
+
+        self.samplePathRegex = samplePathRegex
+        self.validateSamplePaths()
+
+        if self.SAMPLE_LABEL_COLUMN not in self.sampleMapperDF.columns:
+            self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] = np.arange(len(self.sampleMapperDF))
+        assert not self.sampleMapperDF.duplicated(subset=self.SAMPLE_LABEL_COLUMN).any(), (
+            "Ensure sample mapper does not have duplicates"
         )
+        self.samples: np.ndarray = self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN].to_numpy()
+        assert save_dir is not None and isinstance(save_dir, str), f"The save directory must be a string, not {save_dir}"
+        self.save_dir: str = os.path.abspath(save_dir)
 
-    def writeChunkedImage(self, filePath: str, volume: np.ndarray, groupkey : str, key: str) -> None:
-        """Write *volume* into an N5 file at *n5_file*.
+    def __len__(self) -> int:
+        return self.samples.size
 
-        Array is stored under the group ``groupkey/`` with datasets
-        ``key``, using ``(32, 32, 32)`` chunks. When ``DEBUG``
-        logging is active a read-back verification is performed to confirm
-        the write succeeded.
+    def validateSamplePaths(self) -> None:
+        """Contract the sample paths must satisfy — one directory per dataset.
 
-        Parameters
-        ----------
-        filePath : str
-            Path to the target N5 file (created or appended).
-        volume : If necessary, scaled to
-            ``uint16`` before writing.
+        A hook rather than an inline assertion so that datasets deliberately spanning
+        several directories (:class:`dl_utils.n5_datasets.MultiDirectoryN5Dataset`) can
+        replace the contract instead of working around it.
         """
-
-        import z5py
-
-        n5_file = util.replaceFileExt(filePath, ".n5")
-
-        logger.debug("Volume intensity range: [%s, %s]", volume.min(), volume.max())
-        # TODO: For now ensure image is in grayscale
-        if np.issubdtype(volume.dtype, np.floating):
-            assert volume.min() >= 0 and volume.max() <= 1, f"We do not have floating point grayscale range of 0 - 1 but instead {volume.min()} - {volume.max()}"
-            # Should integer, else saving n5 file would take too long
-            volume = (volume * 65535).astype(np.uint16)
-            logger.debug("Volume intensity range after scaling: [%s, %s]", volume.min(), volume.max())
-
-        assert volume.dtype in [np.int8, np.int16], f"The data type of the volume must be int16 or lower but we have {volume.dtype}"
-
-        with z5py.File(n5_file, 'a', use_zarr_format=False) as f:
-            if groupkey not in f:
-                group = f.create_group(groupkey)
-            else:
-                group = f[groupkey]
-
-            volume_ds = group.require_dataset(
-                key,
-                shape=volume.shape,
-                chunks=(32, 32, 32),
-                dtype=volume.dtype,
+        if self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].map(os.path.dirname).nunique() > 1:
+            raise ValueError(
+                "All sample paths must be located in the same directory"
             )
-            volume_ds[:] = volume
 
-        # Verification read-back — only runs when DEBUG logging is enabled
-        if logger.isEnabledFor(logging.DEBUG):
-            with z5py.File(n5_file, 'r', use_zarr_format=False) as f:
-                volume_read = f[f"{groupkey}/{key}"][:]
-            logger.debug("Written volume — shape: %s, dtype: %s", volume_read.shape, volume_read.dtype)
-            
     @staticmethod
     def getDataloader(dataset, batch_size, num_workers, persistent_workers, **kwargs):
         # print(f"All entered parameters: {locals()}")
@@ -103,176 +81,45 @@ class BaseDataset:
         )
 
     @staticmethod
-    def getbboxfromdf(df: pd.DataFrame, df_indx) -> np.ndarray:
-
-        cols = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
-
-        # Extract and ensure numerical values
-        bbox_values = [df.loc[df_indx, dim] for dim in cols]
-        if not all(isinstance(val, numbers.Number) for val in bbox_values):
-            raise TypeError("All bounding box values must be numeric, but got: "
-                            f"{[type(val) for val in bbox_values]}")
-
-        return np.array(bbox_values, dtype=int).T  # Convert to NumPy int array
-    
-    @staticmethod
-    def bbox2slice(bbox: np.ndarray) -> tuple[slice, slice, slice]:
-        """Convert a flattened bounding-box array into a tuple of slices.
-
-        Parameters
-        ----------
-        bbox : np.ndarray
-            1-D (or single-row 2-D) array of six integers ordered as
-            ``[start_z, stop_z, start_y, stop_y, start_x, stop_x]``.
-
-        Returns
-        -------
-        tuple of slice
-            ``(slice_z, slice_y, slice_x)`` ready to index a 3-D array.
-
-        Raises
-        ------
-        AssertionError
-            If *bbox* has more than one row.
-        """
-        assert bbox.ndim < 2 or bbox.shape[0] == 1, "Too many dims in bbox"
-        bbox = bbox.flatten()
-        return (slice(bbox[0], bbox[1]), slice(bbox[2], bbox[3]),
-                slice(bbox[4], bbox[5]))
-
-    @staticmethod
-    def addbbox_slices_col(table: pd.DataFrame) -> pd.DataFrame:
-        """Append a ``"bbox slices"`` column of per-nucleus slice tuples.
-
-        If any of the expected bounding-box columns are absent from *table*,
-        ``merge_with_nucl_table`` is called first to populate them.
-
-        Parameters
-        ----------
-        table : pd.DataFrame
-            Nucleus table.  Expected bounding-box columns:
-            ``bb_min_z``, ``bb_max_z``, ``bb_min_y``, ``bb_max_y``,
-            ``bb_min_x``, ``bb_max_x``.
-
-        Returns
-        -------
-        pd.DataFrame
-            *table* with an added ``"bbox slices"`` column whose values are
-            ``(slice_z, slice_y, slice_x)`` tuples at s3 resolution.
-        """
-        cols: List[str] = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
-
-        # Merge nucleus table if any bounding-box columns are absent
-        missing_cols: List[str] = [col for col in cols if col not in table.columns]
-        assert not missing_cols, "The bounding box coordinates are incomplete"
-
-        bbs: List[Tuple[slice[Any, Any, Any]]] = [BaseDataset.get_slice(table, row.name) for _, row in table.iterrows()]
-
-        return util.save2DFcolumn(bbs, BaseDataset.get_all_labels(table, ), table, "bbox slices")
-
-    def resampleVolume(self, volume: np.ndarray, resolutions: list[int],
-                       interpolationOrder: int = 0) -> tuple[np.ndarray, int]:
-        """Resample *volume* to isotropic resolution.
-
-        Normalises all axis resolutions relative to the finest (minimum) one,
-        then rescales the volume accordingly.  If the volume is already
-        isotropic the resize step is skipped.
-
-        Parameters
-        ----------
-        volume : np.ndarray
-            3-D input volume ``(Z, Y, X)``.
-        resolutions : list of int
-            Physical voxel size (e.g. in nm) for each axis in ZYX order.
-        interpolationOrder : int, optional
-            Spline interpolation order passed to :func:`skimage.transform.resize`.
-            Use ``0`` for label/mask volumes (nearest-neighbour) and ``3`` for
-            raw intensity volumes (bicubic).  Default ``0``.
-
-        Returns
-        -------
-        volume : np.ndarray
-            Resampled volume.
-        min_res : int
-            The finest (smallest) voxel size from *resolutions*, which becomes
-            the isotropic resolution of the output.
-        """
-        min_res: int = min(resolutions)
-        resolutions = np.array(resolutions) / min_res
-
-        logger.debug("Pre-resampled dimension: %s", volume.shape)
-
-        if all(res == 1 for res in resolutions):
-            logger.debug("Isotropic resolution detected. Skipping resizing.")
-            return volume, min_res
-
-        volume = resize(volume, tuple((np.array(volume.shape) * resolutions).flatten()),
-                        anti_aliasing=True, order=interpolationOrder)
-
-        logger.debug("Resampled dimension: %s", volume.shape)
-        return volume, min_res
-
-    @staticmethod
-    def get_slice(df: pd.DataFrame, df_indx: int) -> tuple[slice, slice, slice]:
-        """Return the bounding-box slice tuple for a nucleus at *df_indx*.
-
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Nucleus table containing bounding-box columns.
-        df_indx : int
-            Row index (DataFrame index label) of the target nucleus.
-
-        Returns
-        -------
-        tuple of slice
-            ``(slice_z, slice_y, slice_x)`` covering the nucleus bounding box.
-        """
-        bbox: ndarray[Tuple[Any], dtype[Any]] = BaseDataset.getbboxfromdf(df, df_indx)
-        slice_val: Tuple[slice[Any, Any, Any]] = BaseDataset.bbox2slice(bbox)
-        return slice_val
-
-    @staticmethod
     def loadDataFrame(datasetPath: str) -> pd.DataFrame:
         data_df = SampleLoaderBioImage.loadData(datasetPath)
-        if data_df is not None:
-            assert isinstance(data_df, pd.DataFrame)
-            return data_df
-        else:
-            raise Exception(f"Loaded data is None")
+        assert isinstance(data_df, pd.DataFrame)
+        return data_df
 
     def index2Sample(self, idx: int) -> int:
         return self.samples[idx]
 
-    def Sample2index(self, label: int) -> int:
+    def sample2Index(self, label: int) -> int:
         return np.where(self.samples == label)[0].flatten()[0]
 
-    @staticmethod
-    def get_all_labels(df, label_col):
-        return df[label_col].dropna().to_numpy().flatten()
+    def sampleDFRow(self, idx: int) -> pd.Series:
+        """Positional row lookup.
+
+        DataLoader samplers yield positions, not index labels, so every ``__getitem__``
+        path must use ``.iloc``. Mixing ``.loc`` in is only correct while the index
+        happens to be a clean RangeIndex.
+        """
+        return self.sampleMapperDF.iloc[int(idx)]
 
     @staticmethod
-    def df_index2Sample(df, df_indx, dataPointCol):
-        indices = df.index.to_numpy()
-        if df_indx in indices:
-            out = df.loc[df_indx, dataPointCol]
-            if isinstance(out, pd.Series):
-                return out.iloc[0]
-            return out
-        else:
-            raise KeyError(f"Label {df_indx} does not exist in dataset")
+    def write_index(df: pd.DataFrame, path: str) -> None:
+        """Single writer for index CSVs.
+
+        Never writes the DataFrame index, so a subsequent read cannot produce the
+        ``Unnamed: 0`` column that previously leaked into metadata merges. Any such
+        column already present is dropped, so repeated rebuilds cannot accrete them.
+        """
+        df.loc[:, ~df.columns.str.match(r"^Unnamed")].to_csv(path, index=False)
 
     @staticmethod
-    def label2df_index(df, dataPoint, dataPointCol):
-        labels = BaseDataset.get_all_labels(df, dataPointCol)
+    def read_index(path: str) -> pd.DataFrame:
+        """Single reader, matching :meth:`write_index`.
 
-        if dataPoint in labels:
-            return df.loc[df[dataPointCol] == dataPoint, :].index.tolist()[0]
-        else:
-            raise KeyError(f"Label {dataPoint} does not exist in dataset")
-
-    def __len__(self) -> int:
-        return self.samples.size
+        Yields a positional RangeIndex. Tolerates legacy files that were written with
+        the index by dropping the resulting ``Unnamed`` column.
+        """
+        df = pd.read_csv(path)
+        return df.loc[:, ~df.columns.str.match(r"^Unnamed")]
 
     @staticmethod
     def getBatchedItem(dataset, n) -> List[Any]:
@@ -280,12 +127,6 @@ class BaseDataset:
             dataset
         ), f"Parameter n specified with value {n} is larger than dataset length"
         return [dataset[i] for i in range(n)]
-
-    # @staticmethod
-    # def get_center_of_mass(df, nucl_label: int) -> np.ndarray[Any, dtype]:
-    #     """ Get center of mass of a nucleus for s3 resolution"""
-
-    #     return com_pxl
 
     @staticmethod
     def save_array(save_dir, array: np.ndarray, filename: str) -> None:
@@ -317,207 +158,74 @@ class BaseDataset:
 
         return mini_dataset
 
+    # NOTE: no __getstate__/__setstate__ here. They existed only to strip cached z5py
+    # handles; the N5 datasets now open a handle per read and cache nothing, so there is
+    # no unpicklable state to drop and subclasses pickle by the default protocol.
 
 
+class BaseImageCollectionDataset(BaseDataset):
+    """CSV-indexed image collection for CNN-style models.
 
+    One row is one image. Deliberately carries **no** N5 conversion, patch geometry,
+    positional embeddings or master-index machinery — those belong to the patch-based
+    transformer datasets and are pure overhead for a convolutional encoder.
 
-class BaseVolumeCollectionDataset(BaseDataset):
-    """Base class for collection datasets containing paired volume and mask paths.
-
-    Handles loading or building a master index DataFrame from either a CSV
-    listing volume/mask pairs or by scanning a directory.  Per-volume dataset
-    instances are *not* created at this level — subclasses override
-    :meth:`createDatasetFromDataFramePath` and
-    :meth:`createDatasetDFfromDirectory` to populate any per-volume registry.
-
-    Subclasses should set the class-level column attributes to match their
-    specific data schema.
-
-    Class Attributes
-    ----------------
-    sampleColumn : str
-        Column used as the global sample index in the master CSV.
-    keptIndicesColumn : str
-        Column storing the per-volume DataFrame row index.
-    volumePathColumn : str
-        Column for the raw volume file path.
-    maskPathColumn : str
-        Column for the instance-segmentation mask file path.
+    Subclasses implement :meth:`load_image`; ``__getitem__`` returns a plain
+    ``(image, label)`` pair unless the subclass overrides it.
     """
 
-    sampleColumn: str = "sample index"
-    volumePathColumn: str = "volume path"
-    maskPathColumn: str = "mask path"
+    volumePathColumn: str = "dataset path"
+    SAMPLE_LABEL_COLUMN: str = "label_id"
 
     def __init__(
         self,
-        datasetDir: Optional[str] = None,
-        fileExtension: str = "tif",
-        datasetDataframePath: Optional[str] = None,
-        datasetConfig: Optional[dict] = None,
+        datasetDataframePath: str,
+        DFBinaryFilters: Optional[Union[str, List[str]]] = None,
+        save_dir: Optional[str] = None,
+        **kwargs,
     ) -> None:
-        self.datasetConfig: dict = datasetConfig or {}
-        self.fileExtension: str = fileExtension
-        self.datasetDataframePath: Optional[str] = datasetDataframePath
+        # NOTE: BaseDataset.__init__ is intentionally not called — it builds a master
+        # index this class does not need. The two attributes it would set are set here.
+        self.datasetConfig: dict = kwargs
+        self.datasetDataframePath: str = datasetDataframePath
 
-        if datasetDataframePath and os.path.isfile(datasetDataframePath):
-            csv_df = self.loadDataFrame(datasetDataframePath)
-            required_cols = [self.volumePathColumn, self.maskPathColumn]
-            missing = [c for c in required_cols if c not in csv_df.columns]
-            assert not missing, (
-                f"Dataset CSV is missing required columns: {missing}. "
-                f"Expected: {required_cols}, found: {csv_df.columns.tolist()}"
-            )
-            try:
-                common = os.path.commonpath(csv_df[self.volumePathColumn].tolist())
-                self.datasetDir = common if os.path.isdir(common) else os.path.dirname(common)
-            except ValueError:
-                # Paths span multiple drives — fall back to the CSV's own directory
-                self.datasetDir = os.path.dirname(os.path.abspath(datasetDataframePath))
-            self.createDatasetFromDataFramePath(datasetDataframePath)
-        else:
-            assert datasetDir is not None, (
-                "datasetDir is required when no datasetDataframePath is given."
-            )
-            self.datasetDir = datasetDir
-            self.createDatasetDFfromDirectory(datasetDir, fileExtension=self.fileExtension)
+        df = self.loadDataFrame(datasetDataframePath)
+        columns = ([DFBinaryFilters] if isinstance(DFBinaryFilters, str)
+                   else list(DFBinaryFilters or []))
+        for col in columns:
+            if col in df.columns:
+                df = df[df[col] == 1]
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed")]
+        self.datasetDF: pd.DataFrame = df.reset_index(drop=True)
+        # Artefact root, resolved once by the common base class from save_dir plus the
+        # directory basename of the volume paths. Must follow the load above, which is
+        # what supplies those paths.
+        self.initDatasetDir(save_dir or kwargs.get("save_dir"),
+                            sampleMapperDFPath=(str(self.datasetDF[self.volumePathColumn].iloc[0])
+                                                if self.volumePathColumn in self.datasetDF.columns
+                                                   and len(self.datasetDF) else datasetDataframePath))
+        # TIF -> N5 for every listed volume, in the main process, so reads in
+        # __getitem__ are plain N5 slice fetches.
+        self.initVolumeStore(self.datasetDF, self.volumePathColumn,
+                             getattr(self, "maskPathColumn", None),
+                             kwargs.get("resolution"))
+        if self.sampleColumn not in self.datasetDF.columns:
+            self.datasetDF[self.sampleColumn] = self.datasetDF.index
+        self.samples: np.ndarray = self.datasetDF[self.sampleColumn].to_numpy()
 
-        super().__init__(datasetPath=self.dfPath, sampleColumn=self.sampleColumn)
+    def load_image(self, path: str):
+        raise NotImplementedError
 
-    @cached_property
-    def dfPath(self) -> str:
-        """Absolute path to the master index CSV file.
+    def sampleDFRow(self, idx: int) -> pd.Series:
+        """Positional row lookup — samplers yield positions, never index labels."""
+        return self.datasetDF.iloc[int(idx)]
 
-        Written one directory above *datasetDir* so it is not confused with
-        per-volume tables.
-        """
-        parent = os.path.dirname(self.datasetDir)
-        stem = os.path.basename(self.datasetDir)
-        return os.path.join(parent, f"{stem}_dataset.csv")
+    def __len__(self) -> int:
+        return len(self.datasetDF)
 
-    def createDatasetFromDataFramePath(self, manualDFPath: str) -> None:
-        """Build the master index DataFrame from a hand-crafted CSV.
-
-        Deduplicates to one row per unique volume path, assigns a sequential
-        sample index, and writes the result to :attr:`dfPath`.  Subclasses
-        override this to additionally populate any per-volume instance registry.
-
-        Parameters
-        ----------
-        manualDFPath : str
-            Path to the source CSV.
-        """
-        if os.path.exists(self.dfPath):
-            return
-
-        dataDF = self.loadDataFrame(manualDFPath)
-        result = dataDF.drop_duplicates(subset=self.volumePathColumn).reset_index(drop=True)
-        result[self.sampleColumn] = result.index
-        result.to_csv(self.dfPath)
-
-    def createDatasetDFfromDirectory(self, directory: str, fileExtension: str) -> None:
-        """Discover volume/mask pairs in *directory* and build master index.
-
-        Volumes are expected directly in *directory*; masks must reside in a
-        ``mask/`` sub-directory with identical filenames.  Subclasses should
-        override to additionally populate any per-volume instance registry.
-
-        Parameters
-        ----------
-        directory : str
-            Root directory to scan.
-        fileExtension : str
-            Glob extension, e.g. ``"tif"``.
-
-        Raises
-        ------
-        AssertionError
-            If no mask files are found, or if volume/mask counts differ.
-        """
-        if os.path.exists(self.dfPath):
-            return
-        
-        volumePaths: List[str] = glob.glob(os.path.join(directory, f"*{fileExtension}"))
-        maskPaths: List[str] = glob.glob(os.path.join(directory, "mask", f"*{fileExtension}"))
-
-        assert maskPaths, (
-            f"No mask files found. Volumes/masks found: "
-            f"{len(volumePaths)}/{len(maskPaths)} in {directory}"
-        )
-        assert len(volumePaths) == len(maskPaths), (
-            f"Volume and mask counts must match: "
-            f"{len(volumePaths)} volumes, {len(maskPaths)} masks."
-        )
-
-        result = pd.DataFrame({
-            self.volumePathColumn: volumePaths,
-            self.maskPathColumn: maskPaths,
-        })
-        result[self.sampleColumn] = result.index
-        result.to_csv(self.dfPath)
-
-    def copy_samples(self, src_root: str, dest_root: str) -> None:
-        """Copy volumes and masks to *dest_root*, preserving the sub-tree below *src_root*.
-
-        For every file ``<src_root>/a/b/file.tif`` the destination is
-        ``<dest_root>/a/b/file.tif``.  Intermediate directories are created as
-        needed.  An updated index is saved as ``dataset.xlsx`` inside *dest_root*.
-
-        Parameters
-        ----------
-        src_root : str
-            Common ancestor whose sub-tree structure should be preserved.
-            Every volume and mask path must be located under this directory.
-        dest_root : str
-            Root of the destination tree.
-
-        Raises
-        ------
-        FileNotFoundError
-            If a source file listed in the index does not exist.
-        ValueError
-            If a source file is not located under *src_root*.
-        """
-        src_root  = os.path.abspath(src_root)
-        dest_root = os.path.abspath(dest_root)
-
-        df = self.datasetDF.copy()
-
-        for idx, row in df.iterrows():
-            for col in (self.volumePathColumn, self.maskPathColumn):
-                src = os.path.abspath(row[col])
-
-                if not os.path.isfile(src):
-                    raise FileNotFoundError(f"Source file not found: {src}")
-                if not src.startswith(src_root):
-                    raise ValueError(f"{src!r} is not under src_root {src_root!r}")
-
-                rel  = os.path.relpath(src, src_root)
-                dest = os.path.join(dest_root, rel)
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.copy2(src, dest)
-                df.at[idx, col] = dest
-
-        os.makedirs(dest_root, exist_ok=True)
-        df.to_excel(os.path.join(dest_root, "dataset.xlsx"), index=False)
-        logger.info("Copied %d samples from %s to %s", len(df), src_root, dest_root)
-
-    @staticmethod
-    def getConfig(path: str) -> dict:
-        """Load a YAML configuration file and return it as a dictionary.
-
-        Parameters
-        ----------
-        path : str
-            Absolute path to a ``.yaml`` configuration file.
-
-        Returns
-        -------
-        dict
-            Parsed YAML contents.
-        """
-        with open(path, "r") as f:
-            return yaml.safe_load(f)
+    def __getitem__(self, idx: int):
+        row = self.sampleDFRow(idx)
+        return self.load_image(str(row[self.volumePathColumn])), int(row[self.sampleColumn])
 
 
 class VerticesDataset(BaseDataset):
@@ -548,6 +256,10 @@ class VerticesDataset(BaseDataset):
         self.config: dict[str, Any] = locals()
         self.config.pop("self", None)
         self.config.pop("__class__", None)
+        # NOTE: datasetDir here is an INPUT directory to scan for CSVs, not the artefact
+        # root the collection datasets give the same name. This class never calls
+
+        # TODO: rename this to inputDir to retire the collision outright.
         self.datasetDir = datasetDir
 
         if self.datasetDir is not None and os.path.exists(self.datasetDir):
@@ -555,7 +267,7 @@ class VerticesDataset(BaseDataset):
                 [self.datasetDir], os.path.join(self.datasetDir, "..", "..", "..")
             )
 
-        super().__init__(datasetPath=datasetPath, sampleColumn=sampleColumn, **kwargs)
+        super().__init__(sampleColumn=sampleColumn, **kwargs)
 
         self.sampleColumnCSV: str = sampleColumnCSV
 
@@ -563,13 +275,13 @@ class VerticesDataset(BaseDataset):
         self.standardizedLabels = standardizedLabels
         self.standardizedCoords = standardizedCoords
 
-        if self.datasetDF.columns.isin(self.standardizedCoords).all():
-            self.verticesCol: pd.DataFrame = self.datasetDF.loc[
+        if self.sampleMapperDF.columns.isin(self.standardizedCoords).all():
+            self.verticesCol: pd.DataFrame = self.sampleMapperDF.loc[
                 :, self.standardizedCoords
             ]
 
-        if self.standardizedLabels in self.datasetDF.columns:
-            self.standardizedLabels = self.datasetDF.loc[:, self.standardizedLabels]
+        if self.standardizedLabels in self.sampleMapperDF.columns:
+            self.standardizedLabels = self.sampleMapperDF.loc[:, self.standardizedLabels]
 
         self.verticesInstanceLabelCol: str = labels
 
@@ -629,16 +341,16 @@ class VerticesDataset(BaseDataset):
     def Sample2df_index(self, sample) -> int:
 
         if sample in self.samples:
-            return self.datasetDF.loc[
-                self.datasetDF[self.sampleColumn] == sample, :
-            ].index.tolist()[0]
+            return self.sampleMapperDF.loc[
+                self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] == sample, :
+                   ].index.tolist()[0]
         else:
             raise KeyError(f"Label {sample} does not exist in dataset")
 
     def getFilePathFromDF(self, index) -> str:
         label: str = self.samples[index]
         dfindex: int = self.Sample2df_index(label)
-        dir: str = self.datasetDF.loc[dfindex, self.sampleColumnCSV]
+        dir: str = self.sampleMapperDF.loc[dfindex, self.sampleColumnCSV]
         return dir #os.path.join(dir, label)
 
     @staticmethod

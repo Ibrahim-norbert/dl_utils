@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 import logging
 import os
-from typing import Union, Any
+from abc import ABCMeta, abstractmethod
+from typing import Union, Optional
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import yaml
 from yamlfix import fix_files
 from torch.utils.data.dataloader import default_collate
-from .constants import LOSS_KEY, EMBED_DICT_EMBED, LABEL_KEY
-from .util import save_model as _save_model, load_model as _load_model
+
+from .constants import LOSS_KEY
+from .util import save_model as _save_model, load_model as _load_model, OneCycleLR, CosineScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -31,32 +36,48 @@ def _install_print_tee(save_dir: str) -> None:
 
     builtins.print = _tee_print
     
-class BaseModelClass(pl.LightningModule):
+class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     """Masked Autoencoder with VisionTransformer backbone"""
+
+    _LAYER_DECAY_SCOPE = "backbone."
 
     def __init__(
         self,
         save_dir: str,
+        backbone : Optional[Union[torch.nn, pl.LightningModule]],
         version_name: str,
         accelerator: str,
-        bnm_clip=1e-2,
-        lr_clip=1e-5,
         lr=0.001,
-        lr_decay=0.5,
         batch_size=1,
-        decay_step=3e5,
-        bn_momentum=0.5,
-        bnm_decay=0.5,
-        weight_decay=0.0,
-        space_threshold=0.5,
-        **kwargs
+        input_dim=256,
+        layer_decay=0.2,
+        lr_final_div_factor=None,
+        warmup_ratio=None,
+        lr_div_factor=None,
+        maxweight_decay=None,
+        minweight_decay=None, **kwargs
     ):
         # pl.LightningModule.__init__ takes no args; extra model-config kwargs are
         # captured below by save_hyperparameters(), not forwarded to the base.
         super().__init__()
 
+        self.input_dim = input_dim
+        self.layer_decay = layer_decay
+        self.backbone = backbone
+        self.lr_final_div_factor = lr_final_div_factor
+        self.warmup_ratio = warmup_ratio
+        self.weight_decay_scheduler: Optional[CosineScheduler] = None
+        self.lr_div_factor = lr_div_factor
+        self.maxweight_decay = maxweight_decay
+        self.lr = lr
+        self.minweight_decay = minweight_decay
+        self.batch_size = batch_size
+        self.accelerator = accelerator
+        self.version_name = version_name
+        self.save_dir = save_dir
+
         self.save_hyperparameters()
-        self.__dict__.update(self.hparams)
+
 
         torch.set_float32_matmul_precision("medium")
 
@@ -65,6 +86,11 @@ class BaseModelClass(pl.LightningModule):
         # Per-batch validation outputs accumulated across one validation epoch.
         # validation_step appends a dict here; on_validation_epoch_end reduces it.
         self.validation_step_outputs: list[dict] = []
+
+        # Per-sample metadata the epoch-end probe labels against, handed over by the
+        # trainer — see attachValidationMetadata. None until then, and permanently None
+        # for models whose probe reads a fixed file instead.
+        self.validation_metadata: Optional[pd.DataFrame] = None
 
         #_install_print_tee(save_dir)
 
@@ -135,15 +161,20 @@ class BaseModelClass(pl.LightningModule):
             if not values:
                 continue
             first = values[0]
+            # 0-dim values are per-batch metrics: average them. Anything with a sample
+            # axis is per-point / per-sample: concatenate. The test is ``ndim``, not the
+            # element count — a batch that happens to hold ONE sample still carries a
+            # sample axis, and averaging it would fold that batch's labels (or its single
+            # embedding) into one number, corrupting the epoch's concatenation. That is
+            # reachable from any DataLoader whose first validation batch has one item,
+            # batch_size=1 included.
             if isinstance(first, torch.Tensor):
-                # Scalar (0-dim / single-element) tensors are per-batch metrics:
-                # average them. Multi-row tensors are per-point: concatenate.
-                if first.ndim == 0 or first.numel() == 1:
+                if first.ndim == 0:
                     reduced[key] = torch.stack([v.detach().cpu().reshape(()) for v in values]).mean()
                 else:
                     reduced[key] = torch.cat([v.detach().cpu() for v in values], dim=0)
             elif isinstance(first, np.ndarray):
-                if first.ndim == 0 or first.size == 1:
+                if first.ndim == 0:
                     reduced[key] = float(np.mean([np.asarray(v).reshape(()) for v in values]))
                 else:
                     reduced[key] = np.concatenate(values, axis=0)
@@ -309,3 +340,496 @@ class BaseModelClass(pl.LightningModule):
         )
 
         return parent_parser
+
+    @staticmethod
+    def _block_decay_entries(scope: str, depths, lr: float, decay: float) -> list[dict]:
+        """``{scope, keyword, lr}`` per block, deepest at ``lr``.
+
+        The keyword ``enc{e}.block{b}.`` is matched as a *substring* of the full
+        parameter name (the backbone's blocks sit at ``backbone._model.enc.``), with the
+        leading scope carried separately so the two stacks — which share the naming —
+        cannot capture each other's parameters. The exponent counts blocks backwards
+        from the last one: the deepest block gets ``lr * decay**0`` and the first
+        gets the most-decayed LR, the standard "later layers move more" schedule from
+        ``SMLMSonata.configure_optimizers`` / Pointcept.
+        """
+        total = sum(depths)
+        return [
+            dict(
+                scope=scope,
+                keyword=f"enc{e}.block{b}.",
+                lr=lr * decay ** (total - sum(depths[:e]) - b - 1),
+            )
+            for e in range(len(depths))
+            for b in range(depths[e])
+        ]
+
+    def _layer_decay_param_dicts(self) -> list[dict]:
+        """Layer-decay entries for the backbone, plus the decoder when enabled.
+
+        The decoder entries only exist when ``decoder_layer_decay`` is set. Without
+        them — and with the default ``freeze_encoder=True``, which empties every backbone
+        group — ``configure_optimizers`` ends up with a single group and layer-wise decay
+        is a no-op for the whole model.
+        """
+        entries = self._block_decay_entries(
+            self._LAYER_DECAY_SCOPE,
+            self.backbone.enc_depths,
+            self.lr,
+            self.layer_decay,
+        )
+
+        return entries
+
+    def _is_no_decay(self, name: str, param: torch.Tensor) -> bool:
+        """Whether ``param`` should be exempt from weight decay.
+
+        ``ndim <= 1`` covers every bias, LayerNorm weight and LayerScale vector in one
+        rule (as ``dl_utils.lr_decay.param_groups_lrd`` does); the keyword list adds the
+        2-D ``nn.Embedding`` tokens, which that rule misses.
+        """
+        return param.ndim <= 1 or any(
+            kw in name for kw in self.no_weight_decay_keywords
+        )
+
+    def configure_optimizers(self):
+
+        self._total_steps = int(self.trainer.estimated_stepping_batches)
+
+        param_dicts = self._layer_decay_param_dicts()
+
+        # Each LR level owns TWO groups: one that weight-decays and one that does not.
+        # `apply_wd_schedule` is a private marker read back by on_before_optimizer_step,
+        # which would otherwise re-apply the ramped WD to the exempt group every step and
+        # undo the split. torch.optim keeps unknown param_group keys untouched.
+        def _pair(lr: float) -> tuple[dict, dict]:
+            return (
+                {
+                    "params": [],
+                    "lr": lr,
+                    "minweight_decay": self.minweight_decay,
+                    "apply_wd_schedule": True,
+                },
+                {
+                    "params": [],
+                    "lr": lr,
+                    "minweight_decay": 0.0,
+                    "apply_wd_schedule": False,
+                },
+            )
+
+        # Level 0 = default (unmatched): the freshly-initialised SAM stack (feat_proj,
+        # prompt_encoder, mask_decoder) plus any non-block params, all at full lr.
+        # Levels 1..N = one per param_dict entry.
+        levels: list[tuple[dict, dict]] = [_pair(self.lr)]
+        levels += [_pair(d["lr"]) for d in param_dicts]
+
+        for n, p in self.named_parameters():
+            # freeze_encoder sets requires_grad=False on the whole backbone, so this is
+            # also what keeps the frozen encoder out of the optimizer entirely.
+            if not p.requires_grad:
+                continue
+            level = 0
+            for i, d in enumerate(param_dicts):
+                if n.startswith(str(d["scope"])) and str(d["keyword"]) in n:
+                    level = i + 1
+                    break
+            levels[level][1 if self._is_no_decay(n, p) else 0]["params"].append(p)
+
+        # Flatten and drop empty groups so max_lr length stays consistent (every block
+        # group is empty when freeze_encoder is on, as is any no-decay group when
+        # no_weight_decay_keywords is empty and the level holds only weight matrices).
+        layer_groups = [g for pair in levels for g in pair if g["params"]]
+        assert (
+            layer_groups
+        ), "no trainable parameters — freeze_encoder froze everything?"
+        lrs = [g["lr"] for g in layer_groups]
+        n_no_decay = sum(
+            len(g["params"]) for g in layer_groups if not g["apply_wd_schedule"]
+        )
+        print(
+            f"{type(self).__name__}: {len(layer_groups)} param group(s), "
+            f"lr {min(lrs):.3g}..{max(lrs):.3g} (base {self.lr}, "
+            f"layer decay {self.layer_decay}, decoder layer decay "
+            f"{self.decoder_layer_decay}), {n_no_decay} param(s) exempt from weight "
+            f"decay, freeze_encoder={self.freeze_encoder}"
+        )
+
+        optimizer = torch.optim.AdamW(
+            layer_groups, lr=self.lr, weight_decay=self.minweight_decay
+        )
+
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=lrs,
+            pct_start=self.warmup_ratio,
+            anneal_strategy="cos",
+            div_factor=self.lr_div_factor,
+            final_div_factor=self.lr_final_div_factor,
+            total_steps=self._total_steps,
+        )
+
+        # interval="step": OneCycleLR is sized in optimizer steps
+        # (estimated_stepping_batches); Lightning's default "epoch" interval would
+        # advance it once per epoch and pin the LR near the warmup value.
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
+    def configure_optimizers(self):
+
+        self._total_steps = int(self.trainer.estimated_stepping_batches)
+
+        param_dicts = self._layer_decay_param_dicts()
+
+        # Each LR level owns TWO groups: one that weight-decays and one that does not.
+        # `apply_wd_schedule` is a private marker read back by on_before_optimizer_step,
+        # which would otherwise re-apply the ramped WD to the exempt group every step and
+        # undo the split. torch.optim keeps unknown param_group keys untouched.
+        #
+        # The decay key must be spelled "weight_decay" — that is the one torch.optim reads.
+        # These groups previously carried "minweight_decay", which AdamW does not know, so
+        # add_param_group filled "weight_decay" from the constructor default below for
+        # EVERY group instead. Both features here were silently dead as a result: the
+        # exempt group decayed exactly like the others (so biases and norm weights were
+        # decayed, which is the one thing this split exists to prevent), and the cosine
+        # ramp in on_before_optimizer_step wrote to a key nothing read, leaving the real
+        # decay pinned at its construction value for the whole run.
+        def _pair(lr: float) -> tuple[dict, dict]:
+            return (
+                {
+                    "params": [],
+                    "lr": lr,
+                    "weight_decay": self.minweight_decay,
+                    "apply_wd_schedule": True,
+                },
+                {
+                    "params": [],
+                    "lr": lr,
+                    "weight_decay": 0.0,
+                    "apply_wd_schedule": False,
+                },
+            )
+
+        # Level 0 = default (unmatched): the freshly-initialised SAM stack (feat_proj,
+        # prompt_encoder, mask_decoder) plus any non-block params, all at full lr.
+        # Levels 1..N = one per param_dict entry.
+        levels: list[tuple[dict, dict]] = [_pair(self.lr)]
+        levels += [_pair(d["lr"]) for d in param_dicts]
+
+        for n, p in self.named_parameters():
+            # freeze_encoder sets requires_grad=False on the whole backbone, so this is
+            # also what keeps the frozen encoder out of the optimizer entirely.
+            if not p.requires_grad:
+                continue
+            level = 0
+            for i, d in enumerate(param_dicts):
+                if n.startswith(str(d["scope"])) and str(d["keyword"]) in n:
+                    level = i + 1
+                    break
+            levels[level][1 if self._is_no_decay(n, p) else 0]["params"].append(p)
+
+        # Flatten and drop empty groups so max_lr length stays consistent (every block
+        # group is empty when freeze_encoder is on, as is any no-decay group when
+        # no_weight_decay_keywords is empty and the level holds only weight matrices).
+        layer_groups = [g for pair in levels for g in pair if g["params"]]
+        assert (
+            layer_groups
+        ), "no trainable parameters — freeze_encoder froze everything?"
+        lrs = [g["lr"] for g in layer_groups]
+        n_no_decay = sum(
+            len(g["params"]) for g in layer_groups if not g["apply_wd_schedule"]
+        )
+        print(
+            f"{type(self).__name__}: {len(layer_groups)} param group(s), "
+            f"lr {min(lrs):.3g}..{max(lrs):.3g} (base {self.lr}, "
+            f"layer decay {self.layer_decay}, decoder layer decay "
+            f"{self.decoder_layer_decay}), {n_no_decay} param(s) exempt from weight "
+            f"decay, freeze_encoder={self.freeze_encoder}"
+        )
+
+        optimizer = torch.optim.AdamW(
+            layer_groups, lr=self.lr, weight_decay=self.minweight_decay
+        )
+
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=lrs,
+            pct_start=self.warmup_ratio,
+            anneal_strategy="cos",
+            div_factor=self.lr_div_factor,
+            final_div_factor=self.lr_final_div_factor,
+            total_steps=self._total_steps,
+        )
+
+        # interval="step": OneCycleLR is sized in optimizer steps
+        # (estimated_stepping_batches); Lightning's default "epoch" interval would
+        # advance it once per epoch and pin the LR near the warmup value.
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
+    def on_train_start(self) -> None:
+        """Build the cosine weight-decay ramp, resumable mid-run."""
+        super().on_train_start()
+        total_steps = int(self.trainer.estimated_stepping_batches)
+        self.weight_decay_scheduler = CosineScheduler(
+            base_value=self.minweight_decay,
+            final_value=self.maxweight_decay,
+            total_iters=total_steps,
+        )
+        # Fast-forward on resume so the ramp picks up where the checkpoint left off.
+        self.weight_decay_scheduler.iter = self.trainer.global_step
+        self.minweight_decay = self.minweight_decay
+
+    def on_before_optimizer_step(self, optimizer):
+        """Advance the WD ramp and write it to every non-exempt group.
+
+        Uniform overwrite across the layer-wise LR groups, matching Pointcept's hook —
+        all decaying groups share one WD by design (AdamW's decoupled decay still scales
+        per group via each group's lr). Groups flagged ``apply_wd_schedule=False`` by
+        :meth:`configure_optimizers` (biases, norms, learned tokens) are skipped;
+        overwriting them here would silently undo the no-decay split on the first step.
+        Groups built by some other code path carry no flag and default to decaying, which
+        preserves the previous behaviour.
+
+        Writes ``group["weight_decay"]`` — the key the optimizer reads. This used to write
+        ``group["minweight_decay"]``, which no optimizer looks at, so the ramp ran on paper
+        (and logged a convincing curve) while the decay AdamW applied never moved off its
+        construction value. See the note in :meth:`configure_optimizers`.
+        """
+        if self.weight_decay_scheduler is None:
+            return
+        # CosineScheduler.step() returns a numpy scalar; cast so self.log and the
+        # optimizer state both see a plain Python float.
+        self.minweight_decay = float(self.weight_decay_scheduler.step())
+        for group in optimizer.param_groups:
+            if group.get("apply_wd_schedule", True):
+                group["weight_decay"] = self.minweight_decay
+        # Guarded: the hook must stay callable with a bare optimizer and no Trainer
+        # (unit tests, manual stepping). self.log needs Lightning's result collection.
+        if getattr(self.trainer, "loggers", None):
+            # Named for what it now actually sets. The old "params/minweight_decay" tag
+            # tracked an attribute that never reached the optimizer, so it disagreed with
+            # LearningRateMonitor(log_weight_decay=True) — which reads the real
+            # group["weight_decay"] — for the whole run.
+            self.log(
+                "params/weight_decay",
+                self.minweight_decay,
+                on_step=True,
+                on_epoch=False,
+                logger=True,
+                batch_size=self.batch_size,
+            )
+
+    def _is_global_zero(self):
+        """True on rank 0 or when detached from any Trainer (manual/offline use).
+
+        Guards output-only work (figures, file writes) in multi-rank runs. Reads
+        ``_trainer`` directly because the ``LightningModule.trainer`` property
+        raises ``RuntimeError`` on a detached module.
+
+        Concrete, not abstract: the docstring fully determines the body, so every
+        subclass would have written the same three lines.
+        """
+        trainer = getattr(self, "_trainer", None)
+        return trainer is None or trainer.is_global_zero
+
+    @abstractmethod
+    def build_collate_fn(self, train):
+        """Build a **picklable** collate callable for a ``DataLoader``.
+
+        This is the collate override seam. Override *this* (not the ``collate_fn`` /
+        ``traincollate_fn`` properties): it runs in the *parent* process, so it may
+        read any instance state, but it MUST return a picklable callable that does
+        **not** capture ``self`` — DataLoader workers (``num_workers > 0``; spawn on
+        Windows) pickle the returned object, and capturing ``self`` would drag the
+        whole model (backbones, CUDA storages) into every worker. Returning a
+        :class:`~smlm_sonata.data.collate.LocalizationCollator` satisfies that.
+
+        ``SMLMTransformer`` has no train-time augmentation, so ``train`` is ignored
+        here; :class:`~smlm_sonata.models.sonata.SMLMSonata` overrides this to select
+        its multi-view SSL pipeline when ``train=True``.
+
+        Uses the vendored sonata batch collate (not ``default_collate``): it
+        concatenates the per-sample point dicts and builds a 1-D ``offset`` by cumsum
+        of each sample's point count (per-object boundaries), which is what
+        Point/BioimagePoint's ``offset2batch`` expects.
+        """
+        pass
+
+    def _collate_fn(self, batch, grid_size, forward_transform, batch_collate_fn):
+        """Single-process collate convenience — instance method, overridable.
+
+        Optional seam, not abstract: the signature is the point-cloud pipeline's
+        (``grid_size`` / ``forward_transform`` are SONATA transform arguments). Dense
+        models — e.g. ``representationlearning.models.SimCLR3DModel``, whose samples are
+        fixed-shape volumes that ``default_collate`` stacks as-is — express their whole
+        collate through :meth:`build_collate_fn` and never touch this.
+
+        Not used by DataLoader workers (those get the picklable callable from
+        :meth:`build_collate_fn`); it exists for manual, in-process collation such as
+        the epoch-end linear probe and :class:`EmbeddingPredictor`. Kept as an
+        instance method so a subclass can wrap it via ``super()._collate_fn(...)``.
+        Defaults to the instance's ``grid_size`` / ``forwardtransform`` when not given.
+        """
+        pass
+
+    @abstractmethod
+    def shared_step(self, point_dict, kwargs):
+        """Override so that :meth:`forward` receives a ``point_dict`` directly.
+
+        The parent :meth:`shared_step` expects a :class:`Vertices` object and
+        calls ``self.preprocess`` / ``self.transformer``.  Here the collate_fn
+        already produces a ready-to-use dict of CPU tensors, so we just move
+        them to the model device and call :meth:`forward`.
+        """
+        pass
+
+    @abstractmethod
+    def embed_step(self, point_dict):
+        """Run the *eval* forward and return per-point embeddings + GT.
+
+        Unlike :meth:`shared_step`, this calls :meth:`embed_forward` — the overridable
+        embedding seam — so the per-point embedding path is used even for subclasses
+        (e.g. ``SMLMSonata``) whose ``self.forward`` is the SSL forward returning a loss
+        dict, while still letting a subclass customise embedding extraction. This
+        replaces the previous class-bound ``SMLMTransformer.forward(self, ...)`` call and
+        the older ``self.forward`` monkey-patch.
+
+        Returns a per-batch dict (the validation contract type) with
+        ``EMBED_DICT_EMBED`` (inverse-expanded to the input point count),
+        ``"coord"`` and ``LABEL_KEY`` (the input coords / labels), all CPU numpy.
+        """
+        pass
+
+    @abstractmethod
+    def logAnalysis(self, df, emb_np, titel, save_dir, pred_labels, scalars, classMapping):
+        pass
+
+    @abstractmethod
+    def _train_linear_probe(self, emb_np, gt_labels_bin):
+        """Phase 4 — fit a :class:`SegHead` linear probe on the single-batch
+        embeddings and return the predicted labels ``(N,)``.
+        """
+        pass
+
+    @abstractmethod
+    def _log_probe_results(self, df, emb_np, pred_labels, gt_labels_bin, save_dir):
+        """Phase 5 — compute metrics, log F1, and run the full visual analysis."""
+        pass
+
+    # The two hooks below load the *fixed* probe sample described on
+    # :meth:`run_linear_probe` and turn it into embeddings. Optional seams, not abstract:
+    # they only exist for models whose probe comes from a file outside the training data
+    # (SONATA's annotated localization crop). A model whose probe rides on the real
+    # validation DataLoader has nothing to load and overrides neither: its embeddings
+    # already flow through ``validation_step``, and its sample metadata arrives through
+    # :meth:`attachValidationMetadata` below.
+
+    def _VAL_PROBE2Localization(self):
+        """Read the fixed probe file into the model's sample type."""
+        pass
+
+    def _VAL_PROBE2embdding(self):
+        """Embed what :meth:`_VAL_PROBE2Localization` returned."""
+        pass
+
+    def attachValidationMetadata(self, metadata: pd.DataFrame) -> None:
+        """Hand the module the per-sample table its epoch-end probe labels against.
+
+        The counterpart of :meth:`_VAL_PROBE2Localization` for the *other* probe family
+        named above: a model whose probe rides on the real validation DataLoader needs no
+        fixed file, only the metadata rows its embeddings came from.
+
+        The trainer owns the split, so the trainer owns this call — see
+        ``TextureTraining.getTrainValDataloader``. Pushing the table down beats having the
+        module walk back up ``trainer.val_dataloaders`` -> ``Subset`` -> dataset internals:
+        that walk is legitimate (the loader is public ``Trainer`` state) but it is a chain
+        of optional attribute lookups, so any structural change degrades it to ``None`` and
+        the probe — and with it the only held-out metric a contrastive run has — silently
+        stops running.
+
+        *metadata* is the FULL object table, not the validation subset's slice of it: the
+        probe addresses rows by the *position* each sample carries as its label, and those
+        positions index the whole dataset (``Subset`` preserves them).
+
+        Concrete rather than abstract: a model that never receives a call keeps
+        ``validation_metadata=None``, which its ``run_linear_probe`` is expected to treat as
+        "no probe this run" rather than as an error.
+        """
+        self.validation_metadata = metadata
+
+    @abstractmethod
+    def run_linear_probe(self, emb, save_dir):
+        """Fit + log the SegHead linear probe on the configured npc_jonas crop.
+
+        Loads the fixed probe crop from :attr:`_VAL_PROBE` (falling back to
+        :attr:`_VAL_ANALYSIS_CSV`) — settable per instance / from the training YAML
+        via ``modelConfig: val_probe`` —
+        embeds it with the backbone through the same collate + :meth:`embed_step`
+        path used by :meth:`validation_step`, fits a :class:`SegHead` linear probe on
+        the per-point embeddings, and logs ``LinearProbe/val/f1`` plus the PCA/UMAP
+        feature-space figures. Independent of the training set's validation split.
+
+        Shared entrypoint so both :class:`SMLMTransformer` and the SSL
+        :class:`SMLMSonata` log ``LinearProbe/val/f1`` from their respective
+        ``on_validation_epoch_end`` hooks. Self-contained + fully guarded, so it is
+        safe to call alongside a model's other epoch-end logging.
+        """
+        pass
+
+    @abstractmethod
+    def run_validation_epoch(self):
+        """Overridable epoch-end template. Subclasses may extend via ``super()``.
+
+        The base pass logs the npc_jonas linear probe; :class:`SMLMSonata` overrides
+        this to also log the feature space and the SSL crops.
+        """
+        pass
+
+    @abstractmethod
+    def predict_step(self, point_dict, batch_idx):
+        """Save each batch element's voxel-level embeddings to a separate JSON.
+
+        Overrides :meth:`SMLMSegmentation.predict_step`. When the predict
+        ``DataLoader`` runs with ``batch_size > 1`` the collated batch holds
+        several objects concatenated along dim 0, with per-object boundaries in
+        ``offset``. We partition them back apart with :meth:`Point.batch_split`
+        and write **one** ``dataframe_*.json`` per object.
+
+        The saved coordinates/embeddings are at **voxel** (GridSample) resolution:
+        we use the pre-inverse-expansion embeddings (``EMBED_DICT_EMBED`` +
+        ``"_NonSerialized"``) and ``gridsampled_coord``, both of which are aligned
+        row-for-row with the input voxel ``offset``. GT / predicted labels are not
+        included here — they only exist at original-point resolution, whose
+        per-object boundaries are not recoverable from the collated batch (the
+        vendored ``collate_fn`` keeps ``inverse`` per-sample-local).
+        """
+        pass
+
+    @abstractmethod
+    def embed_forward(self, point):
+        """Run the backbone and return per-point embeddings (the embedding path).
+
+        This is the overridable seam for the embedding forward used by validation /
+        probes. Split out from :meth:`forward` so a subclass whose ``forward`` is a
+        different computation (SSL loss) does not also lose the ability to customise
+        embedding extraction.
+
+        The input ``point`` is not mutated; all forward outputs live on the
+        returned :class:`Embeddings`.
+
+        When the collate's ``GridSample`` merged points, the ``inverse`` index maps
+        voxels back to the original points: backbone features and coords are
+        expanded through it so ``data``/``misc["coord"]`` stay row-aligned with
+        ``labels`` (which are attached at original-point resolution).
+        """
+        pass
+
+    @abstractmethod
+    def forward(self, point):
+        """Eval/embedding forward. Delegates to the overridable :meth:`embed_forward`.
+
+        Kept as ``forward`` so ``SMLMSegmentation``/``shared_step`` callers are
+        unchanged; subclasses whose ``forward`` means something else (e.g.
+        :class:`SMLMSonata`'s SSL forward) can still reach the embedding path via
+        ``self.embed_forward`` (used by :meth:`embed_step`).
+        """
+        pass
