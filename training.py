@@ -343,7 +343,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
         self.ckptPath=ckptPath
         self.modelName = modelName
-        self.modelConfig = modelConfig
+        self.modelConfig : Namespace = modelConfig
         self.datasetConfig = datasetConfig
         self.reproducibility_seed = reproducibility_seed
         self.num_workers = num_workers
@@ -353,7 +353,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.shuffle = shuffle
 
         # Print entries of modelConfig:
-        self.device = self.modelConfig.accelerator
+        self.device = self.modelConfig["accelerator"]
 
         if self.fast_dev_run is True or self.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
@@ -992,9 +992,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--shuffle", action="store_true", default=True)
         parser.add_argument("--fast_dev_run", type=int, default=0)
         parser.add_argument("--reproducibility_seed", type=int, default=43)
-        parser.add_argument("--dataset", default="SMLMDataset")
+        parser.add_argument("--datasetName", default="SMLMDataset")
         parser.add_argument("--limit_val_batches", type=float, default=1.0)
-        parser.add_argument("--accumulate_grad_batches", type=int, default=1)
         # --- distributed training ---
         # Boolean switch: `use_fsdp: true` in a YAML config (or --use_fsdp on the
         # CLI) activates FSDP; the strategy itself is built by the trainer
@@ -1016,6 +1015,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--info_log_interval", type=int, default=10)
         # >0 enables GarbageCollectionCallback with that collect interval.
         parser.add_argument("--gc_collect_interval", type=int, default=0)
+        parser.add_argument("--pin_mem", action="store_true", default=True)
+        parser.add_argument("--accumulate_grad_batches", type=int, default=1)
+        parser.add_argument("--lr", type=float, default=0.001)
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser

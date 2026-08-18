@@ -46,6 +46,31 @@ class Volume(NamedTuple):
 
     label: torch.Tensor
 
+class VolumeSIMCLR(NamedTuple):
+    """Two augmented views of one object — the sample the SimCLR training step contrasts.
+
+    The two-view counterpart of :class:`Volume`: ``data1`` and ``data2`` are independent
+    augmentations of the *same* object's window, drawn per sample by
+    ``SimCLR3DModel.traincollate_fn``, so a collated instance carries two
+    ``(B, C, Z, Y, X)`` tensors and one ``(B,)`` label.
+
+    One ``label``, not one per view, because both views are the same object: it is that
+    object's row position in ``objectMapperDF``, and a copy per view would only invite the
+    two to disagree. Validation and prediction never see this type — they consume a plain
+    :class:`Volume`, which is what stops the un-augmented path from reaching the
+    contrastive loss by accident.
+
+    ``default_collate`` rebuilds a NamedTuple field-wise, so no custom collate is needed
+    beyond the per-sample augmentation itself, and the same shape-stability rule as
+    :class:`Volume` applies to both view tensors.
+    """
+
+    data1: torch.Tensor
+
+    data2: torch.Tensor
+
+    label: torch.Tensor
+
 
 class Vertices(NamedTuple):
     """Container for localization data with vertices, labels, and file paths."""

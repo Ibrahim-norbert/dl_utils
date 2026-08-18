@@ -474,6 +474,97 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         # advance it once per epoch and pin the LR near the warmup value.
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
+    def configure_optimizers(self):
+
+        self._total_steps = int(self.trainer.estimated_stepping_batches)
+
+        param_dicts = self._layer_decay_param_dicts()
+
+        # Each LR level owns TWO groups: one that weight-decays and one that does not.
+        # `apply_wd_schedule` is a private marker read back by on_before_optimizer_step,
+        # which would otherwise re-apply the ramped WD to the exempt group every step and
+        # undo the split. torch.optim keeps unknown param_group keys untouched.
+        #
+        # The decay key must be spelled "weight_decay" — that is the one torch.optim reads.
+        # These groups previously carried "minweight_decay", which AdamW does not know, so
+        # add_param_group filled "weight_decay" from the constructor default below for
+        # EVERY group instead. Both features here were silently dead as a result: the
+        # exempt group decayed exactly like the others (so biases and norm weights were
+        # decayed, which is the one thing this split exists to prevent), and the cosine
+        # ramp in on_before_optimizer_step wrote to a key nothing read, leaving the real
+        # decay pinned at its construction value for the whole run.
+        def _pair(lr: float) -> tuple[dict, dict]:
+            return (
+                {
+                    "params": [],
+                    "lr": lr,
+                    "weight_decay": self.minweight_decay,
+                    "apply_wd_schedule": True,
+                },
+                {
+                    "params": [],
+                    "lr": lr,
+                    "weight_decay": 0.0,
+                    "apply_wd_schedule": False,
+                },
+            )
+
+        # Level 0 = default (unmatched): the freshly-initialised SAM stack (feat_proj,
+        # prompt_encoder, mask_decoder) plus any non-block params, all at full lr.
+        # Levels 1..N = one per param_dict entry.
+        levels: list[tuple[dict, dict]] = [_pair(self.lr)]
+        levels += [_pair(d["lr"]) for d in param_dicts]
+
+        for n, p in self.named_parameters():
+            # freeze_encoder sets requires_grad=False on the whole backbone, so this is
+            # also what keeps the frozen encoder out of the optimizer entirely.
+            if not p.requires_grad:
+                continue
+            level = 0
+            for i, d in enumerate(param_dicts):
+                if n.startswith(str(d["scope"])) and str(d["keyword"]) in n:
+                    level = i + 1
+                    break
+            levels[level][1 if self._is_no_decay(n, p) else 0]["params"].append(p)
+
+        # Flatten and drop empty groups so max_lr length stays consistent (every block
+        # group is empty when freeze_encoder is on, as is any no-decay group when
+        # no_weight_decay_keywords is empty and the level holds only weight matrices).
+        layer_groups = [g for pair in levels for g in pair if g["params"]]
+        assert (
+            layer_groups
+        ), "no trainable parameters — freeze_encoder froze everything?"
+        lrs = [g["lr"] for g in layer_groups]
+        n_no_decay = sum(
+            len(g["params"]) for g in layer_groups if not g["apply_wd_schedule"]
+        )
+        print(
+            f"{type(self).__name__}: {len(layer_groups)} param group(s), "
+            f"lr {min(lrs):.3g}..{max(lrs):.3g} (base {self.lr}, "
+            f"layer decay {self.layer_decay}, decoder layer decay "
+            f"{self.decoder_layer_decay}), {n_no_decay} param(s) exempt from weight "
+            f"decay, freeze_encoder={self.freeze_encoder}"
+        )
+
+        optimizer = torch.optim.AdamW(
+            layer_groups, lr=self.lr, weight_decay=self.minweight_decay
+        )
+
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=lrs,
+            pct_start=self.warmup_ratio,
+            anneal_strategy="cos",
+            div_factor=self.lr_div_factor,
+            final_div_factor=self.lr_final_div_factor,
+            total_steps=self._total_steps,
+        )
+
+        # interval="step": OneCycleLR is sized in optimizer steps
+        # (estimated_stepping_batches); Lightning's default "epoch" interval would
+        # advance it once per epoch and pin the LR near the warmup value.
+        return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
+
     def on_train_start(self) -> None:
         """Build the cosine weight-decay ramp, resumable mid-run."""
         super().on_train_start()
@@ -497,6 +588,11 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         overwriting them here would silently undo the no-decay split on the first step.
         Groups built by some other code path carry no flag and default to decaying, which
         preserves the previous behaviour.
+
+        Writes ``group["weight_decay"]`` — the key the optimizer reads. This used to write
+        ``group["minweight_decay"]``, which no optimizer looks at, so the ramp ran on paper
+        (and logged a convincing curve) while the decay AdamW applied never moved off its
+        construction value. See the note in :meth:`configure_optimizers`.
         """
         if self.weight_decay_scheduler is None:
             return
@@ -505,12 +601,16 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.minweight_decay = float(self.weight_decay_scheduler.step())
         for group in optimizer.param_groups:
             if group.get("apply_wd_schedule", True):
-                group["minweight_decay"] = self.minweight_decay
+                group["weight_decay"] = self.minweight_decay
         # Guarded: the hook must stay callable with a bare optimizer and no Trainer
         # (unit tests, manual stepping). self.log needs Lightning's result collection.
         if getattr(self.trainer, "loggers", None):
+            # Named for what it now actually sets. The old "params/minweight_decay" tag
+            # tracked an attribute that never reached the optimizer, so it disagreed with
+            # LearningRateMonitor(log_weight_decay=True) — which reads the real
+            # group["weight_decay"] — for the whole run.
             self.log(
-                "params/minweight_decay",
+                "params/weight_decay",
                 self.minweight_decay,
                 on_step=True,
                 on_epoch=False,
