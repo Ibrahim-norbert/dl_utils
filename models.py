@@ -38,6 +38,7 @@ def _install_print_tee(save_dir: str) -> None:
 class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     """Masked Autoencoder with VisionTransformer backbone"""
 
+    # SHould
     _LAYER_DECAY_SCOPE = "backbone."
 
     def __init__(
@@ -54,7 +55,9 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         warmup_ratio=None,
         lr_div_factor=None,
         maxweight_decay=None,
-        minweight_decay=None, **kwargs
+        minweight_decay=None,
+        no_weight_decay_keywords=None,
+        **kwargs
     ):
         # pl.LightningModule.__init__ takes no args; extra model-config kwargs are
         # captured below by save_hyperparameters(), not forwarded to the base.
@@ -74,7 +77,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.accelerator = accelerator
         self.version_name = version_name
         self.save_dir = save_dir
-
+        self.no_weight_decay_keywords = tuple(no_weight_decay_keywords or ())
         self.save_hyperparameters()
 
 
@@ -284,49 +287,25 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     def add_model_specific_args(parent_parser):
 
         parent_parser.add_argument(
-            "--wandb_log_project",
-            default="mae_training_nuclei_texture",
-            type=str,
-            help="wandb project name",
-        )
-        parent_parser.add_argument("--stop_logging", action="store_true")
-        parent_parser.add_argument(
-            "--experiment_name", default="default_name_experiment", type=str
+            "--version_name", default="default_name_experiment", type=str
         )
 
-        parent_parser.add_argument(
-            "--mask_ratio",
-            default=0.33,
-            type=float,
-            help="Masking ratio (percentage of removed patches).",
-        )
-        parent_parser.add_argument(
-            "--embed_dim",
-            default=768,
-            type=int,
-            help="Dimensionality of the input embeddings",
-        )
-        parent_parser.add_argument(
-            "--encoder_embed_dim",
-            default=768,
-            type=int,
-            help="Number of features in encoder (if None, no projection layer is used)",
-        )
-        parent_parser.add_argument(
-            "--encoder_depth", default=12, type=int, help="Number of transformer blocks"
-        )
-        parent_parser.add_argument(
-            "--encoder_num_heads",
-            default=12,
-            type=int,
-            help="Number of attention heads",
-        )
-        parent_parser.add_argument(
-            "--mae_encoder", action="store_false", help="MAE ViT-B encoder"
-        )
-        parent_parser.add_argument(
-            "--pretrained", default="ViT", type=str, help="ViT pretrained ?"
-        )
+        # layer_decay: 0.9
+        # lr: 0.004
+        # lr_div_factor: 10.0
+        # lr_final_div_factor: 1000.0
+        # maxweight_decay: 0.2
+        # minweight_decay: 0.04
+        # warmup_ratio: 0.05
+        # val_analysis_label_col: labels
+        # val_analysis_vertices_col:
+        # - x
+        # - y
+        # val_num_prompts: 16
+        # val_probe: E:\\Project
+        # 1\\data\\Collection\\RealData - Florian - 30.10
+        # .2025\\npc_jonas_labelled
+        # crop\\patched\\annotations\\specifiedCrop\\npc_jonaspatch2_specialCrop.csv
 
         return parent_parser
 

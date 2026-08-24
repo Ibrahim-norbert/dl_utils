@@ -829,3 +829,8 @@ class CosineScheduler(object):
 
     def __getitem__(self, it):
         return self.get(it)
+
+
+def getArrayFromDF(df, column):
+    """Extracts and converts a column from a DataFrame to a NumPy array."""
+    return np.array(df[column].tolist())

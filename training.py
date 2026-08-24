@@ -466,7 +466,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
 
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
-        checkpoint = torch.load(ckptPath, map_location="cpu")
+        checkpoint = torch.load(ckptPath, map_location="cpu", weights_only=False)
         state_dict = checkpoint.get("state_dict", checkpoint)
         # Drop keys whose shapes don't match the module before loading, so an
         # architecture change in the tokenizer/decoder head doesn't abort the load

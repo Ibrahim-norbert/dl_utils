@@ -2,6 +2,7 @@ import glob
 import logging
 import numbers
 import os
+from builtins import str
 
 from numpy import ndarray, dtype
 from skimage.transform import resize
@@ -39,11 +40,10 @@ class BaseDataset:
 
         self.sampleMapperDFPath = sampleMapperDFPath
 
+        # TODO: Removed the validatin method for cell matrix
+
         # NOTE: Dataset dataframe must be a sample mapper, where each sample a path is
         self.sampleMapperDF: pd.DataFrame = self.loadDataFrame(sampleMapperDFPath)
-
-        self.samplePathRegex = samplePathRegex
-        self.validateSamplePaths()
 
         if self.SAMPLE_LABEL_COLUMN not in self.sampleMapperDF.columns:
             self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] = np.arange(len(self.sampleMapperDF))
@@ -57,17 +57,6 @@ class BaseDataset:
     def __len__(self) -> int:
         return self.samples.size
 
-    def validateSamplePaths(self) -> None:
-        """Contract the sample paths must satisfy — one directory per dataset.
-
-        A hook rather than an inline assertion so that datasets deliberately spanning
-        several directories (:class:`dl_utils.n5_datasets.MultiDirectoryN5Dataset`) can
-        replace the contract instead of working around it.
-        """
-        if self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].map(os.path.dirname).nunique() > 1:
-            raise ValueError(
-                "All sample paths must be located in the same directory"
-            )
 
     @staticmethod
     def getDataloader(dataset, batch_size, num_workers, persistent_workers, **kwargs):
@@ -306,7 +295,7 @@ class VerticesDataset(BaseDataset):
             [datasetDir], saveDir
         )
         return cls(
-            sampleColumnCSV="filePath",
+            sampleColumnCSV=BaseDataset.SAMPLE_PATH_COLUMN,
             datasetPath=datasetPath,
             sampleColumn=sampleColumn,
             datasetDir=None,  # already resolved above; prevent double call
@@ -314,9 +303,9 @@ class VerticesDataset(BaseDataset):
         )
     
     @staticmethod
-    def saveCSV(filePath: str, d_clustering_array: np.ndarray, columns: list) -> None:
+    def saveCSV(sample_path: str, d_clustering_array: np.ndarray, columns: list) -> None:
         df = pd.DataFrame(d_clustering_array, columns=columns)
-        df.to_csv(filePath, index=False)
+        df.to_csv(sample_path, index=False)
 
     @staticmethod
     def dir2CSV(dataDirs: list[str], save_dir: str) -> str:
@@ -331,7 +320,7 @@ class VerticesDataset(BaseDataset):
             files += glob.glob(os.path.join(dataDir, "**", "*.csv"), recursive=True)
         assert files, "Looks empty"
         os.makedirs(save_dir, exist_ok=True)
-        dataCol = "filePath"
+        dataCol = BaseDataset.SAMPLE_PATH_COLUMN
         df: pd.DataFrame = pd.DataFrame.from_dict({dataCol: files})
         path = os.path.join(save_dir, "smlm.csv")
         df.to_csv(path)

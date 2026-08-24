@@ -26,17 +26,16 @@ from typing import Any, Callable, List, Optional, Tuple, Union, Hashable
 
 import numpy as np
 import pandas as pd
-import skimage.io
 import z5py
 from matplotlib import pyplot as plt
 from numpy import ndarray, dtype
 from skimage.transform import resize
-from sklearn import preprocessing
 
-from dl_utils import MOBIE_LABEL_KEY, img2patch as img2ps, util, MOBIE_LABEL_KEY
+from dl_utils import img2patch as img2ps, util, MOBIE_LABEL_KEY
 from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils.datasets import BaseDataset
-from dl_utils.util_base import save2DFcolumn, savedataframe, merge_with_nucl_table
+from dl_utils.util import getArrayFromDF
+from dl_utils.util_base import save2DFcolumn
 from dl_utils.vizualizations import CustomMatplotlib
 
 logger = logging.getLogger(__name__)
@@ -45,9 +44,6 @@ SIGMA_THRESHOLD = 3
 CHUNK_MULTIPLE = 8
 BBOX_COLUMNS = ["bb_min_z", "bb_max_z", "bb_min_y", "bb_max_y", "bb_min_x", "bb_max_x"]
 
-def getArrayFromDF(df, column):
-    """Extracts and converts a column from a DataFrame to a NumPy array."""
-    return np.array(df[column].tolist())
 
 def getBBOXFromDF(df: pd.DataFrame, df_indx: Optional[Union[int, Hashable]]) -> np.ndarray:
     try:
