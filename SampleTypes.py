@@ -105,10 +105,13 @@ def _map_misc(misc, fn):
 
 @dataclass(frozen=True, eq=False)
 class EmbeddingsNumpy:
-    data: object
-    labels: Optional[object] = None
-    pred_labels: Optional[object] = None
+    data: np.ndarray
+    labels: Optional[np.ndarray] = None
+    pred_labels: Optional[np.ndarray] = None
     misc: Optional[dict] = None
+
+
+
 
 
 
@@ -124,26 +127,31 @@ class Embeddings:
     pred_labels: Optional[torch.Tensor] = None
     misc: Optional[dict] = None
 
-    def _apply(self, fn, skip_misc_keys: tuple = ()) -> "Embeddings":
-        """Map ``fn`` over every tensor (recursing into nested bundles/lists),
-        leaving ``misc`` keys named in ``skip_misc_keys`` exactly as-is."""
-        updates = {}
+    def _mapped(self, fn, skip_misc_keys: tuple = ()) -> dict:
+        """Field->value dict with ``fn`` mapped over every tensor (recursing
+        into nested bundles/lists), skipping the named ``misc`` keys."""
+        out = {}
         for f in dataclasses.fields(self):
             v = getattr(self, f.name)
             if f.name == "misc" and v is not None:
-                updates[f.name] = {
-                    k: (val if k in skip_misc_keys else _apply_recursive(val, fn))
-                    for k, val in v.items()
-                }
+                out[f.name] = {k: (val if k in skip_misc_keys else _apply_recursive(val, fn))
+                               for k, val in v.items()}
             else:
-                updates[f.name] = _apply_recursive(v, fn)
-        return replace(self, **updates)
+                out[f.name] = _apply_recursive(v, fn)
+        return out
+
+    def _apply(self, fn, skip_misc_keys: tuple = ()) -> "Embeddings":
+        return replace(self, **self._mapped(fn, skip_misc_keys))
+
+    def numpy(self) -> "EmbeddingsNumpy":
+        return EmbeddingsNumpy(**self._mapped(_to_numpy))
 
     def detach(self) -> "Embeddings":
         return self._apply(_t_detach)
 
     def detach_cpu(self) -> "Embeddings":
         return self._apply(_t_detach_cpu)
+
 
 @dataclass(frozen=False, eq=False)
 class EmbeddingsPrompts(Embeddings):

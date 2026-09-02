@@ -51,7 +51,7 @@ class BaseDataset:
             "Ensure sample mapper does not have duplicates"
         )
         self.samples: np.ndarray = self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN].to_numpy()
-        assert save_dir is not None and isinstance(save_dir, str), f"The save directory must be a string, not {save_dir}"
+        assert save_dir is not None and isinstance(save_dir, str) or isinstance(save_dir, Path), f"The save directory must be a string, not {save_dir}"
         self.save_dir: str = os.path.abspath(save_dir)
 
     def __len__(self) -> int:

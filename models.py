@@ -564,7 +564,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _train_linear_probe(self, emb_np, gt_labels_bin):
+    def _linearProbe(self, emb_np, gt_labels_bin):
         """Phase 4 — fit a :class:`SegHead` linear probe on the single-batch
         embeddings and return the predicted labels ``(N,)``.
         """
@@ -584,7 +584,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def run_linear_probe(self, emb, save_dir):
+    def _validate_linear_probe(self, emb, save_dir):
         """Fit + log the SegHead linear probe on the configured npc_jonas crop.
 
         Loads the fixed probe crop from :attr:`_VAL_PROBE` (falling back to
