@@ -834,3 +834,36 @@ class CosineScheduler(object):
 def getArrayFromDF(df, column):
     """Extracts and converts a column from a DataFrame to a NumPy array."""
     return np.array(df[column].tolist())
+
+
+import pickle
+import types
+
+
+class _MissingCheckpointClass:
+    """Placeholder for a class whose defining module is no longer importable."""
+
+
+def _tolerant_pickle_module():
+    """A pickle-module shim whose Unpickler substitutes placeholders for dead globals.
+
+    torch's UnpicklerWrapper subclasses `pickle_module.Unpickler` and delegates to
+    `super().find_class(...)`, so this is the exact interception point for the
+    ModuleNotFoundError raised by torch/serialization.py.
+    """
+
+    class _Unpickler(pickle.Unpickler):
+        def find_class(self, mod_name, name):
+            try:
+                return super().find_class(mod_name, name)
+            except (ModuleNotFoundError, AttributeError):
+
+                return type(name, (_MissingCheckpointClass,),
+                            {"__module__": mod_name})
+
+    shim = types.ModuleType("dl_utils._tolerant_pickle")
+    shim.Unpickler = _Unpickler
+    shim.load = pickle.load
+    shim.Pickler = pickle.Pickler
+    shim.dump = pickle.dump
+    return shim
