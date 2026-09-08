@@ -755,10 +755,10 @@ class EmbeddingAnalysis:
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: dict = {}, legend_title: str = "Classes",
-                       save_dir: str = "./", precomputed_colors: bool = False,
-                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True, **kwargs) -> plotly.graph_objs.Figure:
+                       save_dir: Optional[str] = "./", precomputed_colors: bool = False,
+                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
+                       show: bool = False, **kwargs) -> plotly.graph_objs.Figure:
         import plotly.express as px
-        from . import MoBie_coloring
 
         plot_df = self.results_df.copy()
 
@@ -823,6 +823,12 @@ class EmbeddingAnalysis:
             os.makedirs(save_dir, exist_ok=True)
             fig.write_image(os.path.join(
                 save_dir, f"{classColoumn}_{legend_title}.svg"))
+        # Displaying is independent of saving: this used to sit inside the branch
+        # above, so a caller could not save without also popping the figure open.
+        # Off by default - training/validation logging routes figures to
+        # TensorBoard/WandB and must not render anything. Notebooks either let
+        # Jupyter render the returned figure or pass show=True.
+        if show:
             fig.show()
         return fig
 
@@ -992,6 +998,7 @@ class EmbeddingAnalysis:
         metric: str = "cosine",
         linkage: str = "average",
         save_dir: str = None,
+        show: bool = False,
     ):
         """Hierarchical clustering dendrogram of class centroids in embedding space.
 
@@ -1048,7 +1055,8 @@ class EmbeddingAnalysis:
             fig.write_image(out, format="svg")
             print(f"[plot_dendrogram] Saved to {out}")
 
-        fig.show()
+        if show:  # see specialScatter: never render from a logging path
+            fig.show()
         return fig
 
     # ------------------------------------------------------------------ #
@@ -1225,6 +1233,7 @@ class EmbeddingAnalysis:
         self,
         save_dir: str = None,
         paga_threshold: float = 0.05,
+        show: bool = False,
         **trajectory_kwargs,
     ):
         """Build and return an interactive Plotly figure of the trajectory results.
@@ -1404,7 +1413,8 @@ class EmbeddingAnalysis:
             fig.write_html(out)
             print(f"[plot_trajectory] Saved to {out}")
 
-        fig.show()
+        if show:  # see specialScatter: never render from a logging path
+            fig.show()
         return fig
 
     def getRowsByLabel(self, label):
