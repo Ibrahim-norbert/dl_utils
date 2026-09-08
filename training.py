@@ -865,9 +865,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             latest_checkpoint_callback,
             early_stopping_callback,
             DeviceStatsMonitor(cpu_stats=False),
-            # log_weight_decay also tracks per-group WD (cross-checks any
-            # weight-decay schedule the model applies to its param groups).
-            LearningRateMonitor(logging_interval="step", log_weight_decay=True),
             IterationInfoCallback(
                 log_interval=int(self.kwargs.get("info_log_interval", 10))
             ),
