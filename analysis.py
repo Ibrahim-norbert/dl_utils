@@ -132,6 +132,17 @@ class ClusteringConfig:
 
 class EmbeddingAnalysis:
 
+    # Figures this class draws get their own seaborn context.  The module sets
+    # "poster" at import, which is right for a single-panel heatmap and wrong for
+    # anything carrying one label per row plus a legend.  Override per subclass
+    # (`plotContext = "talk"`) or per instance (`a.plotContext = "poster"`).
+    plotContext: str = "notebook"
+    fontScale: float = 1.0
+
+    def _plottingContext(self):
+        """seaborn context manager for figures this class draws."""
+        return sns.plotting_context(self.plotContext, font_scale=self.fontScale)
+
     # ------------------------------------------------------------------ #
     # Construction                                                         #
     # ------------------------------------------------------------------ #
@@ -143,6 +154,7 @@ class EmbeddingAnalysis:
         instancelabelColumn: str = MOBIE_LABEL_KEY,
         gtColumn: str = None,
         classMapping: dict = None,
+        label_order: list = None,
         save_dir: str = None,
         binary: bool = False,
         dbscan: bool = False,
@@ -181,6 +193,7 @@ class EmbeddingAnalysis:
             gtColumn=gtColumn,
             instancelabelColumn=instancelabelColumn,
             classMapping=classMapping,
+            label_order=label_order,
             save_dir=save_dir,
             clustering=ClusteringConfig(
                 dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
@@ -213,6 +226,16 @@ class EmbeddingAnalysis:
     def color_space(self):
         return MoBie_coloring.GlasbeyARGBLut()
 
+    @property
+    def classOrder(self) -> list:
+        """Class names in label order — ``classMapping`` key order, background (0) excluded.
+
+        ``_standardise_label_column`` assigns codes 1..N in label order, so the
+        sorted keys *are* that order.  This is the single definition of "class
+        order" for plots that group by name rather than by code.
+        """
+        return [self.classMapping[k] for k in sorted(self.classMapping) if k != 0]
+
     @classmethod
     def from_dataframe(
         cls,
@@ -222,6 +245,7 @@ class EmbeddingAnalysis:
         gtColumn: str = None,
         save_dir: str = None,
         classMapping: dict = None,
+        label_order: list = None,
         binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
@@ -244,6 +268,7 @@ class EmbeddingAnalysis:
             gtColumn=gtColumn,
             instancelabelColumn=instancelabelColumn,
             classMapping=classMapping,
+            label_order=label_order,
             save_dir=save_dir,
             clustering=ClusteringConfig(
                 dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
@@ -265,6 +290,7 @@ class EmbeddingAnalysis:
         save_dir: str = None,
         gtColumn: str = None,
         instancelabelColumn: str = LABEL_KEY,
+        label_order: list = None,
         leiden: bool = False,
         leiden_resolution: float = 1.0,
         leiden_n_iterations: int = 2,
@@ -292,6 +318,7 @@ class EmbeddingAnalysis:
             gtColumn=gtColumn,
             instancelabelColumn=instancelabelColumn,
             classMapping={},
+            label_order=label_order,
             save_dir=save_dir,
             clustering=ClusteringConfig(
                 dbscan=False, leiden=leiden, resolution=leiden_resolution,
@@ -309,6 +336,7 @@ class EmbeddingAnalysis:
         data_df: pd.DataFrame,
         gtColumn,
         classMapping: dict,
+        label_order: list | None = None,
     ) -> tuple["pd.DataFrame", str, dict]:
         """Convert gtColumn (list of condition columns or single column name) into
         a single integer label column in *data_df*.
@@ -316,6 +344,13 @@ class EmbeddingAnalysis:
         When *gtColumn* is already a string only the string→integer mapping is
         applied (if the column contains string values).  Returns
         ``(data_df, new_gtColumn_name, updated_classMapping)``.
+
+        *label_order* pins the order in which label values are assigned integer
+        codes — and therefore legend order, dendrogram leaves and colours, which
+        are all functions of the code.  Values absent from the data are skipped
+        and values absent from *label_order* are appended after it, so a superset
+        or a partial list are both safe.  It overrides the column order implied by
+        a list *gtColumn*; an explicit *classMapping* overrides both.
         """
         _df = data_df
         _label_order: list | None = None  # tracks original list order for int assignment
@@ -354,12 +389,13 @@ class EmbeddingAnalysis:
             if col_vals.dtype.kind in ("U", "S", "O"):
                 unique_vals = [v for v in pd.unique(col_vals) if not pd.isna(v)]
                 if not classMapping:
-                    if _label_order is not None:
-                        # use caller-supplied list order; append any unseen values after
-                        ordered = [v for v in _label_order if v in unique_vals]
+                    _order = label_order if label_order is not None else _label_order
+                    if _order is not None:
+                        # use caller-supplied order; append any unseen values after
+                        ordered = [v for v in _order if v in unique_vals]
                         ordered += [v for v in unique_vals if v not in ordered]
                     else:
-                        # single column: preserve first-appearance order from the data
+                        # no order given: preserve first-appearance order from the data
                         ordered = unique_vals
                     str_to_int = {v: i + 1 for i, v in enumerate(ordered)}
                     classMapping = {i: v for v, i in str_to_int.items()}
@@ -381,6 +417,7 @@ class EmbeddingAnalysis:
         classMapping,
         save_dir,
         clustering: ClusteringConfig,
+        label_order: list | None = None,
         default_class_column: str = "Class",
         subplots_kwargs: dict = None,
         metadDataFramePath: Optional[str] = None,
@@ -415,7 +452,7 @@ class EmbeddingAnalysis:
         # Standardise label column(s) into a single integer column before getLabels runs.
         if gtColumn is not None:
             self.data_df, gtColumn, classMapping = EmbeddingAnalysis._standardise_label_column(
-                self.data_df, gtColumn, classMapping or {}
+                self.data_df, gtColumn, classMapping or {}, label_order
             )
         self.gtColumn = gtColumn
         self.classMapping = classMapping or {}
@@ -545,11 +582,11 @@ class EmbeddingAnalysis:
         else:
             self.classMappedColumn = self.classifier_method
 
-        self.classification.createConfusionMatrixFigure(
+        fig = self.classification.createConfusionMatrixFigure(
             x=X_val, gt=y_val, classifier=self.classifier,
             save_dir=self.save_dir, mapping=mapping or self.classMapping, gtColumn=self.gtColumn
         )
-        return self.predLabels
+        return self.predLabels, fig
 
     # ------------------------------------------------------------------ #
     # Clustering                                                           #
@@ -633,8 +670,21 @@ class EmbeddingAnalysis:
             {"PCA x": pcs[:, 0], "PCA y": pcs[:, 1], "PCA z": pcs[:, 2]},
             index=self.data_df.index,
         )
+
+        # Keep the fitted model and the loadings; plotPCALoadings reads them.
+        self.pca_model = pca_model
+        self.loadings = pd.DataFrame(
+            pca_model.components_.T * np.sqrt(pca_model.explained_variance_),
+            columns=[f"PC{i+1}" for i in range(pca_model.n_components_)],
+            index=np.arange(self.embeddings.shape[1]),
+        )
+        print("PCA loadings:")
+        print(self.loadings)
+
         self.explained_variance_ratio = pca_model.explained_variance_ratio_[
             :3].sum()
+
+        
         self.concatDF(pca_df)
         return pcs
 
@@ -676,7 +726,24 @@ class EmbeddingAnalysis:
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
 
-    def plot_distance_matrix(self, metric: str = "cosine") -> Figure:
+    @staticmethod
+    def _returnFigure(fig: Figure, show: bool = False) -> Figure:
+        """Hand back a matplotlib figure without Jupyter drawing it twice.
+
+        pyplot keeps every figure built with plt.subplots in its registry, and
+        the inline backend flushes that registry at the end of a cell -- so a
+        figure that is returned *and* displayed renders twice.  Closing drops it
+        from the registry; the object still renders wherever it is displayed
+        explicitly, and savefig keeps working on it.  Matplotlib counterpart of
+        the `show` flag on specialScatter/plot_dendrogram.
+        """
+        if show:
+            from IPython.display import display
+            display(fig)
+        plt.close(fig)
+        return fig
+
+    def plot_distance_matrix(self, metric: str = "cosine", show: bool = False) -> Figure:
         """Plot a pairwise distance matrix sorted by GT class label.
 
         Uses the labelled training embeddings (``trainEmbeddings`` /
@@ -703,35 +770,221 @@ class EmbeddingAnalysis:
             if i < len(classes) - 1:
                 boundaries.append(positions[-1] + 0.5)
 
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.grid(False)
-        im = ax.imshow(D, aspect="auto", cmap="viridis", interpolation="nearest")
-        plt.colorbar(im, ax=ax, label=f"{metric} distance (row-normalised)")
+        # Built inside the context manager so the artists pick up its rc values.
+        with self._plottingContext():
+            fig, ax = plt.subplots(figsize=(10, 8))
+            ax.grid(False)
+            im = ax.imshow(D, aspect="auto", cmap="viridis", interpolation="nearest")
+            plt.colorbar(im, ax=ax, label=f"{metric} distance (row-normalised)")
 
-        for b in boundaries:
-            ax.axhline(b, color="white", lw=0.8, alpha=0.6)
-            ax.axvline(b, color="white", lw=0.8, alpha=0.6)
+            for b in boundaries:
+                ax.axhline(b, color="white", lw=0.8, alpha=0.6)
+                ax.axvline(b, color="white", lw=0.8, alpha=0.6)
 
-        ax.set_xticks(tick_pos)
-        ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
-        ax.set_yticks(tick_pos)
-        ax.set_yticklabels(tick_lbl, fontsize=8)
-        ax.set_xlabel("Class")
-        ax.set_ylabel("Class")
-        ax.set_title(
-            f"Pairwise {metric} distance matrix (row-normalised)\n"
-            f"({len(feats)} samples, sorted by GT label)"
-        )
-        plt.tight_layout()
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
+            ax.set_yticks(tick_pos)
+            ax.set_yticklabels(tick_lbl, fontsize=8)
+            ax.set_xlabel("Class")
+            ax.set_ylabel("Class")
+            ax.set_title(
+                f"Pairwise {metric} distance matrix (row-normalised)\n"
+                f"({len(feats)} samples, sorted by GT label)"
+            )
+            plt.tight_layout()
 
         save_dir: str | None = getattr(self, "save_dir", None)  # type: ignore[assignment]
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             fig.savefig(os.path.join(save_dir, f"distance_matrix_{metric}.png"), dpi=300)
 
-        return fig
+        return self._returnFigure(fig, show)
 
-    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None, precomputed_colors:bool=True):
+    def plotPCALoadings(
+        self,
+        n_components: int = 3,
+        by: str = "feature",
+        columnMapping: dict | list | None = None,
+        features: slice | list | None = None,
+        sort_by: str | None = "PC1",
+        palette: str | list = "Set2",
+        residual_label: str | None = None,
+        residual_color: str = "lightgrey",
+        figsize: tuple | None = None,
+        save_dir: str | None = None,
+        show: bool = False,
+    ) -> Figure:
+        """Stacked fractional bar plot of the PCA loadings, in either direction.
+
+        The variancePartition ``plotPercentBars`` idiom: every bar spans 100 %.
+
+        ``by="feature"`` draws one bar per input feature, split into the fraction
+        of *that feature's* variance carried by PC1, PC2, ... with the remaining
+        components pooled into a ``residual_label`` segment.  Because
+        ``self.embeddings`` is standardised, the squared loadings of a feature
+        sum to its total variance, so each bar normalises exactly.
+
+        ``by="component"`` answers the opposite question -- how much each feature
+        contributes to the strongest directions of variance.  One bar per
+        component, split by feature (squared loadings normalised down the column,
+        the standard PCA contribution), with each bar labelled by the component's
+        explained-variance ratio.
+
+        Parameters
+        ----------
+        n_components
+            Number of components: segments per bar (``by="feature"``) or bars
+            (``by="component"``).
+        columnMapping
+            Feature labels, keyed by position in the embedding vector
+            (``{0: "area (Nuclei)", ...}``) or given as a plain list in feature
+            order.  Unmapped features fall back to ``"feature {i}"``.
+        features
+            Optional subset/slice of features, applied by position
+            (``slice(0, 5)`` mirrors ``varPart[1:5, ]``).  Under
+            ``by="component"`` the features left out are pooled into the residual
+            segment -- worth using for wide embeddings, which would otherwise
+            produce one legend entry per dimension.
+        sort_by
+            Component whose values order the features, descending; ``None`` keeps
+            feature order.  Under ``by="feature"`` that orders the bars, under
+            ``by="component"`` the segments within every bar (the bars themselves
+            stay in PC order).
+
+        Type size comes from the class (``plotContext`` / ``fontScale``), not from
+        the module-level "poster" context, which crowds one-label-per-feature bars.
+        """
+        if by not in ("feature", "component"):
+            raise ValueError(f"by must be 'feature' or 'component', got {by!r}")
+        if not hasattr(self, "loadings"):
+            self.pca()
+
+        sq = self.loadings.pow(2)
+        mapping = dict(enumerate(columnMapping)) if isinstance(columnMapping, list) \
+            else (columnMapping or {})
+
+        def name(i):
+            return str(mapping.get(i, mapping.get(str(i), f"feature {i}")))
+
+        if by == "feature":
+            residual_label = residual_label or "Other PCs"
+            frac = sq.div(sq.sum(axis=1), axis=0)           # feature variance -> PCs
+            keep = list(frac.columns[:n_components])
+            frac = frac[keep].assign(**{residual_label: 1.0 - frac[keep].sum(axis=1)})
+            if features is not None:
+                frac = frac.iloc[features]
+            if sort_by:
+                frac = frac.sort_values(sort_by, ascending=False)
+            bars = [name(i) for i in frac.index]
+            xlabel = "Variance explained (%)"
+        else:
+            residual_label = residual_label or "Other features"
+            contrib = sq.div(sq.sum(axis=0), axis=1).iloc[:, :n_components]  # PC variance -> features
+            shown = contrib if features is None else contrib.iloc[features]
+            if sort_by:
+                shown = shown.sort_values(sort_by, ascending=False)
+            frac = shown.T                                  # index = PCs, columns = features
+            frac.columns = self._uniqueLabels([name(i) for i in shown.index], shown.index)
+            if len(shown) < len(contrib):
+                frac[residual_label] = 1.0 - frac.sum(axis=1)
+            bars = [f"{pc} ({r:.1%})" for pc, r in
+                    zip(frac.index, self.pca_model.explained_variance_ratio_)]
+            xlabel = "Contribution to component (%)"
+
+        bars = self._uniqueLabels(bars, frac.index)
+
+        segments = [c for c in frac.columns if c != residual_label]
+        colors = dict(zip(segments, sns.color_palette(palette, len(segments))))
+        colors[residual_label] = residual_color
+
+        # seaborn has no stacked barplot: draw reverse-cumulative widths so each
+        # narrower bar overpaints the left edge of the previous one.  Everything
+        # is built inside the context manager so the artists pick up its rc.
+        cum = frac.cumsum(axis=1) * 100
+        with self._plottingContext():
+            fig, ax = plt.subplots(figsize=figsize or (10, 0.6 * len(frac) + 2))
+            for col in reversed(frac.columns):
+                sns.barplot(x=cum[col].to_numpy(), y=bars, order=bars, orient="y",
+                            color=colors[col], label=col, errorbar=None, width=0.7, ax=ax)
+
+            ax.set(xlim=(0, 100), xlabel=xlabel, ylabel="")
+            handles, legend_labels = ax.get_legend_handles_labels()
+            ax.legend(handles[::-1], legend_labels[::-1], loc="center left",
+                      bbox_to_anchor=(1.02, 0.5), frameon=False)
+            sns.despine(left=True)
+            fig.tight_layout()
+
+        save_dir = save_dir if save_dir is not None else getattr(self, "save_dir", None)
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"pca_loadings_bars_by_{by}.png"),
+                        dpi=300, bbox_inches="tight")
+        return self._returnFigure(fig, show)
+
+    def plotFeatureMeans(self, columnMapping: dict | list, groupBy: str,
+                         features: slice | list | None = None, sort_by: str | None = None,
+                         palette: str | list = "Set2", figsize: tuple | None = None,
+                         save_dir: str | None = None, show: bool = False) -> Figure:
+        """Grouped bars of mean feature values, each feature scaled to its own maximum.
+
+        Means come from the *unscaled* vectors in ``data_df[self.type]``:
+        ``self.embeddings`` is standardised, so its per-feature means are 0.
+        Dividing each feature by its largest group mean puts the strongest group at
+        1.0 and reads the rest as a fraction of it, which is what lets features in
+        different units share one axis.
+
+        ``columnMapping`` labels features by position (``{0: "area (Nuclei)", ...}``)
+        or as a list in feature order.  ``groupBy`` resolves against ``results_df``
+        first, so cluster/prediction columns work, then ``data_df``; code-valued
+        label columns map back through ``self.classMapping`` (``_standardise_label_column``
+        stores them as floats).  ``sort_by="spread"``
+        puts the most discriminative features first, a group name sorts by that group.
+        """
+        frame = pd.DataFrame(getArrayFromDF(self.data_df, self.type), index=self.data_df.index)
+        frame = frame.iloc[:, features] if features is not None else frame
+
+        groups = self.results_df[groupBy] if groupBy in self.results_df else self.data_df[groupBy]
+        if self.classMapping and groups.dtype.kind in "iuf":
+            # Ordered categorical so groupby (and seaborn's hue) follow the class
+            # order rather than sorting the names alphabetically.  Unlabelled rows
+            # (code 0, absent from classOrder) become NaN and drop out.
+            groups = pd.Categorical(
+                groups.map(lambda v: self.classMapping.get(int(v), v) if pd.notna(v) else v),
+                categories=self.classOrder, ordered=True,
+            )
+
+        means = frame.groupby(groups, observed=True).mean().T   # features x groups
+        means = means.div(means.abs().max(axis=1), axis=0)      # each feature -> its own max
+
+        labels = dict(enumerate(columnMapping)) if isinstance(columnMapping, list) else columnMapping
+        means.index = [str(labels.get(k, labels.get(str(k), f"feature {k}"))) for k in means.index]
+
+        with self._plottingContext():
+            fig, ax = plt.subplots(figsize=figsize or (10, .3 * means.size + 1.5))
+            sns.barplot(data=means.rename_axis("feature").reset_index().melt("feature", var_name=groupBy),
+                        x="value", y="feature", hue=groupBy, orient="y",
+                        palette=palette, errorbar=None, ax=ax)
+            ax.set(xlabel="Mean value (fraction of per-feature maximum)", ylabel="")
+            ax.legend(loc="center left", bbox_to_anchor=(1.02, .5), frameon=False, title=groupBy)
+            sns.despine(left=True)
+            fig.tight_layout()
+
+        save_dir = save_dir if save_dir is not None else getattr(self, "save_dir", None)
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, "feature_means.png"), dpi=300, bbox_inches="tight")
+        return self._returnFigure(fig, show)
+
+    @staticmethod
+    def _uniqueLabels(labels: list, keys) -> list:
+        """Suffix duplicate labels with their key so bars/segments stay distinct."""
+        if len(set(labels)) == len(labels):
+            return list(labels)
+        return [f"{l} [{k}]" for l, k in zip(labels, keys)]
+
+    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None,
+                     precomputed_colors: bool = False, axis_range: tuple | None = (-1, 1),
+                     show_axes: bool = True):
         col = classColoumn if classColoumn is not None else self.classColumn
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
@@ -743,7 +996,9 @@ class EmbeddingAnalysis:
             classColoumn=col,
             legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
             save_dir=self.save_dir,
-            precomputed_colors=precomputed_colors
+            precomputed_colors=precomputed_colors,
+            axis_range=axis_range, show_axes=show_axes,
+            **self.subplots_kwargs
         )
 
     @staticmethod
@@ -757,10 +1012,23 @@ class EmbeddingAnalysis:
                        mapping: dict = {}, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
-                       show: bool = False, **kwargs) -> plotly.graph_objs.Figure:
+                       show: bool = False, axis_range: tuple | None = None,
+                       **kwargs) -> plotly.graph_objs.Figure:
         import plotly.express as px
 
         plot_df = self.results_df.copy()
+
+        if axis_range is not None:
+            # Rescale the cloud into `axis_range` and pin both axes to it, so the
+            # plot is centred on the origin with a fixed, readable scale. One
+            # shared factor for x and y: scaling them apart would stretch the
+            # component geometry the scatter exists to show.
+            lo, hi = axis_range
+            span = float(np.nanmax(np.abs(plot_df[[xColumn, yColumn]].to_numpy())))
+            if span > 0:
+                plot_df[[xColumn, yColumn]] = (
+                    plot_df[[xColumn, yColumn]] * ((hi - lo) / 2 / span) + (hi + lo) / 2
+                )
 
         if precomputed_colors:
             # Color column already contains plotly-compatible rgba strings — use directly
@@ -802,10 +1070,12 @@ class EmbeddingAnalysis:
         fig.update_layout(
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
                        visible=True, showline=show_axes, linecolor="black",
-                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
+                       ticks="outside" if show_axes else "", tickfont=dict(color="black"),
+                       range=list(axis_range) if axis_range is not None else None),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
                        visible=True, showline=show_axes, linecolor="black",
-                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
+                       ticks="outside" if show_axes else "", tickfont=dict(color="black"),
+                       range=list(axis_range) if axis_range is not None else None),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=True,
@@ -905,7 +1175,7 @@ class EmbeddingAnalysis:
             for lbl in self.instancelabels[self.results_df[f"proba_{cls}"].argsort()[-1:-n - 1:-1]]
         ]
 
-    def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500) -> Figure:
+    def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500, show: bool = False) -> Figure:
         """Compute and plot pairwise Gromov-Wasserstein distances between classes."""
         import ot
 
@@ -945,9 +1215,9 @@ class EmbeddingAnalysis:
             title="Gromov-Wasserstein Distance Between Classes",
             save_dir=self.save_dir,
         )
-        return fig
+        return self._returnFigure(fig, show)
 
-    def plot_kl_divergence_heatmap(self, max_samples: int = 500) -> Figure:
+    def plot_kl_divergence_heatmap(self, max_samples: int = 500, show: bool = False) -> Figure:
         """Compute and plot pairwise symmetrised KL divergence between classes (Gaussian approximation via LedoitWolf)."""
         classes = sorted(self.classMapping.keys())
         class_names = [self.classMapping[c] for c in classes]
@@ -991,7 +1261,7 @@ class EmbeddingAnalysis:
             title="Symmetrised KL Divergence Between Classes",
             save_dir=self.save_dir,
         )
-        return fig
+        return self._returnFigure(fig, show)
 
     def plot_dendrogram(
         self,

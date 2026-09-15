@@ -101,17 +101,18 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             raise ValueError("collate_fn received a batch of all-None items — check __getitem__ for errors")
         return default_collate(batch, *args, **kwargs)
 
-    # ------------------------------------------------------------------
-    # Validation contract
-    # ------------------------------------------------------------------
-    # The only hard contract is the *type* validation_step returns/accumulates:
-    # a per-batch dict whose (all-optional) keys are
-    #   LOSS_KEY, EMBED_DICT_EMBED, "coord", LABEL_KEY, "metrics dict".
-    # on_validation_epoch_end is deliberately NOT a fixed pipeline — subclasses
-    # may override it entirely, extend it via super(), or just call
-    # reduce_validation_outputs() to fold the per-batch dicts into one. This keeps
-    # each model free to define its own epoch-end while sharing the buffer and the
-    # reduction utility.
+
+    def attachValidationMetadata(self, objects: "pd.DataFrame") -> None:
+        """Push the object table down from the trainer, ahead of the first epoch.
+
+        The trainer's ``getTrainValDataloader`` is the one place holding both the
+        un-wrapped dataset and the model, so the table is handed over there instead of
+        being fetched back up out of ``trainer.val_dataloaders -> Subset -> .source``.
+        The *full* table is passed, not the validation slice: the probe addresses rows
+        by the position each sample carries as its label, and ``Subset`` preserves those
+        positions. A module driven outside that path calls this itself.
+        """
+        self.validation_metadata = objects
 
     def validation_step(self, batch, batch_idx) -> dict:
         """Default validation step: run shared_step, log, accumulate, return.
@@ -136,8 +137,9 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.validation_step_outputs.append(output)
         return output
 
-    def on_validation_epoch_start(self) -> None:
+    def on_validation_epoch_end(self) -> None:
         self.validation_step_outputs.clear()
+
 
     def reduce_validation_outputs(self, outputs: Union[list, None] = None) -> dict:
         """Fold the per-batch validation dicts into a single dict.
@@ -571,7 +573,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _log_probe_results(self, df, emb_np, pred_labels, gt_labels_bin, save_dir):
+    def _log_probe_results(self, pred_labels, gt_labels_bin):
         """Phase 5 — compute metrics, log F1, and run the full visual analysis."""
         pass
 
@@ -599,15 +601,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         :class:`SMLMSonata` log ``LinearProbe/val/f1`` from their respective
         ``on_validation_epoch_end`` hooks. Self-contained + fully guarded, so it is
         safe to call alongside a model's other epoch-end logging.
-        """
-        pass
-
-    @abstractmethod
-    def run_validation_epoch(self):
-        """Overridable epoch-end template. Subclasses may extend via ``super()``.
-
-        The base pass logs the npc_jonas linear probe; :class:`SMLMSonata` overrides
-        this to also log the feature space and the SSL crops.
         """
         pass
 

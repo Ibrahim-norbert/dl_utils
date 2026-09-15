@@ -125,6 +125,41 @@ def _log_scalar(experiment: Any, tag: str, value: float, step: int) -> None:
         experiment.log({tag: value}, step=step)
 
 
+def _log_figure(experiment: Any, tag: str, fig, step: int) -> None:
+    """Duck-typed figure dispatch, for plotly and matplotlib alike.
+
+    Lives here beside :func:`_log_scalar` rather than in one model family, because every
+    ``logAnalysis`` implementation needs it: the SONATA branch
+    (``smlm_sonata.models.base``) and the volume branch
+    (``representationlearning.models.SimCLR3DModel``) log the same PCA/UMAP figures to the
+    same loggers. ``None`` is accepted so a caller can pass a figure that failed to build.
+
+    TensorBoard has no plotly support, so a plotly figure is rasterised to a ``(3, H, W)``
+    tensor first; matplotlib figures go through ``add_figure`` unchanged.
+    """
+    if fig is None:
+        return
+    if hasattr(experiment, "add_image"):  # TensorBoard — probed first, as in _log_scalar
+        if hasattr(fig, "to_image"):  # plotly
+            experiment.add_image(tag, _plotly_to_tensor(fig), global_step=step)
+        else:
+            experiment.add_figure(tag, fig, global_step=step)
+    elif hasattr(experiment, "log"):  # WandB
+        import wandb
+
+        experiment.log({tag: wandb.Image(fig)}, step=step)
+
+
+def _plotly_to_tensor(fig):
+    """Rasterise a plotly figure to the ``(3, H, W)`` float tensor TensorBoard wants."""
+    import io
+
+    from PIL import Image
+    from torchvision.transforms import functional as TF
+
+    return TF.to_tensor(Image.open(io.BytesIO(fig.to_image(format="png"))))
+
+
 class IterationInfoCallback(pl.Callback):
     """Periodic one-line training status: loss, LR, data/batch time, ETA.
 
@@ -312,7 +347,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         for _prop in ("precision", "num_nodes", "devices"):
             _locals.pop(_prop, None)
         self.__dict__.update(_locals)
-
+        self.batch_size = batch_size
+        self.trainFrac = trainFrac
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
 
         self.modelConfig = modelConfig
@@ -365,7 +401,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # Skip the pre-training sanity-check validation pass: a validation
             # error there would otherwise abort the run before any training
             # metric is flushed, leaving TensorBoard empty.
-            num_sanity_val_steps=1,
+            num_sanity_val_steps=2,
             **args,
         )
 
@@ -478,7 +514,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint)
+        state_dict = checkpoint.get("checkpoint", checkpoint)
         # Drop keys whose shapes don't match the module before loading, so an
         # architecture change in the tokenizer/decoder head doesn't abort the load
         # (load_state_dict raises on a shape mismatch even with strict=False). These
@@ -504,7 +540,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
         """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
 
-        Handles both raw state dicts and Lightning checkpoints (nested under "state_dict").
+        Handles both raw state dicts and Lightning checkpoints (nested under "checkpoint").
         Filters out shape-mismatched keys before loading so architecture changes in the
         tokenizer or decoder head don't block the backbone weights from loading.
         Raises FileNotFoundError if the path is set but does not exist.
@@ -793,6 +829,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         self.save_hyperparameters()
 
         self.kwargs = kwargs
+
 
         # Metric-name prefixes each model family actually logs. Only families whose tags
         # diverge from the trainer's defaults need an entry; anything unlisted is skipped
@@ -1158,6 +1195,25 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
     def getModel(self, kwargs):
         pass
 
+    def splitDataset(self, dataset: datasets.BaseDataset, **kwargs):
+        n_total: int = len(dataset)
+        n_train = int(self.trainFrac * n_total)
+        n_val: int = n_total - n_train
+
+        train_ds, val_ds = random_split(dataset, [n_train, n_val], **kwargs)
+
+        return train_ds, val_ds
+
     @abstractmethod
     def getTrainValDataloader(self, dataset, segmentor):
-        pass
+        # SSL models (e.g. SMLMSonata) bind their multi-view pipeline via
+        # traincollate_fn; supervised models return the same eval collate for both.
+        train_ds, val_ds = self.splitDataset(dataset=dataset)
+
+        collate_fn = getattr(segmentor, "collate_fn", None)
+        traincollate_fn = getattr(segmentor, "traincollate_fn", None)
+
+        train_ds = self.getTrainDataloader(train_ds, collate_fn=traincollate_fn)
+        val_ds = self.getValDataloader(val_ds=val_ds, collate_fn=collate_fn)
+
+        return train_ds, val_ds
