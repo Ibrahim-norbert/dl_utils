@@ -323,7 +323,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         reproducibility_seed=43,
         num_workers=1,
         fast_dev_run=False,
-        dataset: str = "SMLM",
         trainFrac: float = 0.8,
         batch_size=1,
         shuffle=True,
@@ -337,6 +336,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         precision=None,
         fsdpConfig: typing.Union[None, dict] = None,
         args={},
+        **kwargs
     ) -> types.NoneType:
 
         _locals = locals()
@@ -404,6 +404,166 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             num_sanity_val_steps=2,
             **args,
         )
+
+    @classmethod
+    def get_args(
+        cls,
+        default_config_files: list[str] | None = None,
+        description: str = "Training",
+        **parser_kwargs,
+    ) -> configargparse.ArgumentParser:
+        """Return a configargparse parser pre-populated with all BaseClassTrainer params.
+
+        Subclasses should override this, call ``super().get_args(...)``, and
+        extend the returned parser with their own arguments::
+
+            @classmethod
+            def get_args(cls, default_config_files=None, **kw):
+                parser = super().get_args(default_config_files, **kw)
+                parser.add_argument("--my_param", type=int, default=42)
+                return parser
+
+        Parameters
+        ----------
+        default_config_files:
+            Paths probed automatically when ``--config_file`` is not supplied
+            on the CLI (forwarded to ``configargparse.ArgumentParser``).
+        description:
+            Parser description string.
+        **parser_kwargs:
+            Additional keyword arguments forwarded to
+            ``configargparse.ArgumentParser``.
+
+        Returns
+        -------
+        configargparse.ArgumentParser
+            Parser with ``--config_file`` (``is_config_file=True``) and one
+            argument per ``BaseClassTrainer.__init__`` parameter.
+        """
+        #
+        # from argparse import ArgumentParser
+        #
+        # def main(args):
+        #     model = LightningModule()
+        #     trainer = Trainer.from_argparse_args(args)
+        #     trainer.fit(model)
+        #
+        # if __name__ == "__main__":
+        #     parser = ArgumentParser()
+        #     parser = Trainer.add_argparse_args(parser)
+        #     args = parser.parse_args()
+        #
+        #     main(args)
+        #
+
+        parser = configargparse.ArgumentParser(
+            description=description,
+            default_config_files=default_config_files or [],
+            config_file_parser_class=configargparse.YAMLConfigFileParser,
+            allow_abbrev=False,
+            **parser_kwargs,
+        )
+        parser.add_argument(
+            "--config_file", is_config_file=True,
+            help="Path to a YAML config file. CLI args take priority over config file values.",
+        )
+        # --- identifiers ---
+        parser.add_argument("--modelName", default="Model")
+        parser.add_argument("--save_dir", default="")
+        parser.add_argument("--ckptPath", default=None)
+        parser.add_argument("--weightsCkptPath", default="")
+        # --- training loop ---
+        parser.add_argument("--max_epochs", type=int, default=None)
+        parser.add_argument("--batch_size", type=int, default=None)
+        parser.add_argument("--num_workers", type=int, default=None)
+        parser.add_argument("--trainFrac", type=float, default=None)
+        parser.add_argument("--shuffle", action="store_true", default=None)
+        parser.add_argument("--fast_dev_run", type=int, default=None)
+        parser.add_argument("--reproducibility_seed", type=int, default=None)
+        parser.add_argument("--dataset", default=None)
+        parser.add_argument("--limit_val_batches", type=float, default=None)
+        parser.add_argument("--accumulate_grad_batches", type=int, default=None)
+        # --- distributed training ---
+        # Boolean switch: `use_fsdp: true` in a YAML config (or --use_fsdp on the
+        # CLI) activates FSDP; the strategy itself is built by the trainer
+        # subclass' _resolve_strategy from the model class' wrap policy.
+        parser.add_argument("--use_fsdp", action="store_true", default=False)
+        parser.add_argument("--devices", default="auto")
+        parser.add_argument("--num_nodes", type=int, default=None)
+        parser.add_argument("--precision", default=None)
+        # Nested FSDP tuning block (YAML string or dict), e.g. sharding_strategy.
+        parser.add_argument("--fsdpConfig", default=None)
+        return parser
+
+
+    @classmethod
+    def _model_config_defaults(cls) -> dict:
+        """Subclasses override to supply default model-architecture config keys.
+
+        These keys are popped from the flat args namespace and merged into
+        ``modelConfig`` by :meth:`parse_args`.
+        """
+        return {}
+
+    @classmethod
+    def _dataset_config_defaults(cls) -> dict:
+        """Subclasses override to supply default dataset config keys.
+
+        These keys are popped from the flat args namespace and merged into
+        ``datasetConfig`` by :meth:`parse_args`.
+        """
+        return {}
+
+    @classmethod
+    def parse_args(cls) -> dict:
+        """Parse CLI / config-file args and return a kwargs dict for ``cls(**kwargs)``.
+
+        Handles:
+        * ``--num_workers`` auto-detection when still ``None`` after parsing
+        * ``modelConfig`` / ``datasetConfig`` nested-YAML-string unpacking
+        * Flat model/dataset keys merged over per-class defaults
+
+        Subclasses should override :meth:`_model_config_defaults` and
+        :meth:`_dataset_config_defaults` rather than overriding this method.
+        """
+        args = cls.get_args().parse_args()
+        if getattr(args, "num_workers", None) is None:
+            num_threads = os.cpu_count()
+            base = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
+            # Windows spawns each worker (re-importing torch's full CUDA DLL stack);
+            # too many concurrent loads exhaust the commit limit -> WinError 1114 (shm.dll).
+            cap = 4 if sys.platform == "win32" else base
+            args.num_workers = min(base, cap)
+        print(f"CPU threads (num_workers): {args.num_workers}")
+
+        args_dict = vars(args)
+
+        def _as_dict(value) -> dict:
+            if not value:
+                return {}
+            if isinstance(value, dict):
+                return value
+            return yaml.safe_load(value) or {}
+
+        nested_model = _as_dict(args_dict.pop("modelConfig", None))
+        nested_dataset = _as_dict(args_dict.pop("datasetConfig", None))
+
+        # fsdpConfig arrives as a YAML string from configargparse; normalize to a
+        # dict (or None when absent) so _resolve_strategy gets a plain mapping.
+        args_dict["fsdpConfig"] = _as_dict(args_dict.pop("fsdpConfig", None)) or None
+
+        model_defaults = cls._model_config_defaults()
+        dataset_defaults = cls._dataset_config_defaults()
+
+        # Pop any flat keys that belong to these configs so they don't leak into **kwargs
+        flat_model = {k: args_dict.pop(k) for k in list(model_defaults.keys()) if k in args_dict}
+        flat_dataset = {k: args_dict.pop(k) for k in list(dataset_defaults.keys()) if k in args_dict}
+
+        # Priority: defaults < nested YAML block > flat args (nested wins when present)
+        args_dict["modelConfig"] = {**model_defaults, **(nested_model if nested_model else flat_model)}
+        args_dict["datasetConfig"] = {**dataset_defaults, **(nested_dataset if nested_dataset else flat_dataset)}
+
+        return args_dict
 
     def _resolve_strategy(
         self,
@@ -502,7 +662,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             self.datasetConfig = Namespace(**datasetConfig)
             return self.hparams
 
-    def load_checkpoint(self, ckptPath, map_location="cpu"):
+    @staticmethod
+    def load_checkpoint(ckptPath, map_location="cpu"):
         """torch.load, retrying with placeholders when the pickle names a dead module."""
         try:
             return torch.load(ckptPath, map_location=map_location, weights_only=False)
@@ -514,7 +675,17 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
-        state_dict = checkpoint.get("checkpoint", checkpoint)
+        # Lightning's ModelCheckpoint nests the weights under "state_dict"; the older
+        # hand-rolled saves in this project used "checkpoint"; a bare torch.save of a
+        # state_dict has neither. Reading only "checkpoint" handed load_state_dict the
+        # whole checkpoint (epoch/loops/optimizer_states/...), which strict=False then
+        # accepted while loading not one weight.
+        for key in ("state_dict", "checkpoint"):
+            if isinstance(checkpoint, dict) and isinstance(checkpoint.get(key), dict):
+                state_dict = checkpoint[key]
+                break
+        else:
+            state_dict = checkpoint
         # Drop keys whose shapes don't match the module before loading, so an
         # architecture change in the tokenizer/decoder head doesn't abort the load
         # (load_state_dict raises on a shape mismatch even with strict=False). These
@@ -527,7 +698,13 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         if shape_skipped:
             state_dict = {k: v for k, v in state_dict.items() if k not in shape_skipped}
         missing, unexpected = module.load_state_dict(state_dict=state_dict, strict=False)
-        print(f"[getModel] Loaded weights from: {ckptPath}")
+        loaded = len(module_state) - len(missing)
+        print(f"[getModel] Loaded weights from: {ckptPath} "
+              f"({loaded}/{len(module_state)} parameters)")
+        if not loaded:
+            # The silent-garbage case: predictions from a randomly initialised model.
+            print("  WARNING: no parameter name in the checkpoint matched this module — "
+                  "nothing was loaded. Check that the checkpoint belongs to this model.")
         if shape_skipped:
             print(f"  Shape-mismatched keys skipped ({len(shape_skipped)}): "
                   f"{shape_skipped[:5]}{'...' if len(shape_skipped) > 5 else ''}")
@@ -611,6 +788,67 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         return hparams
 
+    # Keys of a model's saved ``hyper_parameters`` that must never be handed back to a
+    # model factory: ``backbone`` is a live nn.Module that ``BaseModelClass`` captured in
+    # its own save_hyperparameters(), and the factory builds that from the other keys.
+    _CKPT_HPARAM_SKIP: tuple[str, ...] = ("backbone",)
+
+    @classmethod
+    def configFromRun(cls, ckptPath, configPath=None) -> dict:
+        """Rebuild a finished run's constructor kwargs from what training left on disk.
+
+        Two artefacts describe a run and neither is sufficient alone: the YAML
+        :meth:`saveConfig` wrote beside the checkpoints is the *trainer* config (``dataset``,
+        ``datasetConfig``, ``modelName``, ``batch_size`` ...), while the checkpoint's
+        ``hyper_parameters`` is the *model's* own init kwargs
+        (``BaseModelClass.save_hyperparameters``) and so covers architecture keys the YAML
+        may never have carried. The YAML wins wherever both define a key — it is the config
+        the run was actually launched with — and the checkpoint only fills the gaps.
+
+        ``weightsCkptPath`` defaults to ``ckptPath`` so :meth:`getModel` loads the trained
+        weights through :meth:`_load_weights_if_specified` on its own. A predict path that
+        forgets ``ckpt_path=`` then still embeds with the trained model instead of silently
+        returning embeddings from a randomly initialised backbone.
+        """
+        ckptPath = Path(ckptPath)
+        if configPath is None:
+            candidates = sorted(ckptPath.parent.glob("*.yaml"))
+            if len(candidates) != 1:
+                raise FileNotFoundError(
+                    f"Expected exactly one saveConfig YAML next to {ckptPath.name} in "
+                    f"{ckptPath.parent}, found {len(candidates)}: "
+                    f"{[c.name for c in candidates]}. Pass configPath explicitly.")
+            configPath = candidates[0]
+
+        with open(configPath, "r") as f:
+            text = f.read()
+        try:
+            config: dict = yaml.safe_load(text) or {}
+        except yaml.YAMLError:
+            # saveConfig used yaml.dump, so a run whose save_dir was a Path wrote
+            # !!python/object tags that safe_load refuses. The file is this run's own
+            # artefact, so re-read it with the full loader rather than failing.
+            print(f"[configFromRun] {configPath} carries python object tags; "
+                  f"re-reading with the full YAML loader.")
+            config = yaml.unsafe_load(text) or {}
+        config.pop("config_file", None)
+
+        checkpoint = cls.load_checkpoint(ckptPath)
+        modelConfig = dict(config.get("modelConfig") or {})
+        for key, value in dict(checkpoint.get("hyper_parameters") or {}).items():
+            if key not in modelConfig and key not in cls._CKPT_HPARAM_SKIP:
+                modelConfig[key] = value
+
+        config["modelConfig"] = modelConfig
+        config["datasetConfig"] = dict(config.get("datasetConfig") or {})
+        config["ckptPath"] = str(ckptPath)
+        config["ckptEpoch"] = checkpoint.get("epoch")
+        config.setdefault("weightsCkptPath", str(ckptPath))
+        # save_dir may have been dumped as a Path; every consumer treats it as a string.
+        if config.get("save_dir"):
+            config["save_dir"] = str(config["save_dir"])
+        return config
+
     def saveConfig(self) -> types.NoneType:
         # Writing the data to a YAML file
 
@@ -618,10 +856,14 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # Save to yaml file
             path: str = os.path.join(self.save_dir, self.__class__.__name__)
 
-            # Any argparse Namespaces in hparams are converted to dicts
+            # Any argparse Namespaces in hparams are converted to dicts, and Paths to
+            # strings — yaml.dump would otherwise write a !!python/object tag that
+            # getConfig/configFromRun's safe_load cannot read back.
             for key, value in vars(self.hparams).items():
                 if isinstance(value, argparse.Namespace):
                     setattr(self.hparams, key, vars(value))
+                elif isinstance(value, Path):
+                    setattr(self.hparams, key, str(value))
 
             # TODO: Read through following for improvement:
             # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
@@ -929,7 +1171,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             shuffle=self.hparams.shuffle,
             datasetConfig=self.hparams.datasetConfig,
             modelConfig=self.modelConfig,
-            dataset=self.hparams.dataset,
             fast_dev_run=self.hparams.fast_dev_run,
             limit_val_batches=limit_val_batches,
             accumulate_grad_batches=accumulate_grad_batches,
@@ -1004,12 +1245,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
 
     @classmethod
-    def get_args(
-        cls,
-        default_config_files: list[str] | None = None,
-        description: str = "Training",
-        **parser_kwargs,
-    ) -> configargparse.ArgumentParser:
+    def get_args(cls, default_config_files=None, **kw):
         """Return a configargparse parser pre-populated with all BaseClassTrainer params.
 
         Subclasses should override this, call ``super().get_args(...)``, and
@@ -1038,44 +1274,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             Parser with ``--config_file`` (``is_config_file=True``) and one
             argument per ``BaseClassTrainer.__init__`` parameter.
         """
-        parser = configargparse.ArgumentParser(
-            description=description,
-            default_config_files=default_config_files or [],
-            config_file_parser_class=configargparse.YAMLConfigFileParser,
-            allow_abbrev=False,
-            **parser_kwargs,
-        )
-        parser.add_argument(
-            "--config_file", is_config_file=True,
-            help="Path to a YAML config file. CLI args take priority over config file values.",
-        )
-        # --- identifiers ---
-        parser.add_argument("--modelName", default="Model")
-        parser.add_argument("--save_dir", default="")
-        parser.add_argument("--ckptPath", default=None)
-        parser.add_argument("--weightsCkptPath", default="")
-        # --- training loop ---
-        parser.add_argument("--max_epochs", type=int, default=200)
-        parser.add_argument("--batch_size", type=int, default=1)
-        parser.add_argument("--num_workers", type=int, default=None)
-        parser.add_argument("--trainFrac", type=float, default=0.9)
-        parser.add_argument("--shuffle", action="store_true", default=True)
-        parser.add_argument("--fast_dev_run", type=int, default=0)
-        parser.add_argument("--reproducibility_seed", type=int, default=43)
-        parser.add_argument("--dataset", default="SMLMDataset")
-        parser.add_argument("--limit_val_batches", type=float, default=1.0)
-        parser.add_argument("--accumulate_grad_batches", type=int, default=1)
-        # --- distributed training ---
-        # Boolean switch: `use_fsdp: true` in a YAML config (or --use_fsdp on the
-        # CLI) activates FSDP; the strategy itself is built by the trainer
-        # subclass' _resolve_strategy from the model class' wrap policy.
-        parser.add_argument("--use_fsdp", action="store_true", default=False)
-        parser.add_argument("--devices", default="auto")
-        parser.add_argument("--num_nodes", type=int, default=1)
-        parser.add_argument("--precision", default=None)
-        # Nested FSDP tuning block (YAML string or dict), e.g. sharding_strategy.
-        parser.add_argument("--fsdpConfig", default=None)
-        # --- callbacks ---
+        parser = super().get_args(default_config_files, **kw)
+
         parser.add_argument("--ModelCheckpoint_save_top_k", type=int, default=3)
         parser.add_argument("--ModelCheckpoint_monitor", default="Train LOSS")
         parser.add_argument("--ModelCheckpoint_mode", default="min")
@@ -1089,75 +1289,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser
-
-    @classmethod
-    def _model_config_defaults(cls) -> dict:
-        """Subclasses override to supply default model-architecture config keys.
-
-        These keys are popped from the flat args namespace and merged into
-        ``modelConfig`` by :meth:`parse_args`.
-        """
-        return {}
-
-    @classmethod
-    def _dataset_config_defaults(cls) -> dict:
-        """Subclasses override to supply default dataset config keys.
-
-        These keys are popped from the flat args namespace and merged into
-        ``datasetConfig`` by :meth:`parse_args`.
-        """
-        return {}
-
-    @classmethod
-    def parse_args(cls) -> dict:
-        """Parse CLI / config-file args and return a kwargs dict for ``cls(**kwargs)``.
-
-        Handles:
-        * ``--num_workers`` auto-detection when still ``None`` after parsing
-        * ``modelConfig`` / ``datasetConfig`` nested-YAML-string unpacking
-        * Flat model/dataset keys merged over per-class defaults
-
-        Subclasses should override :meth:`_model_config_defaults` and
-        :meth:`_dataset_config_defaults` rather than overriding this method.
-        """
-        args = cls.get_args().parse_args()
-        if getattr(args, "num_workers", None) is None:
-            num_threads = os.cpu_count()
-            base = int(num_threads * 0.8) if isinstance(num_threads, int) else 8
-            # Windows spawns each worker (re-importing torch's full CUDA DLL stack);
-            # too many concurrent loads exhaust the commit limit -> WinError 1114 (shm.dll).
-            cap = 4 if sys.platform == "win32" else base
-            args.num_workers = min(base, cap)
-        print(f"CPU threads (num_workers): {args.num_workers}")
-
-        args_dict = vars(args)
-
-        def _as_dict(value) -> dict:
-            if not value:
-                return {}
-            if isinstance(value, dict):
-                return value
-            return yaml.safe_load(value) or {}
-
-        nested_model = _as_dict(args_dict.pop("modelConfig", None))
-        nested_dataset = _as_dict(args_dict.pop("datasetConfig", None))
-
-        # fsdpConfig arrives as a YAML string from configargparse; normalize to a
-        # dict (or None when absent) so _resolve_strategy gets a plain mapping.
-        args_dict["fsdpConfig"] = _as_dict(args_dict.pop("fsdpConfig", None)) or None
-
-        model_defaults = cls._model_config_defaults()
-        dataset_defaults = cls._dataset_config_defaults()
-
-        # Pop any flat keys that belong to these configs so they don't leak into **kwargs
-        flat_model = {k: args_dict.pop(k) for k in list(model_defaults.keys()) if k in args_dict}
-        flat_dataset = {k: args_dict.pop(k) for k in list(dataset_defaults.keys()) if k in args_dict}
-
-        # Priority: defaults < nested YAML block > flat args (nested wins when present)
-        args_dict["modelConfig"] = {**model_defaults, **(nested_model if nested_model else flat_model)}
-        args_dict["datasetConfig"] = {**dataset_defaults, **(nested_dataset if nested_dataset else flat_dataset)}
-
-        return args_dict
 
     def _compute_save_dir(self) -> str:
         """Hook for subclasses to define the root save directory.

@@ -1,35 +1,46 @@
+from __future__ import annotations
+
 import base64
+import itertools
 import logging
-from typing import Optional
-from dataclasses import dataclass
 import os
 import pathlib
 import warnings
+from dataclasses import dataclass
 from io import BytesIO
+from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly
 import seaborn as sns
-import skimage
 from matplotlib.figure import Figure
 from PIL import Image
 from sklearn.cluster import DBSCAN
+from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
-from sklearn.covariance import LedoitWolf
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from dl_utils import LABEL_KEY, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED, MoBie_coloring
-from dl_utils.vizualizations import CustomMatplotlib
-from dl_utils.util import getArrayFromDF
 
-sns.set_context("poster")
+from dl_utils import (EMBED_DICT_EMBED, LABEL_KEY, MASKED_FEATURES_KEY,
+                      MOBIE_LABEL_KEY, MoBie_coloring)
+from dl_utils.util import getArrayFromDF
+from dl_utils.vizualizations import CustomMatplotlib
+
+# NOTE: no sns.set_context() at import.  Setting a context here mutated global
+# matplotlib state for every importer of dl_utils.analysis, which EmbeddingAnalysis
+# then had to undo per figure via `_plottingContext`.  Figures now take their
+# context from that manager alone; the one figure that wants "poster" asks for it.
+#
+# skimage.io is likewise imported lazily at its two call sites: the top-level
+# `import skimage` never bound the `.io` submodule, so `skimage.io.imread` only
+# worked when some other module had imported it first -- and that submodule import
+# is what trips the MKL/Intel-OpenMP crash in this environment.
 
 # kaleido (Plotly static-image export) drives a headless Chromium via the
 # choreographer package; both loggers have no explicit level of their own, so
@@ -41,6 +52,59 @@ logging.getLogger("kaleido").setLevel(logging.WARNING)
 logging.getLogger("choreographer").setLevel(logging.WARNING)
 
 
+def _scalarColumns(df: pd.DataFrame) -> list[str]:
+    """Columns holding plain scalars -- the ones that belong in ``results_df``.
+
+    Tests the first valid value per column rather than every cell.  These frames
+    are homogeneous per column and carry embedding vectors as lists, so the old
+    ``.apply(isinstance, ...)`` over every cell of every column dominated
+    construction time on large tables.
+    """
+    def isScalar(col: pd.Series) -> bool:
+        idx = col.first_valid_index()
+        return idx is None or not isinstance(col[idx], (list, dict, np.ndarray))
+
+    return [c for c in df.columns
+            if df[c].dtype.kind in "fiuUSO" and isScalar(df[c])]
+
+
+def _isBinaryColumn(col: pd.Series) -> bool:
+    """True when every non-null value in *col* is 0 or 1."""
+    try:
+        return pd.to_numeric(col.dropna()).isin([0, 1]).all()
+    except (ValueError, TypeError):
+        return False
+
+
+def _oneHotLabel(row, columns: list):
+    """The name of the single active column in a one-hot *row*, else NaN."""
+    active = [c for c in columns if float(row[c]) == 1.0]
+    return active[0] if len(active) == 1 else np.nan
+
+
+def _formatLabelValue(v) -> str:
+    """Render one cell of a composite label, collapsing ``1.0`` to ``"1"``."""
+    if pd.isna(v):
+        return "NA"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _klDivergence(mu_p, sigma_p, mu_q, sigma_q) -> float:
+    """KL(P || Q) between two multivariate Gaussians."""
+    sigma_q_inv = np.linalg.inv(sigma_q)
+    diff = mu_q - mu_p
+    _, logdet_p = np.linalg.slogdet(sigma_p)
+    _, logdet_q = np.linalg.slogdet(sigma_q)
+    return 0.5 * (
+        np.trace(sigma_q_inv @ sigma_p)
+        + diff @ sigma_q_inv @ diff
+        - len(mu_p)
+        + logdet_q - logdet_p
+    )
+
+
 def _png_buffer_to_data_url(buf: BytesIO) -> str:
     """Encode the PNG bytes held in *buf* as a ``data:image/png;base64`` URL."""
     buf.seek(0)
@@ -49,6 +113,8 @@ def _png_buffer_to_data_url(buf: BytesIO) -> str:
 
 
 def convert_array_to_data_url(path) -> str:
+    import skimage.io
+
     array = skimage.io.imread(path)
     fig, ax = plt.subplots(figsize=(3, 3))
     ax.imshow(array, cmap="gray")
@@ -61,52 +127,59 @@ def convert_array_to_data_url(path) -> str:
 
 class Classification:
 
+    # Factories rather than instances: the old dict constructed all four estimators
+    # on every call just to select one.  LinearRegression is a *regressor* kept for
+    # backwards compatibility -- it has no `classes_`/`predict_proba`, and
+    # `EmbeddingAnalysis.classify` guards the paths that need them.
+    _FACTORIES: dict[str, Callable] = {
+        "KNN": lambda metric: KNeighborsClassifier(n_neighbors=5, metric=metric),
+        "LogisticRegression": lambda metric: LogisticRegression(max_iter=1000, random_state=42),
+        "RandomForest": lambda metric: RandomForestClassifier(n_estimators=100, random_state=42),
+        "LinearRegression": lambda metric: LinearRegression(),
+    }
+
     @staticmethod
     def train_classifier(embeddings, labels, method="KNN", metric="cosine"):
-        classifiers = {
-            "KNN": KNeighborsClassifier(n_neighbors=5, metric=metric),
-            "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-            "RandomForest": RandomForestClassifier(n_estimators=100, random_state=42),
-            "LinearRegression": LinearRegression()
-        }
-        if method not in classifiers:
+        if method not in Classification._FACTORIES:
             raise ValueError(
                 f"Unsupported classifier method: {method}. "
-                f"Available: {list(classifiers.keys())}"
+                f"Available: {list(Classification._FACTORIES)}"
             )
-        classifier = classifiers[method]
-        classifier.fit(embeddings, labels)
-        return classifier
+        return Classification._FACTORIES[method](metric).fit(embeddings, labels)
 
     @staticmethod
-    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = {}, gtColumn="") -> Figure:
-        y_pred = classifier.predict(x)
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None,
+                                    mapping: dict = None, gtColumn="") -> Figure:
+        mapping = mapping or {}
         ks: list[int] = classifier.classes_
-        cm = confusion_matrix(gt, y_pred, normalize="true")
-        ticks = [mapping.get(k, k) for k in ks] if mapping is not None else ks
+        cm = confusion_matrix(gt, classifier.predict(x), normalize="true")
+        ticks = [mapping.get(k, k) for k in ks]
 
         n = len(ks)
-        cell_size = max(0.6, min(1.2, 12 / n))
-        fig_size = max(4, n * cell_size)
+        fig_size = max(4, n * max(0.6, min(1.2, 12 / n)))
         annot = n <= 20
         fontsize = max(6, min(12, int(120 / n)))
 
-        fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
-        ax: plt.Axes = sns.heatmap(
-            cm, ax=ax, annot=annot, cmap="Blues",
-            xticklabels=ticks, yticklabels=ticks, cbar=True,
-            fmt=".2f" if annot else "",
-            annot_kws={"size": fontsize} if annot else {},
-        )
-        ax.set_xlabel("Predicted Labels")
-        ax.set_ylabel("Ground Truth Labels")
-        plt.xticks(rotation=45, ha="right", fontsize=fontsize)
-        plt.yticks(rotation=0, fontsize=fontsize)
-        plt.tight_layout()
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            plt.savefig(os.path.join(save_dir, f"{gtColumn}_confusion_matrix.png"), dpi=300)
-        plt.close(fig)
+        # This is the one figure that wanted the module-level "poster" context, so it
+        # now asks for it explicitly instead of every importer paying for it.
+        with sns.plotting_context("poster"):
+            fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
+            sns.heatmap(
+                cm, ax=ax, annot=annot, cmap="Blues",
+                xticklabels=ticks, yticklabels=ticks, cbar=True,
+                fmt=".2f" if annot else "",
+                annot_kws={"size": fontsize} if annot else {},
+            )
+            ax.set_xlabel("Predicted Labels")
+            ax.set_ylabel("Ground Truth Labels")
+            # OO API: the old plt.xticks/plt.tight_layout/plt.savefig acted on the
+            # *current* figure and worked here only because it happened to be this one.
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize)
+            plt.setp(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
+            fig.tight_layout()
+
+        CustomMatplotlib.saveFig(fig, save_dir=save_dir,
+                                 filename=f"{gtColumn}_confusion_matrix.png")
         return fig
 
     @staticmethod
@@ -132,9 +205,9 @@ class ClusteringConfig:
 
 class EmbeddingAnalysis:
 
-    # Figures this class draws get their own seaborn context.  The module sets
-    # "poster" at import, which is right for a single-panel heatmap and wrong for
-    # anything carrying one label per row plus a legend.  Override per subclass
+    # Figures this class draws get their own seaborn context.  "notebook" is right
+    # for anything carrying one label per row plus a legend; the single-panel
+    # confusion matrix asks for "poster" itself.  Override per subclass
     # (`plotContext = "talk"`) or per instance (`a.plotContext = "poster"`).
     plotContext: str = "notebook"
     fontScale: float = 1.0
@@ -144,18 +217,40 @@ class EmbeddingAnalysis:
         return sns.plotting_context(self.plotContext, font_scale=self.fontScale)
 
     # ------------------------------------------------------------------ #
+    # ClusteringConfig aliases                                             #
+    # ------------------------------------------------------------------ #
+
+    def _configProperty(field: str) -> property:  # noqa: N805 - class-body helper
+        """Read/write alias onto ``self.clustering``.
+
+        These six names used to be *copies* of the ClusteringConfig fields, assigned
+        once at construction, so ``ea.leiden`` and ``ea.clustering.leiden`` could
+        silently drift apart.  As properties there is exactly one value.
+        """
+        return property(lambda self: getattr(self.clustering, field),
+                        lambda self, value: setattr(self.clustering, field, value))
+
+    dbscan                 = _configProperty("dbscan")
+    leiden                 = _configProperty("leiden")
+    leiden_resolution      = _configProperty("resolution")
+    leiden_n_iterations    = _configProperty("n_iterations")
+    leiden_n_neighbors     = _configProperty("n_neighbors")
+    leiden_distance_metric = _configProperty("distance_metric")
+    del _configProperty
+
+    # ------------------------------------------------------------------ #
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
     def __init__(
         self,
-        df_path: str,
+        df_path: str | None = None,
         type: str = EMBED_DICT_EMBED,
         instancelabelColumn: str = MOBIE_LABEL_KEY,
-        gtColumn: str = None,
-        classMapping: dict = None,
-        label_order: list = None,
-        save_dir: str = None,
+        gtColumn: str | list[str] | None = None,
+        classMapping: dict | None = None,
+        label_order: list | None = None,
+        save_dir: str | None = None,
         binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
@@ -164,53 +259,68 @@ class EmbeddingAnalysis:
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
         metadDataFramePath: Optional[str] = None,
-        classifier_method: str = "LogisticRegression",
-        greyBackground:bool = False,
-        **kwargs,
+        classifier_method: str | None = "LogisticRegression",
+        greyBackground: bool = False,
+        data_df: pd.DataFrame | None = None,
+        embeddings: np.ndarray | None = None,
+        default_class_column: str = "Class",
     ) -> None:
-        if classMapping is None:
-            classMapping = {}
-        assert isinstance(df_path, str) and df_path.endswith(".json"), \
-            "Dataframe path must be a path to a JSON file."
-        if save_dir is None:
-            save_dir = os.path.dirname(df_path)
-        self.df_path: str = df_path
-        self.type: str = type
-        self.data_df: pd.DataFrame = pd.read_json(df_path)
-        print(f"Available coloumns: {self.data_df.columns.tolist()}")
-        embeddings = getArrayFromDF(self.data_df, type)
-        nan_mask = np.isnan(embeddings)
-        assert not nan_mask.any(
-        ), f"Yes we have {nan_mask.sum()} nans in the array"
+        """Analyse a set of embeddings.
 
-        
-        assert np.unique(embeddings.flatten()).__len__(
-        ) > 1, f"The embeddings are uninformative with the constant value of {np.unique(embeddings.flatten())}"
+        Give exactly one source: *df_path* (a JSON table), *data_df* (an in-memory
+        table whose *type* column holds the vectors), or *embeddings* together with
+        *data_df* as metadata -- see :meth:`_resolveSource`.  The two classmethod
+        constructors are named shortcuts for the latter two forms; they are ordinary
+        calls to this constructor, not instances forged with ``__new__``.
 
-        self.embeddings: np.ndarray = StandardScaler().fit_transform(embeddings)
+        *classifier_method* of ``None`` trains no classifier and colours plots by the
+        ground-truth column instead.
 
-        self._init_common(
-            gtColumn=gtColumn,
-            instancelabelColumn=instancelabelColumn,
-            classMapping=classMapping,
-            label_order=label_order,
-            save_dir=save_dir,
-            clustering=ClusteringConfig(
-                dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
-                n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
-                distance_metric=leiden_distance_metric,
-            ),
-            default_class_column="Class",
-            metadDataFramePath=metadDataFramePath,
-            classifier_method=classifier_method,
-            greyBackground=greyBackground,
-            **kwargs,
+        There is deliberately no ``**kwargs``: it only ever fed an
+        ``assert not kwargs``, which replaced Python's own precise TypeError for an
+        unexpected keyword with a weaker assertion that vanishes under ``python -O``.
+        """
+        # -- inputs --------------------------------------------------------
+        self.df_path: str | None = df_path
+        self.type: str | None = type
+        self.data_df, vectors = self._resolveSource(df_path, data_df, embeddings, type)
+        self.embeddings: np.ndarray = self._standardiseEmbeddings(vectors)
+
+        # -- configuration -------------------------------------------------
+        self.instancelabelColumn = instancelabelColumn
+        self.classifier_method = classifier_method
+        self.greyBackground = greyBackground
+        self.classColumn = default_class_column
+        self.classMappedColumn = "Mapped"
+        self.subplots_kwargs = {"s": 6}
+        self.classification = Classification   # kept: part of the public surface
+        self.metadDataFramePath = metadDataFramePath
+        self.clustering = ClusteringConfig(
+            dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
+            n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
+            distance_metric=leiden_distance_metric,
         )
-        self.predLabels = (
+        self.save_dir = self._prepareSaveDir(save_dir, df_path)
+
+        # -- table preparation ---------------------------------------------
+        if metadDataFramePath is not None:
+            self._mergeMetadata(metadDataFramePath)
+        self.data_df, self.gtColumn, self.classMapping = self._standardise_label_column(
+            self.data_df, gtColumn, classMapping or {}, label_order)
+        self.results_df = self.data_df[_scalarColumns(self.data_df)].copy()
+        self.getLabels()
+        print(f"Embeddings shape: {self.embeddings.shape}")
+
+        # -- labels ---------------------------------------------------------
+        # classify() assigns predLabels itself.  The old code assigned its
+        # (labels, figure) tuple here, leaving predLabels a *tuple* for the whole
+        # lifetime of the object.
+        if self._has_gt and classifier_method is not None:
             self.classify(binary=binary, mapping=classMapping)
-            if self._has_gt
-            else np.zeros(len(self.data_df), dtype=int)
-        )
+        else:
+            self.classifier = None
+            self.predLabels = (self.gtlabels if self._has_gt
+                               else np.zeros(len(self.data_df), dtype=int))
 
         # Add ground truth column as mapping
         self.results_df["Mapping_gtColumns"] = [self.classMapping.get(label, label) for label in self.gtlabels]
@@ -219,8 +329,85 @@ class EmbeddingAnalysis:
         print("We have the following columns in the results DataFrame:", self.results_df.columns.tolist())
 
         if self.classMapping and self._has_gt:
-            self.plot_gromov_wasserstein_heatmap()
-            self.plot_kl_divergence_heatmap()
+            self._plotClassDiagnostics()
+
+    # ------------------------------------------------------------------ #
+    # Construction steps                                                   #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _resolveSource(df_path, data_df, embeddings, type) -> tuple[pd.DataFrame, np.ndarray]:
+        """Resolve the three accepted input forms to ``(data_df, embeddings)``.
+
+        Exactly one form applies, checked in order of specificity:
+
+        * *embeddings* + *data_df* -- a pre-computed array with a metadata table;
+        * *data_df*                -- an in-memory table, vectors in its *type* column;
+        * *df_path*                -- the same table on disk as JSON.
+
+        Making the input form a parameter is what lets every entry point reach the
+        real ``__init__``; the alternate constructors previously had no way in and
+        forged instances with ``cls.__new__(cls)``.
+        """
+        if embeddings is not None:
+            if data_df is None:
+                raise ValueError("`embeddings` must be accompanied by `data_df` as metadata.")
+            return data_df.reset_index(drop=True).copy(), np.asarray(embeddings)
+        if data_df is not None:
+            return data_df.copy(), getArrayFromDF(data_df, type)
+        if not (isinstance(df_path, str) and df_path.endswith(".json")):
+            raise ValueError(
+                f"Dataframe path must be a path to a JSON file, got {df_path!r}. "
+                "Pass `data_df=` or `embeddings=` for the in-memory forms."
+            )
+        frame = pd.read_json(df_path)
+        print(f"Available coloumns: {frame.columns.tolist()}")
+        return frame, getArrayFromDF(frame, type)
+
+    @staticmethod
+    def _standardiseEmbeddings(vectors: np.ndarray) -> np.ndarray:
+        """Validate and z-score the embedding matrix.
+
+        These checks were ``assert``s, which are stripped under ``python -O`` -- the
+        wrong tool for validating what a caller handed in.
+        """
+        if np.isnan(vectors).any():
+            raise ValueError(f"Embeddings contain {int(np.isnan(vectors).sum())} NaN value(s).")
+        if len(np.unique(vectors)) <= 1:
+            raise ValueError(
+                f"Embeddings are uninformative: constant value {np.unique(vectors)}."
+            )
+        return StandardScaler().fit_transform(vectors)
+
+    @staticmethod
+    def _prepareSaveDir(save_dir: str | None, df_path: str | None) -> str | None:
+        """Resolve and create the output directory, defaulting beside *df_path*.
+
+        The old code created the *parent* and left ``self.save_dir`` itself
+        uncreated, which is why most writers re-ran makedirs defensively -- and why
+        ``plot_dendrogram``, which did not, failed on its first call.
+        """
+        if save_dir is None and df_path is None:
+            return None
+        base = save_dir if save_dir is not None else os.path.dirname(df_path)
+        resolved = os.path.join(base, "EmbeddingAnalysis")
+        os.makedirs(resolved, exist_ok=True)
+        return resolved
+
+    def _mergeMetadata(self, path: str) -> None:
+        """Left-join a metadata table onto ``data_df`` on the instance-label column."""
+        readers = {".csv": pd.read_csv, ".xlsx": pd.read_excel, ".json": pd.read_json}
+        suffix = pathlib.Path(path).suffix.lower()
+        if suffix not in readers or not os.path.exists(path):
+            raise ValueError(f"Metadata path must be an existing "
+                             f"{'/'.join(readers)} file, got {path!r}")
+        # .json was accepted by the old guard and then handed to read_excel.
+        meta = readers[suffix](path)
+        if self.instancelabelColumn not in meta.columns:
+            raise ValueError(f"Instance label column {self.instancelabelColumn!r} "
+                             f"not found in metadata DataFrame {path!r}.")
+        self.data_df = self.data_df.merge(meta, on=self.instancelabelColumn, how="left")
+        print(f"Metadata DataFrame loaded from: {path}")
 
     @property
     def color_space(self):
@@ -242,10 +429,10 @@ class EmbeddingAnalysis:
         data_df: pd.DataFrame,
         type: str = MASKED_FEATURES_KEY,
         instancelabelColumn: str = MOBIE_LABEL_KEY,
-        gtColumn: str = None,
-        save_dir: str = None,
-        classMapping: dict = None,
-        label_order: list = None,
+        gtColumn: str | list[str] | None = None,
+        save_dir: str | None = None,
+        classMapping: dict | None = None,
+        label_order: list | None = None,
         binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
@@ -253,33 +440,30 @@ class EmbeddingAnalysis:
         leiden_n_iterations: int = 2,
         leiden_n_neighbors: int = 15,
         leiden_distance_metric: str = "euclidean",
-        metadDataFramePath: str = None,
+        metadDataFramePath: str | None = None,
+        classifier_method: str | None = "LogisticRegression",
+        greyBackground: bool = False,
     ) -> "EmbeddingAnalysis":
-        if classMapping is None:
-            classMapping = {}
-        instance = cls.__new__(cls)
-        instance.df_path = None
-        instance.type = type
-        instance.data_df = data_df.copy()
-        instance.embeddings = StandardScaler().fit_transform(
-            getArrayFromDF(instance.data_df, type)
-        )
-        instance._init_common(
-            gtColumn=gtColumn,
-            instancelabelColumn=instancelabelColumn,
-            classMapping=classMapping,
-            label_order=label_order,
-            save_dir=save_dir,
-            clustering=ClusteringConfig(
-                dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
-                n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
-                distance_metric=leiden_distance_metric,
-            ),
-            metadDataFramePath=metadDataFramePath,
-            default_class_column="cluster",
-            subplots_kwargs={"s": 1},
-        )
+        """Construct from an in-memory table; vectors come from its *type* column.
 
+        An ordinary call to ``__init__`` -- this used to forge an instance with
+        ``cls.__new__(cls)`` and hand-seed its attributes, because ``__init__``
+        could only read from a JSON path.  It also trains a classifier when a
+        *gtColumn* is given, as ``__init__`` always has; the *binary* parameter was
+        accepted and silently unused before.
+        """
+        instance = cls(
+            data_df=data_df, type=type, instancelabelColumn=instancelabelColumn,
+            gtColumn=gtColumn, save_dir=save_dir, classMapping=classMapping,
+            label_order=label_order, binary=binary, dbscan=dbscan, leiden=leiden,
+            leiden_resolution=leiden_resolution,
+            leiden_n_iterations=leiden_n_iterations,
+            leiden_n_neighbors=leiden_n_neighbors,
+            leiden_distance_metric=leiden_distance_metric,
+            metadDataFramePath=metadDataFramePath,
+            classifier_method=classifier_method, greyBackground=greyBackground,
+        )
+        instance.subplots_kwargs = {"s": 1}   # read at plot time; not an init concern
         return instance
 
     @classmethod
@@ -287,10 +471,10 @@ class EmbeddingAnalysis:
         cls,
         embeddings: np.ndarray,
         meta_df: "pd.DataFrame",
-        save_dir: str = None,
-        gtColumn: str = None,
+        save_dir: str | None = None,
+        gtColumn: str | list[str] | None = None,
         instancelabelColumn: str = LABEL_KEY,
-        label_order: list = None,
+        label_order: list | None = None,
         leiden: bool = False,
         leiden_resolution: float = 1.0,
         leiden_n_iterations: int = 2,
@@ -299,51 +483,37 @@ class EmbeddingAnalysis:
     ) -> "EmbeddingAnalysis":
         """Construct directly from a raw embedding array and a metadata DataFrame.
 
-        Unlike ``__init__`` and ``from_dataframe``, the embeddings are supplied
-        as a pre-computed ``np.ndarray``.  No classifier is trained; scatter
-        plots are coloured by *gtColumn* (or uniformly when absent).
+        Unlike the other two forms the embeddings are supplied as a pre-computed
+        ``np.ndarray``.  No classifier is trained (``classifier_method=None``);
+        scatter plots are coloured by *gtColumn*, or uniformly when absent.
         """
-        instance = cls.__new__(cls)
-        instance.df_path = None
-        instance.type = None
-        instance.data_df = meta_df.reset_index(drop=True).copy()
-        instance.embeddings = StandardScaler().fit_transform(embeddings)
-        if gtColumn is None:
-            gt_present = False
-        elif isinstance(gtColumn, list):
-            gt_present = all(c in meta_df.columns for c in gtColumn)
-        else:
-            gt_present = gtColumn in meta_df.columns
-        instance._init_common(
-            gtColumn=gtColumn,
-            instancelabelColumn=instancelabelColumn,
-            classMapping={},
-            label_order=label_order,
-            save_dir=save_dir,
-            clustering=ClusteringConfig(
-                dbscan=False, leiden=leiden, resolution=leiden_resolution,
-                n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
-                distance_metric=leiden_distance_metric,
-            ),
-            default_class_column=("_".join(gtColumn) if isinstance(gtColumn, list) else gtColumn) if gt_present else "Class",
+        columns = [gtColumn] if isinstance(gtColumn, str) else (gtColumn or [])
+        present = bool(columns) and all(c in meta_df.columns for c in columns)
+        return cls(
+            embeddings=embeddings, data_df=meta_df, gtColumn=gtColumn,
+            instancelabelColumn=instancelabelColumn, label_order=label_order,
+            save_dir=save_dir, leiden=leiden, leiden_resolution=leiden_resolution,
+            leiden_n_iterations=leiden_n_iterations,
+            leiden_n_neighbors=leiden_n_neighbors,
+            leiden_distance_metric=leiden_distance_metric,
+            classifier_method=None,
+            default_class_column="_".join(columns) if present else "Class",
         )
-        # Colour by ground-truth label; skip classifier training
-        instance.predLabels = instance.gtlabels
-        return instance
 
     @staticmethod
     def _standardise_label_column(
         data_df: pd.DataFrame,
-        gtColumn,
+        gtColumn: str | list[str] | None,
         classMapping: dict,
         label_order: list | None = None,
-    ) -> tuple["pd.DataFrame", str, dict]:
-        """Convert gtColumn (list of condition columns or single column name) into
-        a single integer label column in *data_df*.
+    ) -> tuple["pd.DataFrame", str | None, dict]:
+        """Convert *gtColumn* into a single integer label column in *data_df*.
 
-        When *gtColumn* is already a string only the string→integer mapping is
-        applied (if the column contains string values).  Returns
-        ``(data_df, new_gtColumn_name, updated_classMapping)``.
+        *gtColumn* may be a list of condition columns -- collapsed into one combined
+        column, one-hot when every column is binary and joined value-wise otherwise
+        -- or a single column name, in which case only the string->integer mapping
+        applies.  ``None`` passes straight through, so callers need no guard.
+        Returns ``(data_df, new_gtColumn_name, updated_classMapping)``.
 
         *label_order* pins the order in which label values are assigned integer
         codes — and therefore legend order, dendrogram leaves and colours, which
@@ -352,136 +522,46 @@ class EmbeddingAnalysis:
         or a partial list are both safe.  It overrides the column order implied by
         a list *gtColumn*; an explicit *classMapping* overrides both.
         """
-        _df = data_df
-        _label_order: list | None = None  # tracks original list order for int assignment
+        if gtColumn is None:
+            return data_df, None, classMapping
+
+        frame = data_df
+        columnOrder: list | None = None   # the order implied by a list gtColumn
 
         if isinstance(gtColumn, list):
-            _label_order = list(gtColumn)  # preserve caller-specified order
-            combined_col = "_".join(gtColumn)
-            subset = _df[gtColumn]
-
-            def _is_binary(col):
-                try:
-                    return pd.to_numeric(col.dropna()).isin([0, 1]).all()
-                except (ValueError, TypeError):
-                    return False
-
-            _df = _df.copy()
-            if all(_is_binary(subset[c]) for c in gtColumn):
-                def _onehot_label(row):
-                    active = [c for c in gtColumn if float(row[c]) == 1.0]
-                    return active[0] if len(active) == 1 else np.nan
-                _df[combined_col] = subset.apply(_onehot_label, axis=1)
+            columnOrder = list(gtColumn)  # preserve caller-specified order
+            combined = "_".join(gtColumn)
+            subset = frame[gtColumn]
+            frame = frame.copy()
+            if all(_isBinaryColumn(subset[c]) for c in gtColumn):
+                frame[combined] = subset.apply(_oneHotLabel, axis=1, columns=gtColumn)
             else:
-                def _fmt(v):
-                    if pd.isna(v):
-                        return "NA"
-                    if isinstance(v, float) and v.is_integer():
-                        return str(int(v))
-                    return str(v)
-                _df[combined_col] = (
-                    subset.apply(lambda col: col.map(_fmt)).agg("_".join, axis=1)
-                )
-            gtColumn = combined_col
+                frame[combined] = (subset.apply(lambda col: col.map(_formatLabelValue))
+                                         .agg("_".join, axis=1))
+            gtColumn = combined
 
-        if gtColumn in _df.columns:
-            col_vals = getArrayFromDF(_df, gtColumn)
-            if col_vals.dtype.kind in ("U", "S", "O"):
-                unique_vals = [v for v in pd.unique(col_vals) if not pd.isna(v)]
-                if not classMapping:
-                    _order = label_order if label_order is not None else _label_order
-                    if _order is not None:
-                        # use caller-supplied order; append any unseen values after
-                        ordered = [v for v in _order if v in unique_vals]
-                        ordered += [v for v in unique_vals if v not in ordered]
-                    else:
-                        # no order given: preserve first-appearance order from the data
-                        ordered = unique_vals
-                    str_to_int = {v: i + 1 for i, v in enumerate(ordered)}
-                    classMapping = {i: v for v, i in str_to_int.items()}
+        if gtColumn in frame.columns:
+            values = getArrayFromDF(frame, gtColumn)
+            if values.dtype.kind in ("U", "S", "O"):
+                seen = [v for v in pd.unique(values) if not pd.isna(v)]
+                if classMapping:
+                    toInt = {v: k for k, v in classMapping.items()}
                 else:
-                    str_to_int = {v: k for k, v in classMapping.items()}
-                if _df is data_df:
-                    _df = _df.copy()
-                _df[gtColumn] = np.array(
-                    [str_to_int.get(v, np.nan) for v in col_vals], dtype=float
-                )
+                    order = label_order if label_order is not None else columnOrder
+                    if order is None:
+                        ordered = seen   # no order given: first-appearance in the data
+                    else:
+                        # caller-supplied order; append any unseen values after it
+                        ordered = [v for v in order if v in seen]
+                        ordered += [v for v in seen if v not in ordered]
+                    toInt = {v: i + 1 for i, v in enumerate(ordered)}
+                    classMapping = {i: v for v, i in toInt.items()}
+                if frame is data_df:
+                    frame = frame.copy()
+                frame[gtColumn] = np.array(
+                    [toInt.get(v, np.nan) for v in values], dtype=float)
 
-        return _df, gtColumn, classMapping
-
-    def _init_common(
-        self,
-        *,
-        gtColumn,
-        instancelabelColumn,
-        classMapping,
-        save_dir,
-        clustering: ClusteringConfig,
-        label_order: list | None = None,
-        default_class_column: str = "Class",
-        subplots_kwargs: dict = None,
-        metadDataFramePath: Optional[str] = None,
-        classifier_method: str = "LogisticRegression",
-        greyBackground: bool = False,
-        **kwargs,
-    ) -> None:
-        """Shared initialisation for every constructor.
-
-        Each entry point (``__init__``, :meth:`from_dataframe`,
-        :meth:`fromEmbeddingArrayAndMetaDataFrame`) first populates ``self.data_df``
-        and ``self.embeddings``, then delegates here. As a plain instance method,
-        alternate constructors call ``instance._init_common(...)`` directly rather
-        than threading ``instance`` through a static helper.
-        """
-        assert not kwargs, f"Unexpected keyword argument(s): {sorted(kwargs)}"
-        self.instancelabelColumn = instancelabelColumn
-        self.classMapping = classMapping
-        self.save_dir = os.path.join(
-            save_dir, "EmbeddingAnalysis") if save_dir is not None else None
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-        self.metadDataFramePath = metadDataFramePath
-        if metadDataFramePath is not None and os.path.exists(metadDataFramePath) and metadDataFramePath.endswith((".csv", ".xlsx", ".json")):
-            data_df = pd.read_csv(metadDataFramePath) if metadDataFramePath.endswith(
-                ".csv") else pd.read_excel(metadDataFramePath)
-            assert instancelabelColumn in data_df.columns, f"Instance label column '{instancelabelColumn}' not found in metadata DataFrame."
-            self.data_df = self.data_df.merge(
-                data_df, on=instancelabelColumn, how="left")
-            print(f"Metadata DataFrame loaded from: {metadDataFramePath}")
-
-        # Standardise label column(s) into a single integer column before getLabels runs.
-        if gtColumn is not None:
-            self.data_df, gtColumn, classMapping = EmbeddingAnalysis._standardise_label_column(
-                self.data_df, gtColumn, classMapping or {}, label_order
-            )
-        self.gtColumn = gtColumn
-        self.classMapping = classMapping or {}
-
-        # Grouped config is the source of truth; the flat attributes below are
-        # kept for backwards compatibility (e.g. ``cluster()`` reads ``self.leiden``).
-        self.clustering = clustering
-        self.dbscan = clustering.dbscan
-        self.leiden = clustering.leiden
-        self.leiden_resolution = clustering.resolution
-        self.leiden_n_iterations = clustering.n_iterations
-        self.leiden_n_neighbors = clustering.n_neighbors
-        self.leiden_distance_metric = clustering.distance_metric
-        self.classifier_method = classifier_method
-        self.classification = Classification
-        self.classMappedColumn = "Mapped"
-        self.classColumn = default_class_column
-        self.greyBackground = greyBackground
-        self.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {
-            "s": 6}
-        scalar_cols = [
-            c for c in self.data_df.columns
-            if self.data_df[c].dtype.kind in ("f", "i", "u", "U", "S", "O")
-            and not self.data_df[c].apply(lambda x: isinstance(x, (list, dict, np.ndarray))).any()
-        ]
-        self.results_df = self.data_df[scalar_cols].copy()
-
-        self.getLabels()
-        print(f"Embeddings shape: {self.embeddings.shape}")
+        return frame, gtColumn, classMapping
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -500,7 +580,7 @@ class EmbeddingAnalysis:
 
         Label *derivation* — list→combined-column joining, one-hot detection,
         and string→int mapping — is performed once upstream in
-        :meth:`_standardise_label_column` (called from ``_init_common``).
+        :meth:`_standardise_label_column`, called from ``__init__``.
         By the time this runs ``self.gtColumn`` is always a single column name
         whose values are numeric, so this method only handles the remaining
         bookkeeping: the zero-offset shift, instance labels, and the
@@ -519,7 +599,6 @@ class EmbeddingAnalysis:
             if 0 in self.gtlabels[valid_mask]:
                 self.gtlabels = np.where(
                     valid_mask, self.gtlabels + 1, self.gtlabels)
-                self.data_df[self.gtColumn] = self.gtlabels
 
         self.instancelabels: np.ndarray = getArrayFromDF(
             self.data_df, self.instancelabelColumn)
@@ -527,7 +606,8 @@ class EmbeddingAnalysis:
         if nan_mask.sum() < n:
             warnings.warn(
                 f"Labels contain {n - nan_mask.sum()} inactive/NaN value(s). "
-                f"Training on {nan_mask.sum()} of {len(self.embeddings)} samples."
+                f"Training on {nan_mask.sum()} of {n} samples.",
+                UserWarning, stacklevel=2,
             )
             # Turn nan values to 0 but filter for training classifier
             self.gtlabels[~nan_mask] = 0
@@ -538,12 +618,25 @@ class EmbeddingAnalysis:
                 self.gtlabels.dtype, np.floating) else self.gtlabels
             self.trainEmbeddings = self.embeddings
 
+        # Write the labels back unconditionally.  The old code did this only inside
+        # the zero-shift branch above, so data_df and gtlabels could disagree about
+        # which integer codes the NaN rows carry.
+        if self._has_gt:
+            self.data_df[self.gtColumn] = self.gtlabels
+
     # ------------------------------------------------------------------ #
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
-    def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights=None) -> np.ndarray:
+    def classify(self, binary: bool = False, train_size: float = 0.6,
+                 mapping: dict = None, classifier_weights=None) -> tuple[np.ndarray, Figure | None]:
+        """Fit (or reuse) a classifier and record its predictions on ``results_df``.
 
+        Returns ``(predLabels, confusionFigure)``.  Both are also stored on the
+        instance, as ``self.predLabels`` and ``self.confusionFigure`` -- the return
+        annotation used to claim a bare ``np.ndarray`` while returning the pair,
+        which is how ``__init__`` came to store a tuple in ``self.predLabels``.
+        """
         if classifier_weights is None:
             X_train, X_val, y_train, y_val = train_test_split(
                 self.trainEmbeddings, self.traingt, train_size=train_size,
@@ -553,53 +646,64 @@ class EmbeddingAnalysis:
                 f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
             print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
 
-            self.classifier = self.classification.train_classifier(
+            self.classifier = Classification.train_classifier(
                 X_train, y_train, method=self.classifier_method
             )
-
         else:
             self.classifier = classifier_weights
-            X_val = self.trainEmbeddings
-            y_val = self.traingt
+            X_val, y_val = self.trainEmbeddings, self.traingt
 
-        self.train_accuracy = self.classification.getAccuracy(
-            X_val, y_val, self.classifier)
-        print(f"Validation accuracy: {self.train_accuracy:.4f}")
-        self.predLabels = self.classifier.predict(self.embeddings)
-
-        self.results_df[self.classifier_method] = self.predLabels
-        self.classColumn = self.classifier_method
-
-        proba = self.classifier.predict_proba(self.embeddings)
-        for i, cls in enumerate(self.classifier.classes_):
-            self.results_df[f"proba_{cls}"] = proba[:, i]
-
-        if self.classMapping is not None:
-            self.results_df[self.classMappedColumn] = np.array(
-                [self.classMapping.get(label, label)
-                 for label in self.predLabels]
-            )
-        else:
-            self.classMappedColumn = self.classifier_method
-
-        fig = self.classification.createConfusionMatrixFigure(
-            x=X_val, gt=y_val, classifier=self.classifier,
-            save_dir=self.save_dir, mapping=mapping or self.classMapping, gtColumn=self.gtColumn
+        # "LinearRegression" is in the registry for backwards compatibility but is a
+        # regressor: no classes_, no predict_proba, and accuracy_score rejects its
+        # continuous output.  One check gates every classifier-only step below.
+        isClassifier = hasattr(self.classifier, "classes_")
+        self.train_accuracy = (
+            Classification.getAccuracy(X_val, y_val, self.classifier) if isClassifier
+            else self.classifier.score(X_val, y_val)      # R^2 for a regressor
         )
-        return self.predLabels, fig
+        print(f"Validation {'accuracy' if isClassifier else 'R^2'}: {self.train_accuracy:.4f}")
+
+        self.predLabels = self.classifier.predict(self.embeddings)
+        self.classColumn = self.classifier_method
+        self.results_df[self.classColumn] = self.predLabels
+        # classMapping is normalised to {} in __init__, so the old
+        # `if self.classMapping is not None: ... else: ...` had a dead else branch.
+        self.results_df[self.classMappedColumn] = np.array(
+            [self.classMapping.get(label, label) for label in self.predLabels]
+        )
+
+        self.confusionFigure = None
+        if isClassifier:
+            proba = self.classifier.predict_proba(self.embeddings)
+            for i, cls in enumerate(self.classifier.classes_):
+                self.results_df[f"proba_{cls}"] = proba[:, i]
+            self.confusionFigure = Classification.createConfusionMatrixFigure(
+                x=X_val, gt=y_val, classifier=self.classifier,
+                save_dir=self.save_dir, mapping=mapping or self.classMapping,
+                gtColumn=self.gtColumn
+            )
+        return self.predLabels, self.confusionFigure
 
     # ------------------------------------------------------------------ #
     # Clustering                                                           #
     # ------------------------------------------------------------------ #
 
+    def _rescaled(self, embeddings: np.ndarray) -> np.ndarray:
+        """Z-score *embeddings*, unless they are the already-standardised ones.
+
+        ``self.embeddings`` is standardised once in ``__init__``; re-fitting a
+        StandardScaler on it is a no-op that costs a full pass over the matrix.
+        """
+        return embeddings if embeddings is self.embeddings else \
+            StandardScaler().fit_transform(embeddings)
+
     def performDBSCAN(self, embeddings, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
-        embeddings = StandardScaler().fit_transform(embeddings)
         clustering: DBSCAN = DBSCAN(
             eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)
-        ).fit(embeddings)
+        ).fit(self._rescaled(embeddings))
         self.classColumn = "DBSCAN_cluster"
         labels = clustering.labels_.reshape(*shape).astype(int) + 1
-        self.predLabels = labels
+        self.predLabels = labels.reshape(-1)
         return labels
 
     def performLeiden(
@@ -613,9 +717,8 @@ class EmbeddingAnalysis:
     ) -> np.ndarray:
         import anndata as ad
         import scanpy
-        embeddings = StandardScaler().fit_transform(embeddings)
-        labels = np.zeros(embeddings.shape[0])
-        embedding = ad.AnnData(X=embeddings)
+
+        embedding = ad.AnnData(X=self._rescaled(embeddings))
         scanpy.pp.neighbors(
             embedding, n_neighbors=n_neighbors, n_pcs=None,
             # type: ignore[arg-type]
@@ -624,52 +727,59 @@ class EmbeddingAnalysis:
         scanpy.tl.leiden(
             embedding, resolution=resolution, random_state=111, n_iterations=n_iterations,
         )
-        for indx, sub_label in enumerate(embedding.obs["leiden"].unique()):
-            indices = embedding.obs[embedding.obs["leiden"]
-                                    == sub_label].index.astype(int)
-            labels[indices] = indx
-        labels = labels.astype(int).reshape(*shape) + 1
-        self.predLabels = labels.flatten()
+        # factorize reproduces the old per-cluster masking loop exactly -- same
+        # first-appearance ordering -- in one vectorised pass.
+        codes, _ = pd.factorize(embedding.obs["leiden"])
+        labels = codes.astype(int).reshape(*shape) + 1
+
+        # Was missing, while performDBSCAN set its own: Leiden labels therefore
+        # landed in whatever classColumn happened to be, overwriting the
+        # classifier's prediction column whenever cluster() followed classify().
+        self.classColumn = "Leiden_cluster"
+        self.predLabels = labels.reshape(-1)
         return labels
 
     def cluster(self, embeddings=None, **kwargs):
-        shape: tuple = self.embeddings.shape[:-1]
-
-        if embeddings is None:
-            embeddings = self.embeddings
-        if self.leiden:
-            labels = self.performLeiden(
-                embeddings=embeddings, shape=shape, **kwargs)
-
-        else:
-            labels = self.performDBSCAN(
-                embeddings=embeddings, shape=shape, **kwargs)
-
-        self.results_df[self.classColumn] = labels
-
+        """Cluster the embeddings; labels land in a column named for the backend."""
+        backend = self.performLeiden if self.leiden else self.performDBSCAN
+        labels = backend(
+            embeddings=self.embeddings if embeddings is None else embeddings,
+            shape=self.embeddings.shape[:-1], **kwargs,
+        )
+        self.results_df[self.classColumn] = labels.reshape(-1)
         return labels
 
     # ------------------------------------------------------------------ #
     # Dimensionality reduction                                             #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _componentFrame(array: np.ndarray, prefix: str, index) -> pd.DataFrame:
+        """Frame of ``"<prefix> x/y/z"`` columns for however many components exist.
+
+        The old code indexed columns 0..2 unconditionally, so a narrow embedding
+        (fewer than three components) raised IndexError.
+        """
+        axes = ["x", "y", "z"][:array.shape[1]]
+        return pd.DataFrame(
+            {f"{prefix} {axis}": array[:, i] for i, axis in enumerate(axes)},
+            index=index,
+        )
+
     def pca(self) -> np.ndarray:
         pca_model = PCA()
-        nan_mask = np.isnan(self.embeddings)
-        assert not nan_mask.any(
-        ), f"Yes we have {nan_mask.sum()} nans in the array"
+        if np.isnan(self.embeddings).any():
+            raise ValueError(
+                f"Embeddings contain {int(np.isnan(self.embeddings).sum())} NaN value(s).")
         pcs = pca_model.fit_transform(self.embeddings)
-        nan_mask = np.isnan(pcs)
-        assert not nan_mask.any(
-        ), f"Yes we have {nan_mask.sum()} nans in the array"
+        if np.isnan(pcs).any():
+            raise ValueError(
+                f"PCA produced {int(np.isnan(pcs).sum())} NaN value(s).")
         print(
             f"Explained variance      : {pca_model.explained_variance_ratio_[:5].round(3)}")
         print(
             f"Cumulative (first 3)    : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
-        pca_df = pd.DataFrame(
-            {"PCA x": pcs[:, 0], "PCA y": pcs[:, 1], "PCA z": pcs[:, 2]},
-            index=self.data_df.index,
-        )
+        pca_df = self._componentFrame(pcs, "PCA", self.data_df.index)
 
         # Keep the fitted model and the loadings; plotPCALoadings reads them.
         self.pca_model = pca_model
@@ -681,10 +791,8 @@ class EmbeddingAnalysis:
         print("PCA loadings:")
         print(self.loadings)
 
-        self.explained_variance_ratio = pca_model.explained_variance_ratio_[
-            :3].sum()
+        self.explained_variance_ratio = pca_model.explained_variance_ratio_[:3].sum()
 
-        
         self.concatDF(pca_df)
         return pcs
 
@@ -696,12 +804,10 @@ class EmbeddingAnalysis:
             n_neighbors=n_neighbors, min_dist=min_dist, n_components=n_components,
             random_state=random_state, metric=metric, n_jobs=10, **kwargs,
         ).fit(self.embeddings)
-        umap_array = reducer.transform(self.embeddings)
-        return pd.DataFrame(
-            {"UMAP x": umap_array[:, 0], "UMAP y": umap_array[:,
-                                                              1], "UMAP z": umap_array[:, 2]},
-            index=self.data_df.index,
-        )
+        # Honours n_components: the old code always built a "UMAP z" column and
+        # raised IndexError when fewer than three were requested.
+        return self._componentFrame(
+            reducer.transform(self.embeddings), "UMAP", self.data_df.index)
 
     def UMAPResults(self, classColoumn: str | None = None,
                     marker_size: int = 4, background_color: str = "rgba(0,0,0,0)",
@@ -743,16 +849,57 @@ class EmbeddingAnalysis:
         plt.close(fig)
         return fig
 
-    def plot_distance_matrix(self, metric: str = "cosine", show: bool = False) -> Figure:
+    def _saveFigure(self, fig: Figure, filename: str, save_dir: str = None) -> None:
+        """Write *fig* into *save_dir* (default ``self.save_dir``), creating it.
+
+        Delegates to ``CustomMatplotlib.saveFig`` so the whole package has one
+        makedirs-and-savefig; this replaced six near-identical blocks whose dpi and
+        bbox_inches had drifted apart.  ``close=False`` because ``_returnFigure``
+        owns closing.
+        """
+        CustomMatplotlib.saveFig(
+            fig, save_dir=save_dir if save_dir is not None else self.save_dir,
+            filename=filename, close=False,
+        )
+
+    @staticmethod
+    def _returnPlotlyFigure(fig, save_dir: str, filename: str, show: bool = False):
+        """Plotly counterpart of :meth:`_returnFigure`.
+
+        Saving and showing stay independent: training/validation logging routes
+        figures to TensorBoard/WandB and must never pop one open, so *show*
+        defaults to False everywhere.
+        """
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            out = os.path.join(save_dir, filename)
+            if filename.endswith(".html"):
+                fig.write_html(out)
+            else:
+                fig.write_image(out)
+            print(f"Saved to {out}")
+        if show:
+            fig.show()
+        return fig
+
+    def plot_distance_matrix(self, metric: str = "cosine", show: bool = False,
+                             max_samples: int = 2000) -> Figure:
         """Plot a pairwise distance matrix sorted by GT class label.
 
         Uses the labelled training embeddings (``trainEmbeddings`` /
         ``traingt``).  Each row is normalised to sum to 1 so relative
         distances are comparable across rows with different scales.
+
+        *max_samples* caps the N x N distance matrix, which was previously
+        unbounded -- at this project's ~70k objects that is tens of gigabytes.
+        The subsample is seeded, like the one in :meth:`_classSamples`.
         """
         from scipy.spatial.distance import cdist
 
-        sort = np.argsort(self.traingt)
+        rows = np.arange(len(self.traingt))
+        if len(rows) > max_samples:
+            rows = np.random.default_rng(42).choice(rows, max_samples, replace=False)
+        sort = rows[np.argsort(self.traingt[rows])]
         feats = self.trainEmbeddings[sort]
         labels = self.traingt[sort]
         classes = np.unique(labels)
@@ -793,11 +940,7 @@ class EmbeddingAnalysis:
             )
             plt.tight_layout()
 
-        save_dir: str | None = getattr(self, "save_dir", None)  # type: ignore[assignment]
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"distance_matrix_{metric}.png"), dpi=300)
-
+        self._saveFigure(fig, f"distance_matrix_{metric}.png")
         return self._returnFigure(fig, show)
 
     def plotPCALoadings(
@@ -914,11 +1057,7 @@ class EmbeddingAnalysis:
             sns.despine(left=True)
             fig.tight_layout()
 
-        save_dir = save_dir if save_dir is not None else getattr(self, "save_dir", None)
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f"pca_loadings_bars_by_{by}.png"),
-                        dpi=300, bbox_inches="tight")
+        self._saveFigure(fig, f"pca_loadings_bars_by_{by}.png", save_dir)
         return self._returnFigure(fig, show)
 
     def plotFeatureMeans(self, columnMapping: dict | list, groupBy: str,
@@ -969,10 +1108,7 @@ class EmbeddingAnalysis:
             sns.despine(left=True)
             fig.tight_layout()
 
-        save_dir = save_dir if save_dir is not None else getattr(self, "save_dir", None)
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, "feature_means.png"), dpi=300, bbox_inches="tight")
+        self._saveFigure(fig, "feature_means.png", save_dir)
         return self._returnFigure(fig, show)
 
     @staticmethod
@@ -1009,13 +1145,14 @@ class EmbeddingAnalysis:
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       mapping: dict = {}, legend_title: str = "Classes",
+                       mapping: dict = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
                        show: bool = False, axis_range: tuple | None = None,
                        **kwargs) -> plotly.graph_objs.Figure:
         import plotly.express as px
 
+        mapping = mapping or {}
         plot_df = self.results_df.copy()
 
         if axis_range is not None:
@@ -1041,27 +1178,39 @@ class EmbeddingAnalysis:
                 print(f"{classColoumn} is not a column in DataFrame")
                 plot_df[classColoumn] = 0
 
-            plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
-            classLabels = sorted(
-                plot_df[classColoumn].unique().astype(int).tolist())
+            if pd.api.types.is_numeric_dtype(plot_df[classColoumn]):
+                # Integer class codes: colour through the Glasbey LUT, with 0
+                # reserved for unlabelled/background.
+                plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
+                classLabels = sorted(
+                    plot_df[classColoumn].unique().astype(int).tolist())
 
-            def _label(k: int) -> str:
-                if k == 0 and color_background:
-                    return "background"
-                return mapping.get(k, self.classMapping.get(k, str(k)))
+                def _label(k: int) -> str:
+                    if k == 0 and color_background:
+                        return "background"
+                    return mapping.get(k, self.classMapping.get(k, str(k)))
 
-            color_map = {
-                _label(k): f"rgba{self.color_space.rgba_tuple_by_index(k)}" for k in classLabels}
-            if not color_background:
-                color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
-            plot_df[classColoumn] = plot_df[classColoumn].astype(
-                int).map(_label)
+                color_map = {
+                    _label(k): f"rgba{self.color_space.rgba_tuple_by_index(k)}"
+                    for k in classLabels}
+                if not color_background:
+                    color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
+                plot_df[classColoumn] = plot_df[classColoumn].astype(int).map(_label)
+                order = [_label(k) for k in classLabels]
+            else:
+                # Already-named categories (e.g. "leiden_trajectory", the mapped
+                # class-name column).  The old code called .astype(int) on these
+                # unconditionally and raised.
+                plot_df[classColoumn] = plot_df[classColoumn].fillna("unlabelled").astype(str)
+                order = sorted(plot_df[classColoumn].unique().tolist())
+                palette = sns.color_palette("tab20", len(order))
+                color_map = {name: f"rgb{tuple(int(c * 255) for c in rgb)}"
+                             for name, rgb in zip(order, palette)}
 
             fig = px.scatter(
                 plot_df, x=xColumn, y=yColumn, color=classColoumn,
                 color_discrete_map=color_map,
-                category_orders={classColoumn: [
-                    _label(k) for k in classLabels]},
+                category_orders={classColoumn: order},
             )
 
         if not withLegendTitle:
@@ -1089,18 +1238,8 @@ class EmbeddingAnalysis:
 
         fig.update_traces(marker=dict(size=kwargs.get(
             "markerSize", 3), opacity=kwargs.get("markerOpacity", 0.8)))
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.write_image(os.path.join(
-                save_dir, f"{classColoumn}_{legend_title}.svg"))
-        # Displaying is independent of saving: this used to sit inside the branch
-        # above, so a caller could not save without also popping the figure open.
-        # Off by default - training/validation logging routes figures to
-        # TensorBoard/WandB and must not render anything. Notebooks either let
-        # Jupyter render the returned figure or pass show=True.
-        if show:
-            fig.show()
-        return fig
+        return self._returnPlotlyFigure(
+            fig, save_dir, f"{classColoumn}_{legend_title}.svg", show)
 
     # ------------------------------------------------------------------ #
     # Results & mask                                                       #
@@ -1117,29 +1256,36 @@ class EmbeddingAnalysis:
 
     def generateMask(self, maskVolumePath, resolution=0.5, n_iterations=10,
                      n_neighbors=15, distance_metric: str = "euclidean", classColoumn=None) -> str:
+        """Paint *maskVolumePath*'s instance labels with a column of class values."""
+        import skimage.io
+
         if not hasattr(self, "predLabels"):
-            self.clustering(resolution=resolution, n_iterations=n_iterations,
-                            n_neighbors=n_neighbors, distance_metric=distance_metric)
+            # Was `self.clustering(...)`, which is the ClusteringConfig dataclass --
+            # not callable, so this path raised TypeError whenever it was reached.
+            self.cluster(resolution=resolution, n_iterations=n_iterations,
+                         n_neighbors=n_neighbors, distance_metric=distance_metric)
+
+        # Defaulting to classColumn means the no-argument call works; it used to
+        # fall through every branch and raise.
+        column = classColoumn if classColoumn is not None else self.classColumn
+        if column in self.results_df.columns:
+            # results_df carries predictions for *all* instances, including those
+            # without a ground-truth label.  (The first two branches of the old
+            # chain had identical bodies behind a redundant guard.)
+            values = self.results_df[column].to_numpy()
+        elif column == self.gtColumn:
+            values = self.gtlabels
+        else:
+            raise ValueError(
+                f"Column {column!r} not found in results DataFrame. "
+                f"Available: {self.results_df.columns.tolist()}")
 
         maskVol = skimage.io.imread(maskVolumePath)
         mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
-
-        if self.classColumn == classColoumn and classColoumn in self.results_df.columns:
-            # Use results_df so that predictions for all cells are reflected,
-            # including those without a ground-truth label.
-            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(int)
-        elif self.gtColumn == classColoumn:
-            mapping_array[self.instancelabels] = self.gtlabels.astype(int)
-        elif classColoumn in self.results_df.columns:
-            mapping_array[self.instancelabels] = self.results_df[classColoumn].values.astype(
-                int)
-        else:
-            raise ValueError(
-                f"Column '{classColoumn}' not found in results DataFrame.")
-
+        mapping_array[self.instancelabels] = values.astype(int)
         maskVol = mapping_array[maskVol]
         fileName = os.path.basename(maskVolumePath).replace(
-            ".tif", f"_{classColoumn}.tif")
+            ".tif", f"_{column}.tif")
         save_dir = self.save_dir if self.save_dir is not None else os.path.dirname(
             maskVolumePath)
         path = os.path.join(save_dir, fileName)
@@ -1153,10 +1299,17 @@ class EmbeddingAnalysis:
 
     @staticmethod
     def concatColumnDF(df1, df2) -> pd.DataFrame:
-        result = df1.copy()
-        for col in df2.columns:
-            result[col] = df2[col].values
-        return result
+        """Add *df2*'s columns to *df1*, aligned on *df1*'s index.
+
+        Columns already in *df1* are replaced in place, so calling ``UMAPResults``
+        (or ``pca``) twice updates the existing coordinate columns rather than
+        appending a second set.  The old loop assigned ``.values`` column by
+        column, which silently misaligns rows whenever the two frames carry
+        different indices -- it worked only because every caller happened to build
+        *df2* with ``df1``'s index.
+        """
+        aligned = df2.set_axis(df1.index)
+        return df1.assign(**{c: aligned[c] for c in aligned.columns})
 
     def concatDF(self, df) -> pd.DataFrame:
         self.results_df = self.concatColumnDF(self.results_df, df)
@@ -1168,6 +1321,12 @@ class EmbeddingAnalysis:
         Yields n entries per class ordered highest-confidence first.
         class_name is resolved via classMapping when available.
         """
+        if getattr(self, "classifier", None) is None:
+            raise RuntimeError(
+                "No classifier was trained, so there are no per-class confidences. "
+                "Construct with a classifier_method (not None) and a gtColumn, or "
+                "call classify() first."
+            )
         mapping = self.classMapping or {}
         return [
             (mapping.get(cls, cls), lbl)
@@ -1175,93 +1334,81 @@ class EmbeddingAnalysis:
             for lbl in self.instancelabels[self.results_df[f"proba_{cls}"].argsort()[-1:-n - 1:-1]]
         ]
 
+    def _classSamples(self, max_samples: int, seed: int = 42) -> dict:
+        """Per-class embedding blocks, subsampled to at most *max_samples* rows."""
+        rng = np.random.default_rng(seed)
+        blocks = {}
+        for c in sorted(self.classMapping):
+            emb = self.embeddings[self.gtlabels == c]
+            if len(emb) > max_samples:
+                emb = emb[rng.choice(len(emb), max_samples, replace=False)]
+            blocks[c] = emb
+        return blocks
+
+    def _pairwiseClassHeatmap(self, pairFn, title: str, max_samples: int = 500,
+                              show: bool = False, prepareFn=None) -> Figure:
+        """Symmetric class x class heatmap of *pairFn* over prepared class blocks.
+
+        *prepareFn* runs once per class rather than once per pair.  Besides sharing
+        the skeleton of the two public heatmaps, that removes a hidden O(k^2) cost:
+        the Gromov-Wasserstein version used to recompute each class's cost matrix
+        once for every partner class.
+        """
+        blocks = self._classSamples(max_samples)
+        if prepareFn is not None:
+            blocks = {c: prepareFn(X) for c, X in blocks.items()}
+        classes = list(blocks)
+
+        matrix = np.zeros((len(classes), len(classes)))
+        for i, j in itertools.combinations(range(len(classes)), 2):
+            matrix[i, j] = matrix[j, i] = pairFn(blocks[classes[i]], blocks[classes[j]])
+
+        names = [self.classMapping[c] for c in classes]
+        fig, _ = CustomMatplotlib.simpleHeatmap(
+            matrix, xticklabels=names, yticklabels=names,
+            title=title, save_dir=self.save_dir,
+        )
+        return self._returnFigure(fig, show)
+
+    def _plotClassDiagnostics(self) -> None:
+        """Draw both class-distance heatmaps, skipping any whose deps are missing.
+
+        ``__init__`` used to call the two methods directly, so a missing optional
+        package (POT, for Gromov-Wasserstein) broke construction outright.
+        """
+        try:
+            self.plot_gromov_wasserstein_heatmap()
+        except ImportError as exc:
+            warnings.warn(f"Skipping Gromov-Wasserstein heatmap: {exc}",
+                          UserWarning, stacklevel=2)
+        self.plot_kl_divergence_heatmap()
+
     def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500, show: bool = False) -> Figure:
         """Compute and plot pairwise Gromov-Wasserstein distances between classes."""
         import ot
 
-        classes = sorted(self.classMapping.keys())
-        class_names = [self.classMapping[c] for c in classes]
-        n_classes = len(classes)
+        def prepare(X):
+            C = ot.dist(X, X)
+            return C / (C.max() + 1e-12), np.full(len(X), 1 / len(X))
 
-        rng = np.random.default_rng(42)
-        class_embeddings = {}
-        for c in classes:
-            mask = self.gtlabels == c
-            emb = self.embeddings[mask]
-            if len(emb) > max_samples:
-                emb = emb[rng.choice(len(emb), max_samples, replace=False)]
-            class_embeddings[c] = emb
+        def gromovWasserstein(p, q):
+            (Ci, pi), (Cj, pj) = p, q
+            return ot.gromov.gromov_wasserstein2(
+                Ci, Cj, pi, pj, "square_loss", verbose=False)
 
-        gw_matrix = np.zeros((n_classes, n_classes))
-        for i, ci in enumerate(classes):
-            for j, cj in enumerate(classes):
-                if i >= j:
-                    continue
-                Xi, Xj = class_embeddings[ci], class_embeddings[cj]
-                Ci = ot.dist(Xi, Xi)
-                Cj = ot.dist(Xj, Xj)
-                Ci /= Ci.max() + 1e-12
-                Cj /= Cj.max() + 1e-12
-                pi = np.ones(len(Xi)) / len(Xi)
-                pj = np.ones(len(Xj)) / len(Xj)
-                gw = ot.gromov.gromov_wasserstein2(
-                    Ci, Cj, pi, pj, "square_loss", verbose=False)
-                gw_matrix[i, j] = gw_matrix[j, i] = gw
-
-        fig, _ = CustomMatplotlib.simpleHeatmap(
-            gw_matrix,
-            xticklabels=class_names,
-            yticklabels=class_names,
-            title="Gromov-Wasserstein Distance Between Classes",
-            save_dir=self.save_dir,
-        )
-        return self._returnFigure(fig, show)
+        return self._pairwiseClassHeatmap(
+            gromovWasserstein, "Gromov-Wasserstein Distance Between Classes",
+            max_samples, show, prepareFn=prepare)
 
     def plot_kl_divergence_heatmap(self, max_samples: int = 500, show: bool = False) -> Figure:
         """Compute and plot pairwise symmetrised KL divergence between classes (Gaussian approximation via LedoitWolf)."""
-        classes = sorted(self.classMapping.keys())
-        class_names = [self.classMapping[c] for c in classes]
-        n_classes = len(classes)
+        def symmetrisedKL(p, q):
+            return (_klDivergence(*p, *q) + _klDivergence(*q, *p)) / 2
 
-        rng = np.random.default_rng(42)
-        means, covs = {}, {}
-        for c in classes:
-            mask = self.gtlabels == c
-            emb = self.embeddings[mask]
-            if len(emb) > max_samples:
-                emb = emb[rng.choice(len(emb), max_samples, replace=False)]
-            means[c] = emb.mean(axis=0)
-            covs[c] = LedoitWolf().fit(emb).covariance_
-
-        def _kl(mu_p, sigma_p, mu_q, sigma_q):
-            sigma_q_inv = np.linalg.inv(sigma_q)
-            diff = mu_q - mu_p
-            _, logdet_p = np.linalg.slogdet(sigma_p)
-            _, logdet_q = np.linalg.slogdet(sigma_q)
-            return 0.5 * (
-                np.trace(sigma_q_inv @ sigma_p)
-                + diff @ sigma_q_inv @ diff
-                - len(mu_p)
-                + logdet_q - logdet_p
-            )
-
-        kl_matrix = np.zeros((n_classes, n_classes))
-        for i, ci in enumerate(classes):
-            for j, cj in enumerate(classes):
-                if i >= j:
-                    continue
-                sym = (_kl(means[ci], covs[ci], means[cj], covs[cj])
-                       + _kl(means[cj], covs[cj], means[ci], covs[ci])) / 2
-                kl_matrix[i, j] = kl_matrix[j, i] = sym
-
-        fig, _ = CustomMatplotlib.simpleHeatmap(
-            kl_matrix,
-            xticklabels=class_names,
-            yticklabels=class_names,
-            title="Symmetrised KL Divergence Between Classes",
-            save_dir=self.save_dir,
-        )
-        return self._returnFigure(fig, show)
+        return self._pairwiseClassHeatmap(
+            symmetrisedKL, "Symmetrised KL Divergence Between Classes",
+            max_samples, show,
+            prepareFn=lambda X: (X.mean(axis=0), LedoitWolf().fit(X).covariance_))
 
     def plot_dendrogram(
         self,
@@ -1319,15 +1466,8 @@ class EmbeddingAnalysis:
             yaxis=dict(title=""),
         )
 
-        save_dir = save_dir or self.save_dir
-        if save_dir:
-            out = os.path.join(save_dir, "dendrogram.svg")
-            fig.write_image(out, format="svg")
-            print(f"[plot_dendrogram] Saved to {out}")
-
-        if show:  # see specialScatter: never render from a logging path
-            fig.show()
-        return fig
+        return self._returnPlotlyFigure(
+            fig, save_dir or self.save_dir, "dendrogram.svg", show)
 
     # ------------------------------------------------------------------ #
     # Trajectory analysis (PAGA + diffusion pseudotime)                   #
@@ -1677,21 +1817,15 @@ class EmbeddingAnalysis:
                 fig.update_xaxes(showgrid=False, showticklabels=False, row=row, col=col)
                 fig.update_yaxes(showgrid=False, showticklabels=False, row=row, col=col)
 
-        save_dir = save_dir or self.save_dir
-        if save_dir:
-            out = os.path.join(save_dir, "trajectory_plotly.html")
-            fig.write_html(out)
-            print(f"[plot_trajectory] Saved to {out}")
-
-        if show:  # see specialScatter: never render from a logging path
-            fig.show()
-        return fig
+        return self._returnPlotlyFigure(
+            fig, save_dir or self.save_dir, "trajectory_plotly.html", show)
 
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[MOBIE_LABEL_KEY] == label]
 
     def get_array_from_df(self, column):
-        return np.array(self.data_df[column].tolist())
+        """Deprecated alias for :func:`dl_utils.util.getArrayFromDF`."""
+        return getArrayFromDF(self.data_df, column)
 
     def load_png_for_nucleus(self, nucleus_id, patches_dir) -> str:
         npy_filename = os.path.join(
@@ -1710,41 +1844,3 @@ class EmbeddingAnalysis:
             except Exception as e:
                 return f"Error creating image: {e}"
         return "No image available"
-
-
-if __name__ == '__main__':
-    import pandas as pd
-
-    df1path = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\checkpoints\LM_batch-16_20-epochs_masking_075_patch4 SAM masks 2\results\epoch_30\dataframe_analyzed.json"
-    df2path = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\tables\test.xlsx"
-    df1 = pd.read_json(df1path)
-    df2 = pd.read_excel(df2path)
-
-    df1['Class'] = df1["label_id"].map(df2.set_index('label_id')['Class']) + 1
-
-    from ProjectRoot import change_wd_to_project_root
-    change_wd_to_project_root()
-    from dl_utils.analysis import EmbeddingAnalysis
-    from dl_utils import EMBED_DICT_EMBED, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, MASKED_AVG_TOKEN_FEATURES_KEY
-
-    save_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\predictedMask"
-    mapping = {1: "Neuron", 2: "Glial"}
-
-    ea = EmbeddingAnalysis.from_dataframe(
-        data_df=df1,
-        type=MASKED_AVG_TOKEN_FEATURES_KEY,
-        gtColumn='Class',
-        classMapping=mapping,
-        save_dir=save_dir,
-        binary=False,
-    )
-
-    print(f"Classifier : {ea.classifier_method}")
-    print(f"Validation accuracy: {ea.train_accuracy:.4f}")
-
-    pcas = ea.pca()
-    ea.UMAPResults()
-    ea.saveDataFrame()
-
-    maskpath = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\predictedMask\NS6_OE_06_w4SPI-405.tif"
-    ea.generateMask(maskpath)

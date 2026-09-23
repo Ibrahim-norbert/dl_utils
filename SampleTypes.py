@@ -147,7 +147,52 @@ class EmbeddingsNumpy:
     labels: Optional[np.ndarray] = None
     pred_labels: Optional[np.ndarray] = None
     misc: Optional[dict] = None
+# One entry per SCENE, not per row — indexed, never split. Mirrors
+# BioimagePoint._PER_SCENE (PreliminaryGNN/module/pointTV3/structure.py:280) and
+# sidesteps the shape-sniff ambiguity when B == n_total.
+_PER_SCENE = ("filePath", "dataIndex")
 
+
+@dataclass(frozen=True, eq=False)
+class EmbeddingsNumpy:
+    data: np.ndarray
+    labels: Optional[np.ndarray] = None
+    pred_labels: Optional[np.ndarray] = None
+    misc: Optional[dict] = None
+
+    def batch_split_points(self, offset) -> list["EmbeddingsNumpy"]:
+        """Split the batched rows into one bundle per scene, by ``offset``.
+
+        ``offset`` is the cumulative per-scene row count (the collate's ``offset``).
+        Per-row arrays (``data``, ``labels``, ``misc["coord"]``, …) are sliced;
+        ``_PER_SCENE`` keys are indexed one entry per scene; everything else is
+        shared by reference.
+        """
+        counts = np.diff(np.asarray(offset, dtype=np.int64).ravel(), prepend=0)
+        n_total = self.data.shape[0]
+        assert counts.sum() == n_total, (
+            f"offset totals {counts.sum()} rows but data has {n_total}"
+        )
+        bounds = np.cumsum(counts)[:-1]
+
+        def parts(v):
+            if isinstance(v, np.ndarray) and v.ndim and v.shape[0] == n_total:
+                return np.split(v, bounds)
+            return [v] * len(counts)
+
+        misc = self.misc or {}
+        per_scene = {k: misc[k] for k in _PER_SCENE if k in misc}
+        split = {f.name: parts(getattr(self, f.name))
+                 for f in dataclasses.fields(self) if f.name != "misc"}
+        split_misc = {k: parts(v) for k, v in misc.items() if k not in per_scene}
+
+        return [
+            replace(self,
+                    **{k: p[i] for k, p in split.items()},
+                    misc={**{k: p[i] for k, p in split_misc.items()},
+                          **{k: v[i] for k, v in per_scene.items()}})
+            for i in range(len(counts))
+        ]
 
 
 

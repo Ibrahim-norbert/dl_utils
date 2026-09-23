@@ -46,12 +46,22 @@ class CustomMatplotlib:
         return {axes[i]: x.flatten() for i, x in enumerate(np.vsplit(points.T, ndim))}
 
     @classmethod
-    def saveFig(cls, fig, save_dir, title, func, fileExtension="svg") -> None:
+    def saveFig(cls, fig, save_dir, title="", func=None, fileExtension="svg",
+                filename: str = None, close: bool = True) -> None:
+        """Write *fig* into *save_dir*, creating the directory if needed.
+
+        *filename* overrides the ``{title}-{func.__name__}.{ext}`` convention for
+        callers that already know the name they want; *close* can be turned off by
+        callers that close the figure themselves (see
+        ``EmbeddingAnalysis._returnFigure``), so a figure is never closed twice.
+        Both default to the previous behaviour.
+        """
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
-            fig.savefig(f"{save_path}.{fileExtension}", dpi=500)
-        plt.close(fig)
+            name = filename if filename is not None else f"{title}-{func.__name__}.{fileExtension}"
+            fig.savefig(os.path.join(save_dir, name), dpi=500)
+        if close:
+            plt.close(fig)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
