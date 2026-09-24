@@ -36,7 +36,9 @@ class BaseDataset:
     SAMPLE_PATH_COLUMN: str = "sample_path"
     SAMPLE_LABEL_COLUMN: str = f"sample_{MOBIE_LABEL_KEY}"
 
-    def __init__(self, sampleMapperDFPath: str, save_dir: str, samplePathRegex: str = None, **kwargs) -> None:
+    def __init__(self, sampleMapperDFPath: str, save_dir: str, **kwargs) -> None:
+
+
 
         self.sampleMapperDFPath = sampleMapperDFPath
 
@@ -44,6 +46,8 @@ class BaseDataset:
 
         # NOTE: Dataset dataframe must be a sample mapper, where each sample a path is
         self.sampleMapperDF: pd.DataFrame = self.loadDataFrame(sampleMapperDFPath)
+
+        assert self.SAMPLE_PATH_COLUMN in self.sampleMapperDF.columns, f"The {self.SAMPLE_PATH_COLUMN} column is not in the sampleMapper dataframe."
 
         if self.SAMPLE_LABEL_COLUMN not in self.sampleMapperDF.columns:
             self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] = np.arange(len(self.sampleMapperDF))

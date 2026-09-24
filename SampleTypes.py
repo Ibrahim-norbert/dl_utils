@@ -141,12 +141,6 @@ def _map_misc(misc, fn):
     return None if misc is None else {k: fn(v) for k, v in misc.items()}
 
 
-@dataclass(frozen=True, eq=False)
-class EmbeddingsNumpy:
-    data: np.ndarray
-    labels: Optional[np.ndarray] = None
-    pred_labels: Optional[np.ndarray] = None
-    misc: Optional[dict] = None
 # One entry per SCENE, not per row — indexed, never split. Mirrors
 # BioimagePoint._PER_SCENE (PreliminaryGNN/module/pointTV3/structure.py:280) and
 # sidesteps the shape-sniff ambiguity when B == n_total.
