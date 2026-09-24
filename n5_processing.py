@@ -243,6 +243,18 @@ class BaseVolumeDataset(BaseDataset):
             f"The sample mapper must have unique paths for column: {self.SAMPLE_PATH_COLUMN}"
         )
 
+    def generateN5keys(self, pathColumn : str, sampletypekey: str) -> pd.Index:
+        keys = pd.Index([self.sampleN5Key(row[pathColumn], sampletypekey=sampletypekey, channel=self.channelOf(row))
+                         for _, row in self.sampleMapperDF.iterrows()])
+
+        # Note: Test if duplicated keys exist
+        duplicates = keys[keys.duplicated()].unique().tolist()
+        if duplicates:
+            raise ValueError(
+                f"Sample mapper maps several rows onto the same N5 key: {duplicates[:5]}")
+
+        return keys
+
     def run(self) -> None:
         """
         1. Creates directory in self.save_dir.
@@ -488,15 +500,7 @@ class BaseVolumeDataset(BaseDataset):
         3. Write to N5 dataset if it does not already exist
         """
 
-        sampleKeys : pd.Index = pd.Index([self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey=self.N5_RAW_KEY,
-                                                           channel=self.channelOf(row))
-                         for _, row in self.sampleMapperDF.iterrows()])
-
-
-        duplicates = sampleKeys[sampleKeys.duplicated()].unique().tolist()
-        if duplicates:
-            raise ValueError(
-                f"Sample mapper maps several rows onto the same N5 key: {duplicates[:5]}")
+        sampleKeys : pd.Index = self.generateN5keys(self.SAMPLE_PATH_COLUMN, self.N5_RAW_KEY)
 
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
             for N5key, (i, row) in zip(sampleKeys, self.sampleMapperDF.iterrows()):
@@ -551,7 +555,7 @@ class BaseMaskDataset(BaseVolumeDataset):
     """Adds each sample's instance-segmentation mask to its volume's N5 group."""
     N5_MASK_KEY_COLUMN: str = "mask_key"
     SAMPLE_MASK_PATH_COLUMN: str = "mask_path"
-    MASK_KEY: str = "mask"
+    N5_MASK_KEY: str = "mask"
     # Nearest-neighbour: interpolating between label IDs invents objects.
     MASK_INTERPOLATION_ORDER: int = 0
     # NOTE: No idea why we use this
@@ -595,60 +599,33 @@ class BaseMaskDataset(BaseVolumeDataset):
         return {"volume": self.toUint16(resampled, normalise=not isLabels)}
 
     def __writeKeyMask__(self) -> None:
-        """Write one dataset per sample under *subkey*; record its key in *keyColumn*.
-
-        Keys always derive from the sample *volume* path, so every role of a sample
-        (raw, mask, ...) lands in that sample's one group whatever column the pixels
-        came from.  Samples already present are skipped, which is what makes
-        construction idempotent and an interrupted run resumable.  The N5 is opened
-        once for the whole column.
+        """
+        Same as in self.__writeVolume__ but includes self.assertPairsWithRaw validation
         """
 
-        pathColumn = self.SAMPLE_MASK_PATH_COLUMN
-        subkey = self.MASK_KEY
-        keyColumn = self.N5_MASK_KEY_COLUMN
-        validate = self.assertPairsWithRaw
-        interpolationOrder = self.MASK_INTERPOLATION_ORDER
-
-        if pathColumn not in self.sampleMapperDF.columns:
-            raise KeyError(
-                f"Sample mapper has no {pathColumn!r} column: "
-                f"{list(self.sampleMapperDF.columns)}")
-
-        # Keys are pure path arithmetic, so they are derived — and checked for
-        # collisions — before a single voxel is written and overwrites its neighbour.
-        # NOTE: Constructed from sample path, channel and volume type (e.g. raw, mask etc.) indicator subkey
-        keys = pd.Index([self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey=subkey, channel=self.channelOf(row))
-                         for _, row in self.sampleMapperDF.iterrows()])
-
-        # Note: Test if duplicated keys exist
-        duplicates = keys[keys.duplicated()].unique().tolist()
-        if duplicates:
-            raise ValueError(
-                f"Sample mapper maps several rows onto the same N5 key: {duplicates[:5]}")
+        keys = self.generateN5keys(self.SAMPLE_MASK_PATH_COLUMN, sampletypekey=self.N5_MASK_KEY)
 
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
             for key, (_, row) in zip(keys, self.sampleMapperDF.iterrows()):
                 if self.containsKey(n5File, key):
                     # Still validated: the check reads metadata only, and skipping it on
                     # resume meant an existing dataset was never checked against its pair.
-                    if validate is not None:
-                        validate(n5File, key, None)
+                    self.assertPairsWithRaw(n5File, key, None)
                     logger.debug("Already in N5, skipping: %s", key)
                     continue
 
-                prepared_dict: dict = self.preprocessVolume(row[pathColumn], interpolationOrder)
+                prepared_dict: dict = self.preprocessVolume(row[self.SAMPLE_MASK_PATH_COLUMN], self.MASK_INTERPOLATION_ORDER)
 
                 volume: np.ndarray = prepared_dict.pop("volume")
-                if validate is not None:
-                    validate(n5File, key, volume)
+
+                self.assertPairsWithRaw(n5File, key, volume)
 
                 self.writeN5Dataset(n5File, key, volume, self.channelOf(row))
 
-                logger.info("Wrote %s <- %s", key, row[pathColumn])
+                logger.info("Wrote %s <- %s", key, row[self.SAMPLE_MASK_PATH_COLUMN])
 
 
-        self.sampleMapperDF[keyColumn] = keys.to_numpy()
+        self.sampleMapperDF[self.N5_MASK_KEY_COLUMN] = keys.to_numpy()
 
 
 
@@ -679,21 +656,6 @@ class BaseMaskDataset(BaseVolumeDataset):
             raise ValueError(
                 f"Mask {maskKey} has shape {maskShape} but its raw volume has {rawShape}")
 
-    # TODO: Is the above needed ????
-    # def _ensure_open(self) -> None:
-    #     """Open the N5 file handle lazily so the object stays picklable."""
-    #     if self._n5_file is None:
-    #         if self.chunkedImagePath is None:
-    #             raise ValueError("chunkedImagePath must be set before reading volumes.")
-    #         self._n5_file = z5py.File(self.chunkedImagePath, 'r')
-    #         self.Volume = self._n5_file[self.dapiKey + "/" + self.rawKey]
-    #         self.Mask = self._n5_file[self.dapiKey + "/" + self.maskKey]
-
-
-    # ---- Reading -----------------------------------------------------
-    # The mask-dependent half of the accessors; the raw-only ones sit on
-    # BaseVolumeDataset, which has no mask to read.
-
     def get_hr_mask(self, idx: int) -> np.ndarray:
         """Instance mask of sample *idx*, isolated to *label* when one is given.
 
@@ -716,7 +678,7 @@ class BaseMaskDataset(BaseVolumeDataset):
         samples positionally; the key is pure path arithmetic and needs no lookup.
         """
         return np.asarray(
-            self.openKey(self.sampleN5Key(sampleVolumePath, self.MASK_KEY, channel))[:])
+            self.openKey(self.sampleN5Key(sampleVolumePath, self.N5_MASK_KEY, channel))[:])
 
     def volumeOfPath(self, sampleVolumePath: str, channel: Optional[str] = None) -> np.ndarray:
         """Raw counterpart of :meth:`maskOfPath`, addressed by key rather than row."""
@@ -825,59 +787,6 @@ class BaseMaskDataset(BaseVolumeDataset):
             # save: a closed figure does not render inline.
             CustomMatplotlib.saveFig(fig, save_dir, title, self.showChannelIntensityHistograms)
         return fig, ax
-    #
-    # def prepareVolume(self, volumePath: str, maskPath: Optional[str] = None,
-    #                   resolution: Optional[List[int]] = None,
-    #                   ) -> Tuple[np.ndarray, np.ndarray]:
-    #     """Load a raw/mask TIF pair and pre-process it, ready for N5 saving.
-    #
-    #     1. Load the raw TIF.
-    #     2. Resample to isotropic voxels using *resolution* (ZYX) — order 3 for the raw
-    #        intensities, order 0 (nearest neighbour) for the label mask, so labels survive.
-    #     3. Min-max normalise the raw volume to ``[0, 1]``.
-    #
-    #     *maskPath* may be ``None`` or missing, in which case an all-zero mask matching the
-    #     resampled shape is returned — what raw-only consumers such as SimCLR need.
-    #
-    #     TODO: overlaps BaseVolumeDataset.prepareSampleVolume, which does the same work but
-    #     yields uint16 rather than float32 [0, 1]. This one survives because it serves the
-    #     per-volume LMTextureNucleiDataset.volume2DF pipeline, not the N5 dataset classes;
-    #     collapse the two once that pipeline moves onto BaseVolumeDataset.
-    #     """
-    #     from sklearn import preprocessing
-    #
-    #     resolution = list(resolution or self.resolution)
-    #     volume: np.ndarray = self.loadFromSamplePath(volumePath)
-    #
-    #     zoom = np.array(resolution, dtype=float) / min(resolution)
-    #     isotropic = all(z == 1.0 for z in zoom)
-    #     logger.debug("Pre-resampled dimension: %s", volume.shape)
-    #
-    #     if not isotropic:
-    #         newShape = tuple(int(s * z) for s, z in zip(volume.shape, zoom))
-    #         volume = resize(volume, newShape, anti_aliasing=True, order=3)
-    #         logger.debug("Resampled dimension: %s", volume.shape)
-    #
-    #     volume = (preprocessing.MinMaxScaler()
-    #               .fit_transform(volume.reshape(-1, 1))
-    #               .reshape(volume.shape)
-    #               .astype(np.float32))
-    #
-    #     if maskPath and os.path.exists(maskPath):
-    #         mask: np.ndarray = self.loadFromSamplePath(maskPath)
-    #         if not isotropic:
-    #             nLabels = np.unique(mask).size
-    #             mask = resize(mask, volume.shape, anti_aliasing=True, order=0)
-    #             if np.unique(mask).size != nLabels:
-    #                 raise ValueError(
-    #                     "Label count changed during mask resampling: "
-    #                     f"{nLabels} -> {np.unique(mask).size}"
-    #                 )
-    #     # TODO: Do not save an empty mask if no masks exist instead raise error
-    #     else:
-    #         mask = np.zeros(volume.shape, dtype=np.uint16)
-    #
-    #     return volume, mask.astype(np.uint16)
 
 class MultiDirectoryN5Dataset(BaseMaskDataset):
     """Volume/mask samples spread over many directories, gathered into ONE N5 file.
@@ -907,14 +816,11 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
     """
 
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
-                 channelColumn: str = "channel",
                  **kwargs) -> None:
         # Assigned before super(): its __init__ validates the paths and runs the whole
         # N5 conversion off these columns.
-        self.samplePathColumn = BaseDataset.SAMPLE_PATH_COLUMN
-        self.SAMPLE_MASK_PATH_COLUMN = BaseMaskDataset.SAMPLE_MASK_PATH_COLUMN
         super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
-                         channelColumn=channelColumn, **kwargs)
+                         **kwargs)
 
     def validateSamplePaths(self) -> None:
         """Replaces the single-directory contract of the base class with a wider one.
@@ -925,7 +831,7 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
         # CHANNEL_COLUMN is optional — channelOf falls back to channelKey without it — so
         # a None must not be looked up as if it were a column name.
         required = [column for column
-                    in (self.samplePathColumn, self.SAMPLE_MASK_PATH_COLUMN,
+                    in (self.SAMPLE_PATH_COLUMN, self.SAMPLE_MASK_PATH_COLUMN,
                         self.CHANNEL_COLUMN)
                     if column]
         missingColumns = [column for column in required
@@ -935,7 +841,7 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
                 f"Sample mapper is missing {missingColumns}; "
                 f"it has {list(self.sampleMapperDF.columns)}")
 
-        for column in (self.samplePathColumn, self.SAMPLE_MASK_PATH_COLUMN):
+        for column in (self.SAMPLE_PATH_COLUMN, self.SAMPLE_MASK_PATH_COLUMN):
             missing = [str(path) for path in self.sampleMapperDF[column]
                        if not os.path.isfile(str(path))]
             if missing:
@@ -944,7 +850,7 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
 
         logger.info("Indexing %d samples from %d directories under %s",
                     len(self.sampleMapperDF),
-                    self.sampleMapperDF[self.samplePathColumn].map(os.path.dirname).nunique(),
+                    self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].map(os.path.dirname).nunique(),
                     self.sampleRoot)
 
 
@@ -997,7 +903,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         
     def __obtainAllObjectBBOX__(self):
         keys = pd.Index(
-            [self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey=self.MASK_KEY, channel=self.channelOf(row))
+            [self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey=self.N5_MASK_KEY, channel=self.channelOf(row))
              for _, row in self.sampleMapperDF.iterrows()])
 
         for key, (idx, row) in zip(keys, self.sampleMapperDF.iterrows()):
@@ -1147,7 +1053,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
 
 
         pathColumn = self.SAMPLE_MASK_PATH_COLUMN
-        subkey= self.MASK_KEY
+        subkey= self.N5_MASK_KEY
         keyColumn= self.N5_MASK_KEY_COLUMN
         validate = self.assertPairsWithRaw
         interpolationOrder = self.MASK_INTERPOLATION_ORDER
