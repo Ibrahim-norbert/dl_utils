@@ -27,9 +27,12 @@ from typing import Any, Callable, List, Optional, Tuple, Union, Hashable
 import numpy as np
 import pandas as pd
 import z5py
+from IPython.core.oinspect import object_info
 from matplotlib import pyplot as plt
 from numpy import ndarray, dtype
+from scipy.ndimage import binary_fill_holes
 from skimage.transform import resize
+from xarray.util.generate_ops import inplace
 
 from dl_utils import img2patch as img2ps, util, MOBIE_LABEL_KEY
 from dl_utils.SampleLoader import SampleLoaderBioImage
@@ -37,6 +40,8 @@ from dl_utils.datasets import BaseDataset
 from dl_utils.util import getArrayFromDF
 from dl_utils.util_base import save2DFcolumn
 from dl_utils.vizualizations import CustomMatplotlib
+import fsspec
+
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +114,8 @@ def filterDF(df, column="z") -> pd.DataFrame:
     return df.loc[df[column].between(lower_bound, upper_bound), :]
 
 
-def mask2BBOXDF(maskVol: np.ndarray) -> pd.DataFrame:
-    all_boxes: img2ps.BBoxes = img2ps.BBoxes.from_mask(maskVol)
+def mask2BBOXDF(maskVol: np.ndarray, image: Optional[np.ndarray] = None, features: tuple[str] = ()) -> pd.DataFrame:
+    all_boxes: img2ps.BBoxes = img2ps.BBoxes.from_mask(maskVol, image, features)
 
     assert isinstance(all_boxes.dataFrame, pd.DataFrame), (
         f"Dataframe does not exist. If it is None ({all_boxes.dataFrame}), then"
@@ -214,6 +219,9 @@ class BaseVolumeDataset(BaseDataset):
     N5 dataset folder created for volumes living in self.sampleRoot.
     Each volume is preprocessed through resampling before saved with
     unique N5 key. The sampleMapperDF is updated with the keys and overridden in disk.
+
+    The samples are not normalized after interpolation.
+
     """
 
     # NOTE: Coloumn where all N5 keys are saved
@@ -346,7 +354,7 @@ class BaseVolumeDataset(BaseDataset):
         The channel becomes one key segment, so a value carrying ``/`` would silently
         deepen the hierarchy and move the sample somewhere nobody addresses.
         """
-        channel : str  = row.get(self.CHANNEL_COLUMN).str
+        channel : str  = str(row.get(self.CHANNEL_COLUMN))
         if "/" in channel or not channel.strip():
             raise ValueError(
                 f"Channel {channel!r} is not a usable N5 key segment: it must be "
@@ -455,7 +463,7 @@ class BaseVolumeDataset(BaseDataset):
 
         resampled, _ = self.resampleVolume(volume, self.resolution, interpolationOrder)
 
-        return {"volume": self.toUint16(resampled, normalise=True)}
+        return {"volume": self.toUint16(resampled, normalise=False)}
 
     @staticmethod
     def requireGroup(n5File, groupKey: str):
@@ -532,17 +540,14 @@ class BaseVolumeDataset(BaseDataset):
         return str(self.sampleDFRow(idx)[keyColumn or self.N5_KEY_COLUMN])
 
     def openKey(self, key: str):
-        """Open the N5 dataset at *key* — the one place a handle is created.
-
-        Nothing is stored on the instance: a cached z5py handle is unpicklable, which is
-        what forced the ``__getstate__``/``__setstate__`` pair these classes no longer
-        need.  Opening is metadata-only, so DataLoader workers each open their own.
-        """
-        return z5py.File(self.n5Path, "r")[key]
+        """...(docstring unchanged)..."""
+        try:
+            return z5py.File(self.n5Path, "r")[key]
+        except KeyError as e:
+            raise KeyError(f"'{key}' not found in {self.n5Path}") from e
 
     def _ensure_open(self, idx: int, keyColumn: Optional[str] = None):
         """Open the dataset of sample *idx*, addressed through the mapper's key column."""
-        print(f"Opening key for sample index {idx} from column {keyColumn}")
         return self.openKey(self.keyOf(idx, keyColumn))
 
     def get_hr_vol(self, idx: int) -> np.ndarray:
@@ -564,11 +569,13 @@ class BaseMaskDataset(BaseVolumeDataset):
     # toUint16's `ceiling`: that is a max (65535), this is a count.
     INTENSITY_LEVELS: int = np.iinfo(np.uint16).max + 1
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
+                 features : tuple[str] = ("area",),
                  resolution: Optional[List[int]] = None,
                  **kwargs) -> None:
         super().__init__(sampleMapperDFPath=sampleMapperDFPath,
                          save_dir=save_dir, resolution=resolution,
                          **kwargs)
+        self.features: tuple[str] = features
 
 
 
@@ -598,6 +605,16 @@ class BaseMaskDataset(BaseVolumeDataset):
 
         return {"volume": self.toUint16(resampled, normalise=not isLabels)}
 
+    # def _statsFromMask(self, rawVol : np.ndarray, maskVol : np.ndarray, feaures: tuple[str]) -> pd.DataFrame:
+    #     """Region statistics of **one** volume: a row per labelled object, or a single row for
+    #     the hole-filled foreground as a whole when *globalMask*."""
+    #     labels = binary_fill_holes(maskVol > 0)
+    #     df : pd.DataFrame = BBOXDF(img2ps.BBoxes.from_mask(labels,
+    #                                           rawVol,
+    #                                           feaures))
+    #     df.drop(columns=MOBIE_LABEL_KEY, inplace=True)
+    #     return df
+
     def __writeKeyMask__(self) -> None:
         """
         Same as in self.__writeVolume__ but includes self.assertPairsWithRaw validation
@@ -626,6 +643,7 @@ class BaseMaskDataset(BaseVolumeDataset):
 
 
         self.sampleMapperDF[self.N5_MASK_KEY_COLUMN] = keys.to_numpy()
+
 
 
 
@@ -816,12 +834,16 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
     """
 
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
+                 features : tuple[str] = ("area",),
                  **kwargs) -> None:
         # Assigned before super(): its __init__ validates the paths and runs the whole
         # N5 conversion off these columns.
         super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
+                         features=features,
                          **kwargs)
 
+    # TODO: Below not ready yet as BaseVolume asserts all sample paths to exist in a root directory
+    @NotImplementedError
     def validateSamplePaths(self) -> None:
         """Replaces the single-directory contract of the base class with a wider one.
 
@@ -854,80 +876,45 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
                     self.sampleRoot)
 
 
-class BaseObjectDataset(MultiDirectoryN5Dataset):
+
+class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
     """The base class dealt with samples, which where volumes. Here,
     this holds but the class also works with objects which exist in samples.
-    This class can process multi directories but therefore cannot use labels to retrieve objects, instead it is the dataframe index"""
+    This class can process multi directories but therefore cannot use labels to retrieve objects, instead it is the dataframe index.
 
-    objectMapperDF : Optional[Union[pd.DataFrame, list]] = []
+    sample:param """
+
     BBOX_COLUMNS = BBOX_COLUMNS
     BBOX_SLICE_COLUMN = "bbox_slices"
-    # TODO: Seems like object here is also interpreted as global volume as volume saving method are applied here. Object volumes should not be saved but only BBOX extracted from global volume
-    OBJECT_LABEL_COLUMN = MOBIE_LABEL_KEY
+    OBJECT_LABEL_COLUMN = MOBIE_LABEL_KEY # Instra sample object label
     OBJECT_DF_PATH_COLUMN = "objectDF_path"
 
-    def __init__(self, sampleMapperDFPath: str, save_dir: str,
-                 channelColumn: str = "channel",
+    def __init__(self, sampleMapperDFPath: str, save_dir: str, overrideObjectDF: bool = False,
+                 features : tuple[str] = ("area",),
                  **kwargs) -> None:
-        # Per-instance accumulator. The class-level [] above is only a type default:
-        # `self.objectMapperDF.append(...)` never assigns, so without this every
-        # instance appended into the SAME class list and inherited the previous
-        # dataset's objects. Assigned before super(), which runs the conversion.
-        self.objectMapperDF: list = []
         super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
-                         channelColumn=channelColumn, **kwargs)
+                         features=features,
+                         **kwargs)
+        
+        self.overrideObjectDF : bool = overrideObjectDF
 
-    # TODO: Maybe we can use OBJECT_LABEL_COLUMN directly as object label instead of creating a nwe one. Need to ensure it is unique
+        if not os.path.exists(self.objectDFPath) or self.overrideObjectDF:
+            # Attempt to obtain the bboxs to construct objectMapperDF
+            print(f"Did not find an objectMapperDF at the following path, thus generating anew: {self.objectDFPath}")
+            self.__generateObjectMappingDF__()
+
+        else:
+            print(f"Utilizing objectMapperDF at the following path:\n{self.objectDFPath}")
+            self.objectMapperDF = SampleLoaderBioImage.loadData(self.objectDFPath)
+
+
 
     # TODO: Label logic we could transfer to a torch.Dataset class ??? Which would ensure this class
     # TODO: have had processed to N5 beforehand ???
 
-
     # TODO: Maybe add method property to dynamically find objectMapperDF using self.datasetDir ?
 
     # TODO: Find a way to first process to obtain dataobjectDF before instantiating this class
-    def __setattr__(self, name, value):
-        if name == "objectMapperDF" and isinstance(value, pd.DataFrame) and not hasattr(self, "objectMapperDF"):
-            # Updating the indexing incase sampleMapperDF has been filtered
-            value = value[value[self.SAMPLE_PATH_COLUMN].isin(self.sampleMapperDF[self.SAMPLE_PATH_COLUMN])].reset_index()
-        super().__setattr__(name, value)          # actually store the value
-
-    def retrospectiveObjectMapperDF(self) -> pd.DataFrame:
-
-        objectMapperDF = [SampleLoaderBioImage.loadData(self.singVolumeObjectDFPath(int(sample_row.name), sample_row[self.SAMPLE_MASK_PATH_COLUMN])) for _, sample_row in self.sampleMapperDF.iterrows()]
-        self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge(objectDF=pd.concat(objectMapperDF, axis=0),
-                                                                        sampleDF=self.sampleMapperDF, on=[self.N5_MASK_KEY_COLUMN,
-                                                                                                          BaseDataset.SAMPLE_LABEL_COLUMN])
-
-        self.removeSegmentationErrors()
-        
-    def __obtainAllObjectBBOX__(self):
-        keys = pd.Index(
-            [self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey=self.N5_MASK_KEY, channel=self.channelOf(row))
-             for _, row in self.sampleMapperDF.iterrows()])
-
-        for key, (idx, row) in zip(keys, self.sampleMapperDF.iterrows()):
-
-                if key in self.sampleMapperDF[self.N5_MASK_KEY_COLUMN].tolist():
-                    mask = super().get_hr_mask(idx)
-                    # NOTE: Only can compute after resampled volume. If placed before, computation will be wrong
-                    dataFrameObject: pd.DataFrame = mask2BBOXDF(mask)
-                    # NOTE: Save each key to map objects to samples
-                    # TODO: Maybe use the checkpoint method instead ?????
-                    self.registerSample2SingleVolumeObjectDF(dataFrameObject, self.N5_MASK_KEY_COLUMN, key,
-                                                             sample_row=row)
-                    self.objectMapperDF.append(dataFrameObject)
-                else:
-                    print(f"{key} not in column {self.N5_MASK_KEY_COLUMN} instead we have {row[self.N5_MASK_KEY_COLUMN]}")
-
-        self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge(objectDF=pd.concat(self.objectMapperDF, axis=0),
-                                                                        sampleDF=self.sampleMapperDF, on=[self.N5_MASK_KEY_COLUMN,
-                                                                                                          BaseDataset.SAMPLE_LABEL_COLUMN])
-
-
-        self.removeSegmentationErrors()
-
-        self.showTestVolumes()
 
     def removeSegmentationErrors(self):
 
@@ -947,6 +934,11 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         else:
             raise Exception("No n5 volumes were processed and object dataframe does not exist. Something went wrong")
 
+    def randomCandidate(self) -> int:
+        isNuclei = self.objectMapperDF[self.CHANNEL_COLUMN].str.contains("Nuclei", na=False).to_numpy()
+        candidates = np.flatnonzero(isNuclei) if isNuclei.any() else np.arange(len(self.objectMapperDF))
+        return int(np.random.choice(candidates))
+
 
     def showTestVolumes(self):
         """Plot one random object as a sanity check.  Never fails the conversion.
@@ -955,25 +947,17 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         with no such channel used to end a successful ``run()`` with
         ``ValueError: a cannot be empty`` out of ``rng.choice``.
         """
-        candidates = self.objectMapperDF.index[
-            self.objectMapperDF[self.CHANNEL_COLUMN].str.contains("Nuclei", na=False)
-        ].to_numpy()
-        if not candidates.size:
-            candidates = self.objectMapperDF.index.to_numpy()
-        if not candidates.size:
-            logger.warning("No objects to show; skipping the test plot.")
-            return
+
+        object_index : int = self.randomCandidate()
 
         fig, ax = plt.subplots(1, 2)
-        rng = np.random.default_rng(42)
-        object_index = rng.choice(candidates)
 
         hr_vol = self.get_hr_vol(object_index)
         masked_hr_vol = self.get_masked_hr_vol(object_index)
         mid_slice = hr_vol.shape[0] // 2
         CustomMatplotlib.subImshow(ax[0], hr_vol[mid_slice], label="Raw object volume", vmin=0, vmax=hr_vol[mid_slice].max())
         CustomMatplotlib.subImshow(ax[1], masked_hr_vol[mid_slice], label="Masked raw object volume", vmin=0, vmax=masked_hr_vol[mid_slice].max())
-
+        return hr_vol, masked_hr_vol, object_index
 
     @cached_property
     def objectDFDir(self):
@@ -992,195 +976,121 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         sampleSubDir = os.path.dirname(samplePath).replace(self.sampleRoot, "")  # ......\condition
         return sampleSubDir
 
-    def singVolumeObjectDFPath(self, sample_idx : int, samplePath :str):
+    def singleSampleObjectMapperDFPath(self, samplePath: str):
 
         sampleFileName = os.path.splitext(os.path.basename(samplePath))[0]
 
         dirs = f"{self.objectDFDir}{self.experimentRelativeDir(samplePath)}"
+
         path = util.get_savedf_path(dirs,
                                     typie=sampleFileName) # #training_processed/tables/single_volume/bbox_sampleFileName.json
 
-        self.sampleMapperDF.loc[sample_idx, self.OBJECT_DF_PATH_COLUMN] = path
-
         return path
 
-    def registerSample2SingleVolumeObjectDF(self, dataFrameObject, keyColumn, n5VolumeKey, sample_row : pd.Series):
-        dataFrameObject[keyColumn] = n5VolumeKey
-        dataFrameObject[BaseDataset.SAMPLE_LABEL_COLUMN] = sample_row.name
+    def sampleTransformObjectDF(self, sample_label: int):
+        sample_idx : int = self.sampleMapperDF.loc[self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] == sample_label].index[0]
+        image: np.ndarray = super().get_hr_vol(sample_idx)
+        # TODO: Continue here to implement with image intensity
+        dataFrameObject = mask2BBOXDF(super().get_hr_mask(sample_idx), image, self.features)
+        dataFrameObject[self.SAMPLE_LABEL_COLUMN] = sample_label
         return dataFrameObject
 
+    def generateSingleSampleObjectDF(self, sample_row: pd.Series, override : bool = False) -> str:
+
+        volumePath : str = sample_row[self.SAMPLE_MASK_PATH_COLUMN]
+        sample_label: int = sample_row[self.SAMPLE_LABEL_COLUMN]
+
+        dfPath : str = self.singleSampleObjectMapperDFPath(volumePath)
+
+        if not os.path.exists(dfPath) or SampleLoaderBioImage.loadData(dfPath).dropna(subset=BBOX_COLUMNS).shape[0] == 0\
+                or override:
+            print(f"Not existing dataframe or BBOX empty dataframe or overriding: {dfPath}")
+
+            dataFrameObject : pd.DataFrame = self.sampleTransformObjectDF(sample_label)
+
+            dataFrameObject.to_json(dfPath)
+
+        return dfPath
+
+    def __len__(self) -> int:  # global length
+        return len(self.objectMapperDF)
+
+    def index2MultiLabel(self, object_index: int) -> tuple[int, int]:  # global idx -> (sample, object)
+        return self.objectMapperDF.index[object_index]
+
+    def multiLabel2Index(self, sample_label: int, object_label: int) -> int:  # (sample, object) -> global idx
+        return self.objectMapperDF.index.get_loc((sample_label, object_label))
+
+    def getObjectRow(self, object_index: int) -> pd.Series:
+        return self.objectMapperDF.iloc[object_index]
+
+    def getObjectRowbyMultiLabel(self, sample_label: int, object_label: int) -> pd.Series:
+        return self.objectMapperDF.index.get_loc((sample_label, object_label))
 
 
-    def reloadSingleVolumeObjectDF(self, keyColumn, n5VolumeKey, pathColumn,
-                                   sample_row: pd.Series) -> pd.DataFrame:
-        """The per-volume object table saved by a previous run, for a skipped sample.
 
-        The counterpart of :meth:`checkpointSingleVolumeObjectDF`: it is what makes the
-        conversion genuinely resumable, since a sample already in the N5 contributes no
-        objects to this run's accumulator.  ``singVolumeObjectDFPath`` is also what
-        re-stamps ``OBJECT_DF_PATH_COLUMN`` on the mapper, so calling it here keeps that
-        column populated on a resume.  Falls back to re-deriving the table from the
-        stored mask when the checkpoint is missing or unreadable.
+    def __generateObjectMappingDF__(self) -> None:
         """
-        path = self.singVolumeObjectDFPath(int(sample_row.name), sample_row[pathColumn])
-        try:
-            dataFrameObject = pd.read_json(path)
-        except (ValueError, OSError) as error:
-            logger.warning("Object table unreadable (%s: %s); re-deriving from %s",
-                           path, error, n5VolumeKey)
-            dataFrameObject = mask2BBOXDF(np.asarray(self.openKey(n5VolumeKey)[:]))
-            return self.checkpointSingleVolumeObjectDF(dataFrameObject, keyColumn,
-                                                       n5VolumeKey, pathColumn, sample_row)
-        return self.registerSample2SingleVolumeObjectDF(dataFrameObject, keyColumn,
-                                                        n5VolumeKey, sample_row)
-
-    def checkpointSingleVolumeObjectDF(self, dataFrameObject: pd.DataFrame, keyColumn, n5VolumeKey, pathColumn, sample_row : pd.Series) -> pd.DataFrame:
-        # TODO: Later, create a function gathering all the dataframes if os.path.exists(self.objectDFPath)
-        dataFrameObject = self.registerSample2SingleVolumeObjectDF(dataFrameObject, keyColumn, n5VolumeKey, sample_row)
-        dataFrameObject.to_json(self.singVolumeObjectDFPath(int(sample_row.name), sample_row[pathColumn]))
-
-        return dataFrameObject
-
-    def __writeKeyMask__(self) -> None:
-        """Write one dataset per sample under *subkey*; record its key in *keyColumn*.
-
-        Keys always derive from the sample *volume* path, so every role of a sample
-        (raw, mask, ...) lands in that sample's one group whatever column the pixels
-        came from.  Samples already present are skipped, which is what makes
-        construction idempotent and an interrupted run resumable.  The N5 is opened
-        once for the whole column.
         """
 
+        # TODO: Not sur how changing samplePath to maskPath will change df object mapper saving
 
-        pathColumn = self.SAMPLE_MASK_PATH_COLUMN
-        subkey= self.N5_MASK_KEY
-        keyColumn= self.N5_MASK_KEY_COLUMN
-        validate = self.assertPairsWithRaw
-        interpolationOrder = self.MASK_INTERPOLATION_ORDER
+        dfpaths = []
 
+        for i, row in self.sampleMapperDF.iterrows():
 
-        if pathColumn not in self.sampleMapperDF.columns:
-            raise KeyError(
-                f"Sample mapper has no {pathColumn!r} column: "
-                f"{list(self.sampleMapperDF.columns)}")
+            dfPath : str = self.generateSingleSampleObjectDF(row, self.overrideObjectDF)
 
-        # Keys are pure path arithmetic, so they are derived — and checked for
-        # collisions — before a single voxel is written and overwrites its neighbour.
-        # NOTE: Constructed from sample path, channel and volume type (e.g. raw, mask etc.) indicator subkey
-        keys = pd.Index([self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey=subkey, channel=self.channelOf(row))
-                         for _, row in self.sampleMapperDF.iterrows()])
+            dfpaths.append(dfPath)
 
-        # Note: Test if duplicated keys exist
-        duplicates = keys[keys.duplicated()].unique().tolist()
-        if duplicates:
-            raise ValueError(
-                f"Sample mapper maps several rows onto the same N5 key: {duplicates[:5]}")
+        self.objectMapperDF: pd.DataFrame = pd.concat([SampleLoaderBioImage.loadData(p) for p in dfpaths], axis=0)
 
-        with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
-
-            for key, (i, row) in zip(keys, self.sampleMapperDF.iterrows()):
-                if self.containsKey(n5File, key):
-                    # Still validated: the check reads metadata only, and skipping it on
-                    # resume meant an existing dataset was never checked against its pair.
-                    if validate is not None:
-                        validate(n5File, key, None)
-                    logger.debug("Already in N5, skipping: %s", key)
-                    # The object table is built in this loop, so skipping the write must
-                    # not skip the table — otherwise a second run appends nothing and the
-                    # concat below gets an empty list.  The per-volume table was saved on
-                    # the first pass; read it back instead of re-deriving it.
-                    self.objectMapperDF.append(
-                        self.reloadSingleVolumeObjectDF(keyColumn, key, pathColumn, row))
-                    continue
-                print(f"Writing {key} of indx {i} keys to N5 file {self.n5Path}")
-                prepared_dict: dict = self.preprocessVolume(row[pathColumn], interpolationOrder)
-
-                volume: np.ndarray = prepared_dict.pop("volume")
-
-                # NOTE: Only can compute after resampled volume. If placed before, computation will be wrong
-                dataFrameObject: pd.DataFrame = mask2BBOXDF(volume)
-
-                if validate is not None:
-                    validate(n5File, key, volume)
-
-                self.writeN5Dataset(n5File, key, volume, self.channelOf(row))
-
-                logger.info("Wrote %s <- %s", key, row[pathColumn])
-
-                # NOTE: Save each key to map objects to samples
-                self.objectMapperDF.append(self.checkpointSingleVolumeObjectDF(dataFrameObject,
-                                                                      keyColumn, key, pathColumn, row))
-
-
-        self.sampleMapperDF[keyColumn] = keys.to_numpy()
-
-        self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge(objectDF=pd.concat(self.objectMapperDF, axis=0),
-                                                                        sampleDF=self.sampleMapperDF, on=[keyColumn, BaseDataset.SAMPLE_LABEL_COLUMN])
+        self.sampleDF2ObjectDFMerge()
 
         self.removeSegmentationErrors()
 
-    @staticmethod
-    def sampleDF2ObjectDFMerge(objectDF, sampleDF, on : list[str]) -> pd.DataFrame:
-        if sampleDF.columns.isin(BaseObjectDataset.BBOX_COLUMNS).any():
-            sampleDF.drop(columns=BaseObjectDataset.BBOX_COLUMNS, inplace=True)
+        keys = [self.SAMPLE_LABEL_COLUMN, self.OBJECT_LABEL_COLUMN]
 
-        return objectDF.merge(sampleDF, on=on
-                                  ,how="left",
-                                  validate="many_to_one", suffixes=("","sample_"))
+        # drop=False keeps the columns, so row[SAMPLE_LABEL_COLUMN] still works
+        self.objectMapperDF.set_index(pd.MultiIndex.from_frame(self.objectMapperDF[keys]), inplace=True)
 
-    def createDatasetN5File(self) -> None:
-        super().createDatasetN5File()
+        assert self.objectMapperDF.index.is_unique, "duplicate (sample_label, object_label) pairs"
 
+        self.objectMapperDF.to_json(self.objectDFPath, orient="records")
 
+    def sampleDF2ObjectDFMerge(self):
+        assert isinstance(self.objectMapperDF, pd.DataFrame), f"We need objectMapperDF to be an dataframe not : {type(self.objectMapperDF)}"
+        self.objectMapperDF = self.objectMapperDF.merge(self.sampleMapperDF, on=[self.SAMPLE_LABEL_COLUMN],how="left",validate="many_to_one",suffixes=("","sample_"))
 
-    def objectDFRow(self, idx: int) -> pd.Series:
-        """Positional row lookup.
-
-        DataLoader samplers yield positions, not index labels, so every ``__getitem__``
-        path must use ``.iloc``. Mixing ``.loc`` in is only correct while the index
-        happens to be a clean RangeIndex.
-        """
-        return self.objectMapperDF.iloc[int(idx)]
+    def objectCrop(self, idx: int, sampletypekey: str) -> Tuple[pd.Series, np.ndarray]:
+        """Object *idx*'s (positional) row and its bbox crop of the *sampletypekey* dataset."""
+        row = self.getObjectRow(idx)
+        key = self.sampleN5Key(row[self.SAMPLE_PATH_COLUMN], sampletypekey, self.channelOf(row))
+        bbox = self.arrayBBOX2Slice(row[self.BBOX_COLUMNS].to_numpy(dtype=int))
+        return row, np.asarray(self.openKey(key)[bbox])
 
     def get_hr_vol(self, idx: int) -> np.ndarray:
-        """Raw volume of sample *idx*, or only *bbox* (a tuple of slices) when given."""
-        # TODO: objectDFRow and getBBOXSlice goes through objectMapperDF twice needlessly
-        # TODO: Belongs in BaseMaskDataset
-        sample_label : int = self.objectDFRow(idx)[self.SAMPLE_LABEL_COLUMN]
-        sample_idx = self.sample2Index(sample_label)
-        Volume = self._ensure_open(sample_idx, self.N5_KEY_COLUMN)
-        bbox = self.getBBOXSlice(self.objectMapperDF, idx)
-        return np.asarray(Volume[bbox])
+        return self.objectCrop(idx, self.N5_RAW_KEY)[1]
 
     def get_hr_mask(self, idx: int) -> np.ndarray:
-        """Instance mask of sample *idx*, isolated to *label* when one is given.
-
-        With *label*, every voxel not belonging to it is zeroed, so the result names one
-        object; without, the full label volume comes through unchanged.
-        """
-        sample_label: int = self.objectDFRow(idx)[self.SAMPLE_LABEL_COLUMN]
-        object_label: int = self.objectDFRow(idx)[MOBIE_LABEL_KEY]
-        sample_idx = self.sample2Index(sample_label)
-        Mask = self._ensure_open(sample_idx, self.N5_MASK_KEY_COLUMN)
-        bbox = self.getBBOXSlice(self.objectMapperDF, idx)
-        print(f"get_hr_mask: {idx} sample_idx: {sample_idx} object_label: {object_label} bbox: {bbox} Mask shape: {Mask.shape}")
-        return (Mask[bbox] == object_label).astype(np.int16)
-
+        row, crop = self.objectCrop(idx, self.N5_MASK_KEY)
+        return (crop == row[self.OBJECT_LABEL_COLUMN]).astype(np.int16)
 
     def run(self) -> None:
         super().run()
+        self.__generateObjectMappingDF__()
         self.showTestVolumes()
 
 
     @staticmethod
     def getAllLabels(df)-> np.ndarray[Any, np.int16]:
-        return df[BaseObjectDataset.OBJECT_LABEL_COLUMN].dropna().to_numpy().astype(np.int16).flatten()
+        return df[BaseObjectBBOXDataset.OBJECT_LABEL_COLUMN].dropna().to_numpy().astype(np.int16).flatten()
 
     @staticmethod
     def dfBBOXIndex2Label(df, df_indx) -> int:
         indices = df.index.to_numpy()
         if df_indx in indices:
-            out = df.loc[df_indx, BaseObjectDataset.OBJECT_LABEL_COLUMN]
+            out = df.loc[df_indx, BaseObjectBBOXDataset.OBJECT_LABEL_COLUMN]
             if isinstance(out, pd.Series):
                 return int(out.iloc[0])
             return out
@@ -1192,10 +1102,10 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
     @staticmethod
     def label2DFBBOXIndex(df, label)-> int:
         # TODO: Need to adjust for MultiDirectory object dataframe
-        labels = BaseObjectDataset.getAllLabels(df)
+        labels = BaseObjectBBOXDataset.getAllLabels(df)
         if label in labels:
             assert (labels == label).sum() == 1, f"The label {label} is more than once ({(labels == label).sum()}) in the object dataframe"
-            return df.loc[df[BaseObjectDataset.OBJECT_LABEL_COLUMN] == label, :].index.tolist()[0]
+            return df.loc[df[BaseObjectBBOXDataset.OBJECT_LABEL_COLUMN] == label, :].index.tolist()[0]
         else:
             raise KeyError(f"Label {label} does not exist in dataset")
 
@@ -1209,7 +1119,7 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
     def getArrayFromBBOXDF(df: pd.DataFrame, df_indx) -> np.ndarray:
 
         # Extract and ensure numerical values
-        bbox_values = [df.loc[df_indx, dim] for dim in BaseObjectDataset.BBOX_COLUMNS]
+        bbox_values = [df.loc[df_indx, dim] for dim in BaseObjectBBOXDataset.BBOX_COLUMNS]
 
         if not all(isinstance(val, numbers.Number) for val in bbox_values):
             raise TypeError("All bounding box values must be numeric, but got: "
@@ -1263,27 +1173,12 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         return slice(b[0], b[1]), slice(b[2], b[3]), slice(b[4], b[5])
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 if __name__ == "__main__":
 
-    save_dir = r"E:\Project 2\Neurospheres\Ihssane\data"
-    sampleMapperDFPath = os.path.join(save_dir, "sample_mapper_crop_cleaned.csv")
+    save_dir = r"ssh CALI3:~/scratch/Project 2/Spheres/hepatospheres/Ihssane/data"
 
-    inst = BaseObjectDataset(sampleMapperDFPath, save_dir)
-    inst.run()
+    sampleMapperDFPath = os.path.join(save_dir, "filtered_mapper_canaliculi_nuclei.csv")
+    inst = BaseObjectBBOXDataset(sampleMapperDFPath, save_dir, overrideObjectDF=False,
+                                 features=("intensity_mean", "intensity_std"))
+    inst.showTestVolumes()
+    plt.show()

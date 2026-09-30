@@ -148,8 +148,10 @@ class Classification:
         return Classification._FACTORIES[method](metric).fit(embeddings, labels)
 
     @staticmethod
-    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None,
-                                    mapping: dict = None, gtColumn="") -> Figure:
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = None, gtColumn="",
+                                    colours=None) -> Figure:
+
+
         mapping = mapping or {}
         ks: list[int] = classifier.classes_
         cm = confusion_matrix(gt, classifier.predict(x), normalize="true")
@@ -162,7 +164,7 @@ class Classification:
 
         # This is the one figure that wanted the module-level "poster" context, so it
         # now asks for it explicitly instead of every importer paying for it.
-        with sns.plotting_context("poster"):
+        with sns.plotting_context("notebook"):
             fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
             sns.heatmap(
                 cm, ax=ax, annot=annot, cmap="Blues",
@@ -176,6 +178,9 @@ class Classification:
             # *current* figure and worked here only because it happened to be this one.
             plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize)
             plt.setp(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
+            for t in ax.get_xticklabels() + ax.get_yticklabels():
+                t.set_color((colours or {}).get(t.get_text(), "black"))
+
             fig.tight_layout()
 
         CustomMatplotlib.saveFig(fig, save_dir=save_dir,
@@ -242,29 +247,14 @@ class EmbeddingAnalysis:
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
-    def __init__(
-        self,
-        df_path: str | None = None,
-        type: str = EMBED_DICT_EMBED,
-        instancelabelColumn: str = MOBIE_LABEL_KEY,
-        gtColumn: str | list[str] | None = None,
-        classMapping: dict | None = None,
-        label_order: list | None = None,
-        save_dir: str | None = None,
-        binary: bool = False,
-        dbscan: bool = False,
-        leiden: bool = True,
-        leiden_resolution: float = 1.0,
-        leiden_n_iterations: int = 2,
-        leiden_n_neighbors: int = 15,
-        leiden_distance_metric: str = "euclidean",
-        metadDataFramePath: Optional[str] = None,
-        classifier_method: str | None = "LogisticRegression",
-        greyBackground: bool = False,
-        data_df: pd.DataFrame | None = None,
-        embeddings: np.ndarray | None = None,
-        default_class_column: str = "Class",
-    ) -> None:
+    def __init__(self, df_path: str | None = None, type: str = EMBED_DICT_EMBED,
+                 instancelabelColumn: str = MOBIE_LABEL_KEY, gtColumn: str | list[str] | None = None,
+                 classMapping: dict | None = None, label_order: list | None = None, save_dir: str | None = None,
+                 dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
+                 leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean",
+                 metadDataFramePath: Optional[str] = None, classifier_method: str | None = "LogisticRegression",
+                 greyBackground: bool = False, data_df: pd.DataFrame | None = None,
+                 embeddings: np.ndarray | None = None, default_class_column: str = "Class") -> None:
         """Analyse a set of embeddings.
 
         Give exactly one source: *df_path* (a JSON table), *data_df* (an in-memory
@@ -316,7 +306,7 @@ class EmbeddingAnalysis:
         # (labels, figure) tuple here, leaving predLabels a *tuple* for the whole
         # lifetime of the object.
         if self._has_gt and classifier_method is not None:
-            self.classify(binary=binary, mapping=classMapping)
+            self.classify(mapping=classMapping)
         else:
             self.classifier = None
             self.predLabels = (self.gtlabels if self._has_gt
@@ -424,26 +414,14 @@ class EmbeddingAnalysis:
         return [self.classMapping[k] for k in sorted(self.classMapping) if k != 0]
 
     @classmethod
-    def from_dataframe(
-        cls,
-        data_df: pd.DataFrame,
-        type: str = MASKED_FEATURES_KEY,
-        instancelabelColumn: str = MOBIE_LABEL_KEY,
-        gtColumn: str | list[str] | None = None,
-        save_dir: str | None = None,
-        classMapping: dict | None = None,
-        label_order: list | None = None,
-        binary: bool = False,
-        dbscan: bool = False,
-        leiden: bool = True,
-        leiden_resolution: float = 1.0,
-        leiden_n_iterations: int = 2,
-        leiden_n_neighbors: int = 15,
-        leiden_distance_metric: str = "euclidean",
-        metadDataFramePath: str | None = None,
-        classifier_method: str | None = "LogisticRegression",
-        greyBackground: bool = False,
-    ) -> "EmbeddingAnalysis":
+    def from_dataframe(cls, data_df: pd.DataFrame, type: str = MASKED_FEATURES_KEY,
+                       instancelabelColumn: str = MOBIE_LABEL_KEY, gtColumn: str | list[str] | None = None,
+                       save_dir: str | None = None, classMapping: dict | None = None, label_order: list | None = None,
+                       dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
+                       leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15,
+                       leiden_distance_metric: str = "euclidean", metadDataFramePath: str | None = None,
+                       classifier_method: str | None = "LogisticRegression",
+                       greyBackground: bool = False) -> "EmbeddingAnalysis":
         """Construct from an in-memory table; vectors come from its *type* column.
 
         An ordinary call to ``__init__`` -- this used to forge an instance with
@@ -455,7 +433,7 @@ class EmbeddingAnalysis:
         instance = cls(
             data_df=data_df, type=type, instancelabelColumn=instancelabelColumn,
             gtColumn=gtColumn, save_dir=save_dir, classMapping=classMapping,
-            label_order=label_order, binary=binary, dbscan=dbscan, leiden=leiden,
+            label_order=label_order,  dbscan=dbscan, leiden=leiden,
             leiden_resolution=leiden_resolution,
             leiden_n_iterations=leiden_n_iterations,
             leiden_n_neighbors=leiden_n_neighbors,
@@ -628,60 +606,41 @@ class EmbeddingAnalysis:
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
-    def classify(self, binary: bool = False, train_size: float = 0.6,
+    def classify(self, train_size: float = 0.6,
                  mapping: dict = None, classifier_weights=None) -> tuple[np.ndarray, Figure | None]:
-        """Fit (or reuse) a classifier and record its predictions on ``results_df``.
 
-        Returns ``(predLabels, confusionFigure)``.  Both are also stored on the
-        instance, as ``self.predLabels`` and ``self.confusionFigure`` -- the return
-        annotation used to claim a bare ``np.ndarray`` while returning the pair,
-        which is how ``__init__`` came to store a tuple in ``self.predLabels``.
+        """Fit a classifier (or reuse ``classifier_weights``) on the labelled embeddings,
+        write predictions, mapped names and class probabilities to ``results_df`` and
+        return ``(predLabels, confusionFigure)``.  The held-out split used for the
+        confusion matrix is kept as ``self._X_val`` / ``self._y_val``.
         """
+        mapping = {**self.classMapping, **(mapping or {})}
         if classifier_weights is None:
-            X_train, X_val, y_train, y_val = train_test_split(
-                self.trainEmbeddings, self.traingt, train_size=train_size,
-                stratify=self.traingt, random_state=42
-            )
-            print(
-                f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
-            print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
+            split = lambda strat: train_test_split(self.trainEmbeddings, self.traingt,
+                                                   train_size=train_size, stratify=strat, random_state=42)
+            try:
+                X_train, self._X_val, y_train, self._y_val = split(self.traingt)
+            except ValueError:  # a class too rare to stratify (e.g. sanity-check batches)
+                X_train, self._X_val, y_train, self._y_val = split(None)
 
-            self.classifier = Classification.train_classifier(
-                X_train, y_train, method=self.classifier_method
-            )
+            self.classifier = Classification.train_classifier(X_train, y_train, method=self.classifier_method)
         else:
-            self.classifier = classifier_weights
-            X_val, y_val = self.trainEmbeddings, self.traingt
+            self.classifier, self._X_val, self._y_val = classifier_weights, self.trainEmbeddings, self.traingt
 
-        # "LinearRegression" is in the registry for backwards compatibility but is a
-        # regressor: no classes_, no predict_proba, and accuracy_score rejects its
-        # continuous output.  One check gates every classifier-only step below.
-        isClassifier = hasattr(self.classifier, "classes_")
-        self.train_accuracy = (
-            Classification.getAccuracy(X_val, y_val, self.classifier) if isClassifier
-            else self.classifier.score(X_val, y_val)      # R^2 for a regressor
-        )
-        print(f"Validation {'accuracy' if isClassifier else 'R^2'}: {self.train_accuracy:.4f}")
+        self.train_accuracy = Classification.getAccuracy(self._X_val, self._y_val, self.classifier)
+        print(f"Samples — train: {len(self.traingt) - len(self._y_val)}, val: {len(self._y_val)} | "
+              f"validation accuracy: {self.train_accuracy:.4f}")
 
         self.predLabels = self.classifier.predict(self.embeddings)
         self.classColumn = self.classifier_method
         self.results_df[self.classColumn] = self.predLabels
-        # classMapping is normalised to {} in __init__, so the old
-        # `if self.classMapping is not None: ... else: ...` had a dead else branch.
-        self.results_df[self.classMappedColumn] = np.array(
-            [self.classMapping.get(label, label) for label in self.predLabels]
-        )
+        self.results_df[self.classMappedColumn] = [mapping.get(l, l) for l in self.predLabels]
+        self.results_df[[f"proba_{c}" for c in self.classifier.classes_]] = self.classifier.predict_proba(self.embeddings)
 
-        self.confusionFigure = None
-        if isClassifier:
-            proba = self.classifier.predict_proba(self.embeddings)
-            for i, cls in enumerate(self.classifier.classes_):
-                self.results_df[f"proba_{cls}"] = proba[:, i]
-            self.confusionFigure = Classification.createConfusionMatrixFigure(
-                x=X_val, gt=y_val, classifier=self.classifier,
-                save_dir=self.save_dir, mapping=mapping or self.classMapping,
-                gtColumn=self.gtColumn
-            )
+        self.confusionFigure = Classification.createConfusionMatrixFigure(
+            x=self._X_val, gt=self._y_val, classifier=self.classifier, save_dir=self.save_dir,
+            mapping=mapping, gtColumn=self.gtColumn,
+            colours=self.computePLTColours(self.results_df[[self.gtColumn]].copy(), self.gtColumn, mapping=mapping))
         return self.predLabels, self.confusionFigure
 
     # ------------------------------------------------------------------ #
@@ -943,20 +902,10 @@ class EmbeddingAnalysis:
         self._saveFigure(fig, f"distance_matrix_{metric}.png")
         return self._returnFigure(fig, show)
 
-    def plotPCALoadings(
-        self,
-        n_components: int = 3,
-        by: str = "feature",
-        columnMapping: dict | list | None = None,
-        features: slice | list | None = None,
-        sort_by: str | None = "PC1",
-        palette: str | list = "Set2",
-        residual_label: str | None = None,
-        residual_color: str = "lightgrey",
-        figsize: tuple | None = None,
-        save_dir: str | None = None,
-        show: bool = False,
-    ) -> Figure:
+    def plotPCALoadings(self, n_components: int = 3, by: str = "feature", columnMapping: dict | list | None = None,
+                        features: slice | list | None = None, sort_by: str | None = "PC1",
+                        residual_label: str | None = None, figsize: tuple | None = None, save_dir: str | None = None,
+                        show: bool = False) -> Figure:
         """Stacked fractional bar plot of the PCA loadings, in either direction.
 
         The variancePartition ``plotPercentBars`` idiom: every bar spans 100 %.
@@ -997,73 +946,39 @@ class EmbeddingAnalysis:
         Type size comes from the class (``plotContext`` / ``fontScale``), not from
         the module-level "poster" context, which crowds one-label-per-feature bars.
         """
-        if by not in ("feature", "component"):
-            raise ValueError(f"by must be 'feature' or 'component', got {by!r}")
+        axis, orient, xlabel = {  # KeyError doubles as validation of `by`
+            "feature": (1, lambda d: d, "Variance explained (%)"),  # a feature's variance over PCs
+            "component": (0, lambda d: d.T, "Contribution to component (%)"),  # a PC's variance over features
+        }[by]
         if not hasattr(self, "loadings"):
             self.pca()
 
-        sq = self.loadings.pow(2)
-        mapping = dict(enumerate(columnMapping)) if isinstance(columnMapping, list) \
-            else (columnMapping or {})
+        sq = self.loadings.pow(2)  # features x PCs
+        share = sq.div(sq.sum(axis=axis), axis=1 - axis).iloc[slice(None) if features is None else features, :n_components]
+        share = share.sort_values(sort_by, ascending=False) if sort_by else share
+        names = pd.Series(columnMapping, dtype=object).rename(int)  # list -> positions, dict -> keys
+        share.index = [names.get(k, f"feature {k}") for k in share.index]
+        share.columns = [f"{pc} ({r:.1%})" for pc, r in
+                         zip(share.columns, self.pca_model.explained_variance_ratio_)]
+        share = orient(share)  # rows = bars, columns = segments
+        share[residual_label] = 1.0 - share.sum(axis=1)  # whatever the shown segments leave
 
-        def name(i):
-            return str(mapping.get(i, mapping.get(str(i), f"feature {i}")))
-
-        if by == "feature":
-            residual_label = residual_label or "Other PCs"
-            frac = sq.div(sq.sum(axis=1), axis=0)           # feature variance -> PCs
-            keep = list(frac.columns[:n_components])
-            frac = frac[keep].assign(**{residual_label: 1.0 - frac[keep].sum(axis=1)})
-            if features is not None:
-                frac = frac.iloc[features]
-            if sort_by:
-                frac = frac.sort_values(sort_by, ascending=False)
-            bars = [name(i) for i in frac.index]
-            xlabel = "Variance explained (%)"
-        else:
-            residual_label = residual_label or "Other features"
-            contrib = sq.div(sq.sum(axis=0), axis=1).iloc[:, :n_components]  # PC variance -> features
-            shown = contrib if features is None else contrib.iloc[features]
-            if sort_by:
-                shown = shown.sort_values(sort_by, ascending=False)
-            frac = shown.T                                  # index = PCs, columns = features
-            frac.columns = self._uniqueLabels([name(i) for i in shown.index], shown.index)
-            if len(shown) < len(contrib):
-                frac[residual_label] = 1.0 - frac.sum(axis=1)
-            bars = [f"{pc} ({r:.1%})" for pc, r in
-                    zip(frac.index, self.pca_model.explained_variance_ratio_)]
-            xlabel = "Contribution to component (%)"
-
-        bars = self._uniqueLabels(bars, frac.index)
-
-        segments = [c for c in frac.columns if c != residual_label]
-        colors = dict(zip(segments, sns.color_palette(palette, len(segments))))
-        colors[residual_label] = residual_color
-
-        # seaborn has no stacked barplot: draw reverse-cumulative widths so each
-        # narrower bar overpaints the left edge of the previous one.  Everything
-        # is built inside the context manager so the artists pick up its rc.
-        cum = frac.cumsum(axis=1) * 100
         with self._plottingContext():
-            fig, ax = plt.subplots(figsize=figsize or (10, 0.6 * len(frac) + 2))
-            for col in reversed(frac.columns):
-                sns.barplot(x=cum[col].to_numpy(), y=bars, order=bars, orient="y",
-                            color=colors[col], label=col, errorbar=None, width=0.7, ax=ax)
-
+            fig, ax = plt.subplots(figsize=figsize or (10, 0.6 * len(share) + 2))
+            share.mul(100).plot.barh(stacked=True, color=sns.color_palette(n_colors=share.shape[1]),
+                                     width=0.7, ax=ax)
+            ax.invert_yaxis()  # first bar on top
             ax.set(xlim=(0, 100), xlabel=xlabel, ylabel="")
-            handles, legend_labels = ax.get_legend_handles_labels()
-            ax.legend(handles[::-1], legend_labels[::-1], loc="center left",
-                      bbox_to_anchor=(1.02, 0.5), frameon=False)
+            ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
             sns.despine(left=True)
             fig.tight_layout()
 
         self._saveFigure(fig, f"pca_loadings_bars_by_{by}.png", save_dir)
+
         return self._returnFigure(fig, show)
 
-    def plotFeatureMeans(self, columnMapping: dict | list, groupBy: str,
-                         features: slice | list | None = None, sort_by: str | None = None,
-                         palette: str | list = "Set2", figsize: tuple | None = None,
-                         save_dir: str | None = None, show: bool = False) -> Figure:
+    def plotFeatureMeans(self, columnMapping: dict | list, groupBy: str, features: slice | list | None = None,
+                         figsize: tuple | None = None, save_dir: str | None = None, show: bool = False) -> Figure:
         """Grouped bars of mean feature values, each feature scaled to its own maximum.
 
         Means come from the *unscaled* vectors in ``data_df[self.type]``:
@@ -1082,18 +997,16 @@ class EmbeddingAnalysis:
         frame = pd.DataFrame(getArrayFromDF(self.data_df, self.type), index=self.data_df.index)
         frame = frame.iloc[:, features] if features is not None else frame
 
-        groups = self.results_df[groupBy] if groupBy in self.results_df else self.data_df[groupBy]
-        if self.classMapping and groups.dtype.kind in "iuf":
-            # Ordered categorical so groupby (and seaborn's hue) follow the class
-            # order rather than sorting the names alphabetically.  Unlabelled rows
-            # (code 0, absent from classOrder) become NaN and drop out.
-            groups = pd.Categorical(
-                groups.map(lambda v: self.classMapping.get(int(v), v) if pd.notna(v) else v),
-                categories=self.classOrder, ordered=True,
-            )
+        groups = (self.results_df if groupBy in self.results_df else self.data_df)[groupBy]
+        labelled = (groups.notna() & groups.ne(0)).to_numpy()   # unlabelled/background drop out
+        groups = groups[labelled].to_frame()
+        colours = self.computePLTColours(groups, groupBy)       # names groups in place, class order
 
-        means = frame.groupby(groups, observed=True).mean().T   # features x groups
-        means = means.div(means.abs().max(axis=1), axis=0)      # each feature -> its own max
+        means = (frame[labelled]
+                 .groupby(pd.Categorical(groups[groupBy], categories=list(colours)), observed=True)
+                 .mean().T)       # features x groups
+
+        means = means.div(means.max(axis=1), axis=0)  # each feature -> fraction of its largest class mean
 
         labels = dict(enumerate(columnMapping)) if isinstance(columnMapping, list) else columnMapping
         means.index = [str(labels.get(k, labels.get(str(k), f"feature {k}"))) for k in means.index]
@@ -1102,7 +1015,7 @@ class EmbeddingAnalysis:
             fig, ax = plt.subplots(figsize=figsize or (10, .3 * means.size + 1.5))
             sns.barplot(data=means.rename_axis("feature").reset_index().melt("feature", var_name=groupBy),
                         x="value", y="feature", hue=groupBy, orient="y",
-                        palette=palette, errorbar=None, ax=ax)
+                        palette=colours, hue_order=list(colours),errorbar=None, ax=ax)
             ax.set(xlabel="Mean value (fraction of per-feature maximum)", ylabel="")
             ax.legend(loc="center left", bbox_to_anchor=(1.02, .5), frameon=False, title=groupBy)
             sns.despine(left=True)
@@ -1118,9 +1031,8 @@ class EmbeddingAnalysis:
             return list(labels)
         return [f"{l} [{k}]" for l, k in zip(labels, keys)]
 
-    def vizualisePCA(self, pcas=None, title="", classColoumn: str | None = None,
-                     precomputed_colors: bool = False, axis_range: tuple | None = (-1, 1),
-                     show_axes: bool = True):
+    def vizualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = False,
+                     axis_range: tuple | None = (-1, 1), show_axes: bool = True):
         col = classColoumn if classColoumn is not None else self.classColumn
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
@@ -1137,11 +1049,63 @@ class EmbeddingAnalysis:
             **self.subplots_kwargs
         )
 
-    @staticmethod
-    def vizualiseCoord(points: dict, title="", labels=None, save_dir=None, **subplots_kwargs):
+    def vizualiseCoord(self, points: dict, title="", labels=None, save_dir=None,
+                       colorColumn: str | None = None, **subplots_kwargs):
+        """Scatter ``points``; ``colorColumn`` (a ``results_df`` column, one row per point)
+        overrides ``labels`` as the per-point colour source."""
+        if colorColumn is not None:
+            labels = pd.factorize(self.results_df[colorColumn], sort=True)[0]
         return CustomMatplotlib.simpleScatter(
             points, labels, title=title, save_dir=save_dir, **subplots_kwargs,
         )[0]
+
+    def _classColours(self, plot_df, classColoumn, color_background, mapping, fmt) -> dict:
+        """Replace ``plot_df[classColoumn]`` in place with class names and return
+        ``{name: fmt(r, g, b, alpha)}`` in legend order (8-bit RGB from the Glasbey
+        LUT, alpha in [0, 1]).
+
+        Numeric columns are class codes (0 = unlabelled/background, looked up in
+        ``mapping`` then ``self.classMapping``); any other dtype is factorised into
+        codes 1..n with missing values as 0.  Codes <= 0 are grey, half-transparent
+        unless ``color_background``.
+        """
+        if classColoumn not in plot_df:
+            warnings.warn(f"{classColoumn} is not a column in DataFrame")
+            plot_df[classColoumn] = 0
+        col = plot_df[classColoumn]
+
+        if pd.api.types.is_numeric_dtype(col):
+            codes = col.fillna(0).to_numpy(dtype=int)
+            names = {**self.classMapping, **(mapping or {})}
+        else:
+            codes, cats = pd.factorize(col, sort=True)
+            codes += 1  # factorize marks missing as -1 -> shift so missing is 0
+            names = {0: "unlabelled", **dict(enumerate(cats, 1))}
+        if color_background:
+            names[0] = "background"
+
+        labels = {k: names.get(k, str(k)) for k in np.unique(codes)}
+        plot_df[classColoumn] = pd.Series(codes, index=plot_df.index).map(labels)
+
+        lut = self.color_space
+        return {name: fmt(*lut.rgba_tuple_by_index(k)[:3],
+                          1.0 if k > 0 or color_background else 0.5)
+                for k, name in labels.items()}
+
+    def computePlotlyColours(self, plot_df, classColoumn="color",
+                             color_background=False, mapping=None) -> dict:
+        """``{name: "rgba(r,g,b,a)"}`` for ``px.scatter(color_discrete_map=...)``;
+        pass ``list(result)`` as ``category_orders``."""
+        return self._classColours(plot_df, classColoumn, color_background, mapping,
+                                  lambda r, g, b, a: f"rgba({r},{g},{b},{a})")
+
+    def computePLTColours(self, plot_df, classColoumn="color",
+                          color_background=False, mapping=None) -> dict:
+        """``{name: (r, g, b, a)}`` floats in [0, 1], used as a seaborn ``palette``
+        or a matplotlib ``color``; pass ``list(result)`` as ``hue_order``."""
+        return self._classColours(plot_df, classColoumn, color_background, mapping,
+                                  lambda r, g, b, a: (r / 255, g / 255, b / 255, a))
+
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
@@ -1152,14 +1116,10 @@ class EmbeddingAnalysis:
                        **kwargs) -> plotly.graph_objs.Figure:
         import plotly.express as px
 
-        mapping = mapping or {}
         plot_df = self.results_df.copy()
 
         if axis_range is not None:
-            # Rescale the cloud into `axis_range` and pin both axes to it, so the
-            # plot is centred on the origin with a fixed, readable scale. One
-            # shared factor for x and y: scaling them apart would stretch the
-            # component geometry the scatter exists to show.
+            # Rescale the cloud into `axis_range` ... (keep existing comment)
             lo, hi = axis_range
             span = float(np.nanmax(np.abs(plot_df[[xColumn, yColumn]].to_numpy())))
             if span > 0:
@@ -1170,47 +1130,14 @@ class EmbeddingAnalysis:
         if precomputed_colors:
             # Color column already contains plotly-compatible rgba strings — use directly
             fig = px.scatter(plot_df, x=xColumn, y=yColumn)
-            fig.update_traces(marker=dict(
-                color=plot_df[classColoumn].tolist(), size=4))
+            fig.update_traces(marker_color=plot_df[classColoumn].tolist())
+
         else:
-
-            if classColoumn not in plot_df.columns:
-                print(f"{classColoumn} is not a column in DataFrame")
-                plot_df[classColoumn] = 0
-
-            if pd.api.types.is_numeric_dtype(plot_df[classColoumn]):
-                # Integer class codes: colour through the Glasbey LUT, with 0
-                # reserved for unlabelled/background.
-                plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
-                classLabels = sorted(
-                    plot_df[classColoumn].unique().astype(int).tolist())
-
-                def _label(k: int) -> str:
-                    if k == 0 and color_background:
-                        return "background"
-                    return mapping.get(k, self.classMapping.get(k, str(k)))
-
-                color_map = {
-                    _label(k): f"rgba{self.color_space.rgba_tuple_by_index(k)}"
-                    for k in classLabels}
-                if not color_background:
-                    color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
-                plot_df[classColoumn] = plot_df[classColoumn].astype(int).map(_label)
-                order = [_label(k) for k in classLabels]
-            else:
-                # Already-named categories (e.g. "leiden_trajectory", the mapped
-                # class-name column).  The old code called .astype(int) on these
-                # unconditionally and raised.
-                plot_df[classColoumn] = plot_df[classColoumn].fillna("unlabelled").astype(str)
-                order = sorted(plot_df[classColoumn].unique().tolist())
-                palette = sns.color_palette("tab20", len(order))
-                color_map = {name: f"rgb{tuple(int(c * 255) for c in rgb)}"
-                             for name, rgb in zip(order, palette)}
-
+            color_map = self.computePlotlyColours(plot_df, classColoumn, color_background, mapping)
             fig = px.scatter(
                 plot_df, x=xColumn, y=yColumn, color=classColoumn,
                 color_discrete_map=color_map,
-                category_orders={classColoumn: order},
+                category_orders={classColoumn: list(color_map)},
             )
 
         if not withLegendTitle:
@@ -1442,6 +1369,29 @@ class EmbeddingAnalysis:
         import plotly.figure_factory as ff
         from scipy.spatial.distance import pdist
         import scipy.cluster.hierarchy as sch
+
+        # TODO: For later to colour the branches
+        # import plotly.graph_objects as go
+        #
+        # leaf_df = pd.DataFrame({"class": classes})
+        # color_map = self.computePlotlyColours(leaf_df, "class")  # relabels leaf_df in place
+        #
+        # fig = ff.create_dendrogram(
+        #     centroids,
+        #     orientation="left",
+        #     labels=leaf_df["class"].tolist(),
+        #     distfun=lambda X: pdist(X, metric=metric),
+        #     linkagefun=lambda d: sch.linkage(d, method=linkage),
+        # )
+        # # Leaves sit at distance 0; mark each with its class colour.
+        # leaves = fig.layout.yaxis
+        # fig.add_trace(go.Scatter(
+        #     x=np.zeros(len(leaves.tickvals)), y=leaves.tickvals, mode="markers",
+        #     marker=dict(color=[color_map[t] for t in leaves.ticktext],
+        #                 size=14, symbol="square"),
+        #     hovertext=leaves.ticktext, hoverinfo="text", showlegend=False,
+        # ))
+
 
         classes = sorted(np.unique(self.traingt))
         centroids = np.stack([

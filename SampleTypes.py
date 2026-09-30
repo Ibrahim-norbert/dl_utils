@@ -40,7 +40,7 @@ class Volume(NamedTuple):
 
     ``label`` must be a real int — ``default_collate`` cannot batch ``None`` — and
     ``data`` must be shape-stable across the batch, which the fixed
-    ``CNNVolumeDataset.TARGET_SHAPE`` window guarantees.
+    ``CNNVolumeDatasetObject.TARGET_SHAPE`` window guarantees.
     """
 
     data: torch.Tensor
@@ -83,12 +83,10 @@ class Vertices:
 @dataclass(frozen=True)
 class SonataVertices(Vertices):
     centroid: np.ndarray
-    intensity_mean: np.ndarray
-    intensity_std: np.ndarray
     num_pixels: np.ndarray
     dataIndex: int
 
-    EXTRA = ("centroid", "intensity_mean", "intensity_std", "num_pixels", "dataIndex")
+    EXTRA = ("centroid", "num_pixels", "dataIndex")
 
 
 class PromptData(Data):
