@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
 
 from torch.utils.data import DataLoader
-
+import pytorch_lightning as pl
 from dl_utils import LABEL_KEY, MOBIE_LABEL_KEY
 from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils.SampleTypes import Data, Vertices
@@ -36,7 +36,7 @@ class BaseDataset:
     SAMPLE_PATH_COLUMN: str = "sample_path"
     SAMPLE_LABEL_COLUMN: str = f"sample_{MOBIE_LABEL_KEY}"
 
-    def __init__(self, sampleMapperDFPath: str, save_dir: str, samplePathRegex: str = None, **kwargs) -> None:
+    def __init__(self, sampleMapperDFPath: str, save_dir: str, **kwargs) -> None:
 
         self.sampleMapperDFPath = sampleMapperDFPath
 
@@ -53,6 +53,8 @@ class BaseDataset:
         self.samples: np.ndarray = self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN].to_numpy()
         assert save_dir is not None and isinstance(save_dir, str) or isinstance(save_dir, Path), f"The save directory must be a string, not {save_dir}"
         self.save_dir: str = os.path.abspath(save_dir)
+
+        pl.seed_everything(42, workers=True)
 
     def __len__(self) -> int:
         return self.samples.size

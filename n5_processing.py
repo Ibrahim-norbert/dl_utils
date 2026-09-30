@@ -236,9 +236,7 @@ class BaseVolumeDataset(BaseDataset):
         self.resolution: List[int] = list(resolution or self.DEFAULT_RESOLUTION)
         self.channelKey: str = channelKey
         self.channelColumn: str = channelColumn
-        super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
-                         samplePathRegex=samplePathRegex,
-                         **kwargs)
+        super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir, **kwargs)
 
         assert os.path.basename(self.save_dir) == self.datasetDirName, f"The saving directory must have the same basename as the dataset name: {self.save_dir} == {self.datasetDirName}"
         assert self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].nunique() == self.sampleMapperDF.shape[0], (
@@ -824,7 +822,7 @@ class MultiDirectoryN5Dataset(BaseMaskDataset):
         Samples may live anywhere as long as the mapper is complete, every file exists
         and the volumes share a common root for keys to diverge from.
         """
-        # channelColumn is optional — channelOf falls back to channelKey without it — so
+        # CHANNEL_COLUMN is optional — channelOf falls back to channelKey without it — so
         # a None must not be looked up as if it were a column name.
         required = [column for column
                     in (self.samplePathColumn, self.SAMPLE_MASK_PATH_COLUMN,
@@ -1183,41 +1181,6 @@ class BaseObjectDataset(MultiDirectoryN5Dataset):
         """
         b = getBBOXFromDF(df, idx).flatten()
         return slice(b[0], b[1]), slice(b[2], b[3]), slice(b[4], b[5])
-
-
-    # @staticmethod
-    # def addBBOXSliceCol(table: pd.DataFrame) -> pd.DataFrame:
-    #     """Append a ``"bbox slices"`` column of per-nucleus slice tuples.
-    #
-    #     If any of the expected bounding-box columns are absent from *table*,
-    #     ``merge_with_nucl_table`` is called first to populate them.
-    #
-    #     Parameters
-    #     ----------
-    #     table : pd.DataFrame
-    #         Nucleus table.  Expected bounding-box columns:
-    #         ``bb_min_z``, ``bb_max_z``, ``bb_min_y``, ``bb_max_y``,
-    #         ``bb_min_x``, ``bb_max_x``.
-    #
-    #     Returns
-    #     -------
-    #     pd.DataFrame
-    #         *table* with an added ``"bbox slices"`` column whose values are
-    #         ``(slice_z, slice_y, slice_x)`` tuples at s3 resolution.
-    #     """
-    #
-    #     # Merge nucleus table if any bounding-box columns are absent
-    #     missing_cols: List[str] = [col for col in BaseObjectDataset.BBOX_COLUMNS if col not in table.columns]
-    #     assert not missing_cols, "The bounding box coordinates are incomplete"
-    #
-    #     bbs: List[Tuple[slice]] = [BaseObjectDataset.getBBOXSlice(table, BaseObjectDataset.dfBBOXIndex2Label(table, row.name)) for _, row in table.iterrows()]
-    #
-    #     return util.save2DFcolumn(bbs, BaseObjectDataset.getAllLabels(table), table)
-    #
-    #
-
-
-
 
 
 

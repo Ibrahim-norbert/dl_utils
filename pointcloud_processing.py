@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from dl_utils import MOBIE_LABEL_KEY, util
 from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils.cell_geometry import mask_to_surface_points
-from dl_utils.n5_processing import BaseObjectDataset
+from dl_utils.n5_processing import BaseObjectBBOXDataset
 from skimage.morphology import skeletonize
 import numpy as np
 
@@ -16,7 +16,7 @@ from dl_utils.vizualizations import CustomMatplotlib
 # TODO: The baseclass deals with N5 processing, here it is point cloud processing
     # TODO: Later, create imaginary class baseclassing both PointObject and N5 classes to keep naming conventions the same
 
-class PointObjectDataset(BaseObjectDataset):
+class PointObjectBBOXDataset(BaseObjectBBOXDataset):
     def __init__(self, *args, **kwargs):
 
         super().__init__(*args,**kwargs)
@@ -33,7 +33,7 @@ class PointObjectDataset(BaseObjectDataset):
         rng = np.random.default_rng(42)
         object_index = rng.choice(
             self.objectMapperDF.index[
-                self.objectMapperDF[self.channelColumn].str.contains("Nuclei", na=False)
+                self.objectMapperDF[self.CHANNEL_COLUMN].str.contains("Nuclei", na=False)
             ].to_numpy()
         )
 
@@ -49,7 +49,8 @@ class PointObjectDataset(BaseObjectDataset):
 
     def singleObjectPointcloudDFPath(self, object_label : int, sampleRow : pd.Series) -> str:
         samplePath = sampleRow[self.SAMPLE_PATH_COLUMN]
-        singleObjectDFPath = self.singVolumeObjectDFPath(int(sampleRow.name),samplePath) #training_processed/tables/experiment/bbox_sampleFileName.json
+        singleObjectDFPath = self.singleSampleObjectMapperDFPath(
+            samplePath)  #training_processed/tables/experiment/bbox_sampleFileName.json
         dirs = os.path.dirname(singleObjectDFPath) # ..../experiment/
         sampleFileName = os.path.splitext(os.path.basename(samplePath))[0] # ..../experiment/sampleFileName/
         dirs = os.path.join(dirs, sampleFileName)
@@ -69,7 +70,7 @@ class PointObjectDataset(BaseObjectDataset):
 
 
         pathColumn = self.SAMPLE_MASK_PATH_COLUMN
-        subkey= self.MASK_KEY
+        subkey= self.N5_MASK_KEY
         keyColumn= self.N5_MASK_KEY_COLUMN
         validate = self.assertPairsWithRaw
         interpolationOrder = self.MASK_INTERPOLATION_ORDER
@@ -103,7 +104,7 @@ class PointObjectDataset(BaseObjectDataset):
                     logger.debug("Already in N5, skipping: %s", key)
                     continue
                 print(f"Writing {key} of indx {i} keys to N5 file {self.n5Path}")
-                prepared_dict: dict = self.prepareSampleVolume(row[pathColumn], interpolationOrder)
+                prepared_dict: dict = self.preprocessVolume(row[pathColumn], interpolationOrder)
 
                 volume: np.ndarray = prepared_dict.pop("volume")
 
@@ -123,8 +124,7 @@ class PointObjectDataset(BaseObjectDataset):
 
         self.sampleMapperDF[keyColumn] = keys.to_numpy()
 
-        self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge(objectDF=pd.concat(self.objectMapperDF, axis=0),
-                                                                        sampleDF=self.sampleMapperDF, on=[keyColumn, BaseDataset.SAMPLE_LABEL_COLUMN])
+        self.objectMapperDF: pd.DataFrame = self.sampleDF2ObjectDFMerge()
 
         self.removeSegmentationErrors()
     #
@@ -140,7 +140,7 @@ class PointObjectDataset(BaseObjectDataset):
             # Rooted at the VOLUME, so single- and dual-channel runs produce one layout.
             # Resolved per volume so sub-datasets keep their own leaf and same-basename
             # volumes cannot overwrite each other.
-            pc_dir = self.getSampleDatasetDir(str(vol_path), "point_clouds")
+            pc_dir = self.getSampleDatasetSubDir(str(vol_path), "point_clouds")
             pc_path = self._build_point_cloud(str(vol_path), pc_dir)
             self.instances[str(vol_path)] = pc_path
             row: dict = {
@@ -164,7 +164,7 @@ class PointObjectDataset(BaseObjectDataset):
 
     def _summary_csv_path(self, raw_path: str) -> str:
         """Tier-2 per-organoid summary path: ``point_clouds/<volstem>_summary.csv``."""
-        pc_dir = self.getSampleDatasetDir(raw_path, "point_clouds")
+        pc_dir = self.getSampleDatasetSubDir(raw_path, "point_clouds")
         stem = os.path.splitext(os.path.basename(raw_path))[0]
         return os.path.join(pc_dir, f"{stem}_summary.csv")
 

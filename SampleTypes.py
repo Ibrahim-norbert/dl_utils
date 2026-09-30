@@ -39,7 +39,7 @@ class Volume(NamedTuple):
 
     ``label`` must be a real int — ``default_collate`` cannot batch ``None`` — and
     ``data`` must be shape-stable across the batch, which the fixed
-    ``CNNVolumeDataset.TARGET_SHAPE`` window guarantees.
+    ``CNNVolumeDatasetObject.TARGET_SHAPE`` window guarantees.
     """
 
     data: np.ndarray[Any, np.dtype[np.float32]]

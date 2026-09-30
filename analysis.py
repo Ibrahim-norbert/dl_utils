@@ -1460,14 +1460,8 @@ if __name__ == '__main__':
     save_dir = r"C:\Users\imansaray\repos\PhD_subprojects\representationlearning\data\06_cellpose_sam\predictedMask"
     mapping = {1: "Neuron", 2: "Glial"}
 
-    ea = EmbeddingAnalysis.from_dataframe(
-        data_df=df1,
-        type=MASKED_AVG_TOKEN_FEATURES_KEY,
-        gtColumn='Class',
-        classMapping=mapping,
-        save_dir=save_dir,
-        binary=False,
-    )
+    ea = EmbeddingAnalysis.from_dataframe(data_df=df1, type=MASKED_AVG_TOKEN_FEATURES_KEY, gtColumn='Class',
+                                          save_dir=save_dir, classMapping=mapping)
 
     print(f"Classifier : {ea.classifier_method}")
     print(f"Validation accuracy: {ea.train_accuracy:.4f}")

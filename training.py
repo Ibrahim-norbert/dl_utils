@@ -478,7 +478,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint)
+        state_dict = checkpoint.get("checkpoint", checkpoint)
         # Drop keys whose shapes don't match the module before loading, so an
         # architecture change in the tokenizer/decoder head doesn't abort the load
         # (load_state_dict raises on a shape mismatch even with strict=False). These
@@ -504,7 +504,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
         """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
 
-        Handles both raw state dicts and Lightning checkpoints (nested under "state_dict").
+        Handles both raw state dicts and Lightning checkpoints (nested under "checkpoint").
         Filters out shape-mismatched keys before loading so architecture changes in the
         tokenizer or decoder head don't block the backbone weights from loading.
         Raises FileNotFoundError if the path is set but does not exist.
