@@ -13,9 +13,9 @@ import pandas as pd
 
 from PreliminaryGNN.dataset.io import read_localization_file
 
-X_COLUMN_CANDIDATES = ["x [nm]", "x[nm]", "x[pix]", "x", "X"]
-Y_COLUMN_CANDIDATES = ["y [nm]", "y[nm]", "y[pix]", "y", "Y"]
-Z_COLUMN_CANDIDATES = ["z [nm]", "z[nm]", "z[pix]", "z", "Z"]
+X_COLUMN_CANDIDATES = [ 'xnm', "x [nm]", "x[nm]", "x[pix]", "x", "X"]
+Y_COLUMN_CANDIDATES = [ 'ynm', "y [nm]", "y[nm]", "y[pix]", "y", "Y"]
+Z_COLUMN_CANDIDATES = [ 'znm', "z [nm]", "z[nm]", "z[pix]", "z", "Z"] 
 LABEL_COLUMN_CANDIDATES = [
     "cluster_id",
     "clusterIndex",
@@ -142,16 +142,3 @@ def file_to_vertices(
         dataframe[wanted] if wanted else pd.Series(np.zeros(len(dataframe), dtype=int))
     )
     return localizations, np.atleast_1d(column.to_numpy().squeeze())
-
-
-def normalize(vertices: np.ndarray) -> np.ndarray:
-    """Min-max normalize all spatial columns to [-0.5, 0.5] with isotropic scale.
-
-    Uses the same scale across all axes so relative geometry is preserved.
-    """
-    mins = np.min(vertices, axis=0, keepdims=True)
-    maxs = np.max(vertices, axis=0, keepdims=True)
-    scale = (maxs - mins).max()
-    if scale == 0:
-        return vertices.copy()
-    return (vertices - mins) / scale - 0.5

@@ -20,7 +20,6 @@ import pytorch_lightning as pl
 from dl_utils import LABEL_KEY, MOBIE_LABEL_KEY
 from dl_utils.SampleLoader import SampleLoaderBioImage
 from dl_utils.SampleTypes import Data, Vertices
-from dl_utils import util_base as util
 
 logger = logging.getLogger(__name__)
 class BaseDataset:
