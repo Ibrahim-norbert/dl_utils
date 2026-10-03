@@ -304,30 +304,32 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         args={},
     ) -> types.NoneType:
 
-        _locals = locals()
-        # pl.Trainer exposes precision/num_nodes as read-only properties (data
-        # descriptors, which win over instance-dict entries on read), so storing
-        # them here would only add dead, confusing entries — they are forwarded
-        # explicitly to super().__init__ below instead.
-        for _prop in ("precision", "num_nodes", "devices"):
-            _locals.pop(_prop, None)
-        self.__dict__.update(_locals)
+        self.save_hyperparameters()
+
 
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
-
-        self.modelConfig = modelConfig
+        self.ckptPath=ckptPath
+        self.modelName = modelName
+        self.modelConfig : Namespace = modelConfig
         self.datasetConfig = datasetConfig
-        # Print entries of modelConfig:
-        self.device = self.modelConfig.accelerator
+        self.reproducibility_seed = reproducibility_seed
+        self.num_workers = num_workers
+        self.fast_dev_run = fast_dev_run
+        self.dataset = datasetName
+        self.trainFrac = trainFrac
+        self.shuffle = shuffle
 
-        if self.hparams.fast_dev_run is True or self.hparams.fast_dev_run > 0:
+        # Print entries of modelConfig:
+        self.device = self.modelConfig["accelerator"]
+
+        if self.fast_dev_run is True or self.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
             #self.device = "cpu"
             self.num_workers = 1
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
         # Fix the seed for reproducibility
-        seed_everything(self.hparams.reproducibility_seed, workers=True)
+        seed_everything(self.reproducibility_seed, workers=True)
         # https://docs.pytorch.org/docs/2.9/notes/randomness.html#cuda-convolution-benchmarking
         # cudnn.benchmark = True
         # torch.use_deterministic_algorithms(True,
