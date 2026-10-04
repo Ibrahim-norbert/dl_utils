@@ -40,6 +40,9 @@ from .util_base import (
 
 
 
+def getArrayFromDF(df, column):
+    """Extracts and converts a column from a DataFrame to a NumPy array."""
+    return np.array(df[column].tolist())
 
 def adjust_learning_rate(optimizer, epoch, args, start_epoch):
     """Decay the learning rate with half-cycle cosine after warmup"""
