@@ -22,6 +22,7 @@ import logging
 import numbers
 import os
 from functools import cached_property
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple, Union, Hashable
 
 import numpy as np
@@ -236,7 +237,9 @@ class BaseVolumeDataset(BaseDataset):
         self.resolution: List[int] = list(resolution or self.DEFAULT_RESOLUTION)
         self.channelKey: str = channelKey
         self.channelColumn: str = channelColumn
-        super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir, **kwargs)
+        assert isinstance(save_dir, (str, Path)), f"The save directory must be a string, not {save_dir}"
+        self.save_dir: str = os.path.abspath(save_dir)
+        super().__init__(sampleMapperDFPath=sampleMapperDFPath, **kwargs)
 
         assert os.path.basename(self.save_dir) == self.datasetDirName, f"The saving directory must have the same basename as the dataset name: {self.save_dir} == {self.datasetDirName}"
         assert self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].nunique() == self.sampleMapperDF.shape[0], (

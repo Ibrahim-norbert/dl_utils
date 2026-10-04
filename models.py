@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import yaml
-from yamlfix import fix_files
 from torch.utils.data.dataloader import default_collate
 
 from .constants import LOSS_KEY
@@ -18,23 +17,6 @@ from .util import save_model as _save_model, load_model as _load_model, OneCycle
 
 logger = logging.getLogger(__name__)
 
-def _install_print_tee(save_dir: str) -> None:
-    """Mirror all print() calls to *log_path*, following the same closure
-    pattern as util.print_for_distributed."""
-    import builtins
-    import functools
-    builtin_print = builtins.print
-    log_path = os.path.join(save_dir, "print.txt")
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    log_file = open(log_path, "a", buffering=1)
-
-    @functools.wraps(builtin_print)
-    def _tee_print(*args, **kwargs):
-        builtin_print(*args, **kwargs)
-        builtin_print(*args, **{**kwargs, "file": log_file})
-
-    builtins.print = _tee_print
-    
 class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     """Masked Autoencoder with VisionTransformer backbone"""
 
@@ -43,7 +25,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
 
     def __init__(
         self,
-        save_dir: str,
         backbone : Optional[Union[torch.nn, pl.LightningModule]],
         version_name: str,
         accelerator: str,
@@ -76,7 +57,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.batch_size = batch_size
         self.accelerator = accelerator
         self.version_name = version_name
-        self.save_dir = save_dir
         self.no_weight_decay_keywords = tuple(no_weight_decay_keywords or ())
         self.save_hyperparameters()
 
@@ -89,7 +69,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         # validation_step appends a dict here; on_validation_epoch_end reduces it.
         self.validation_step_outputs: list[dict] = []
 
-        #_install_print_tee(save_dir)
 
     def log(self, *args, **kwargs):
         super().log(*args, **kwargs)
@@ -196,17 +175,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     def get_device(self):
         return next(self.parameters()).device
 
-    def set_save_dir(self):
-
-        dirName = (self.__class__.__name__,)
-
-        if isinstance(self.version_name, str) and self.version_name != "":
-            dirName = dirName + (f"{self.version_name}",)
-
-        self.save_dir = os.path.join(self.save_dir, *dirName)
-
-        os.makedirs(self.save_dir, exist_ok=True)
-
     @staticmethod
     def getConfig(path):
         with open(path, "r") as f:
@@ -224,13 +192,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
 
     def load_model(self, args, model_without_ddp, optimizer, loss_scaler):
         _load_model(args, model_without_ddp, optimizer, loss_scaler)
-
-    def saveConfig(self):
-        path = os.path.join(self.save_dir, self.__class__.__name__)
-        filpath = f"{path}.yaml"
-        with open(filpath, "w") as file:
-            yaml.dump(self.config, file)
-        fix_files([filpath])
 
     def initialize_weights(self):
         self.apply(self._init_weights)

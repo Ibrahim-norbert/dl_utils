@@ -1124,13 +1124,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
     def _compute_save_dir(self) -> str:
         """Hook for subclasses to define the root save directory.
 
-        Called inside __init__ after save_hyperparameters(), so self.modelConfig
-        and self.hparams are already available.  The default falls back to
-        hparams.save_dir (when BaseClassTrainer is used directly) and then to
-        modelConfig.save_dir.  Subclasses override this instead of computing
-        save_dir manually before calling super().__init__().
+        Called inside __init__ after save_hyperparameters(). The trainer's top-level
+        ``save_dir`` is the only source: models and datasets do not take one, and
+        ``getModel`` hands the resolved directory to the model through modelConfig.
+        Subclasses extend this (e.g. append run sub-directories) via ``super()``.
         """
-        return getattr(self, "save_dir", "") or getattr(self.modelConfig, "save_dir", "")
+        return os.path.expanduser(getattr(self.hparams, "save_dir", "") or "")
 
     def fit(self, segmentor, train, val, **kwargs):
 
