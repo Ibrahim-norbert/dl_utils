@@ -315,12 +315,12 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.reproducibility_seed = reproducibility_seed
         self.num_workers = num_workers
         self.fast_dev_run = fast_dev_run
-        self.dataset = datasetName
+        self.dataset = dataset
         self.trainFrac = trainFrac
         self.shuffle = shuffle
 
         # Print entries of modelConfig:
-        self.device = self.modelConfig["accelerator"]
+        self.device = self.modelConfig.accelerator
 
         if self.fast_dev_run is True or self.fast_dev_run > 0:
             # Ideally, you shoud not save config. As it causes problems for reusing
@@ -525,7 +525,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             val_ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=True,
+            persistent_workers=False,
             **kwargs,
         )
         return val_ds
@@ -544,7 +544,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=True,
+            persistent_workers=False,
             **kwargs,
         )
         return dsdl
