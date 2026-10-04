@@ -29,7 +29,7 @@ import logging
 import shutil
 from datetime import timedelta
 
-from dl_utils.util import _tolerant_pickle_module
+#from dl_utils.util import _tolerant_pickle_module
 
 _console_logger = logging.getLogger(__name__)
 
@@ -396,7 +396,9 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return "auto"
 
 
-    
+
+
+
     def save_hyperparameters(self) -> Namespace | types.NoneType:
         # From pytorch_lightning.core.mixins.hparams_mixin import HyperparametersMixin
         current_frame: sys.FrameType | types.NoneType = inspect.currentframe()
@@ -475,8 +477,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         except ModuleNotFoundError as exc:
             print(f"[loadWeights] Checkpoint references missing module "
                   f"'{exc.name}'; retrying tolerantly.")
-            return torch.load(ckptPath, map_location=map_location, weights_only=False,
-                              pickle_module=_tolerant_pickle_module())
+            return torch.load(ckptPath, map_location=map_location, weights_only=False)
 
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
