@@ -138,13 +138,12 @@ class EmbeddingAnalysis:
 
     def __init__(
         self,
-        df_path: str,
+        df_path: Optional[str] = None,
         type: str = EMBED_DICT_EMBED,
         instancelabelColumn: str = MOBIE_LABEL_KEY,
         gtColumn: str = None,
         classMapping: dict = None,
         save_dir: str = None,
-        binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
         leiden_resolution: float = 1.0,
@@ -154,19 +153,29 @@ class EmbeddingAnalysis:
         metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
         greyBackground:bool = False,
+        data_df: Optional[pd.DataFrame] = None,
+        embeddings: Optional[np.ndarray] = None,
         **kwargs,
     ) -> None:
         if classMapping is None:
             classMapping = {}
-        assert isinstance(df_path, str) and df_path.endswith(".json"), \
-            "Dataframe path must be a path to a JSON file."
-        if save_dir is None:
+        if data_df is None:
+            assert isinstance(df_path, str) and df_path.endswith(".json"), \
+                "Either data_df or df_path (a path to a JSON file) must be given."
+            data_df = pd.read_json(df_path)
+        else:
+            data_df = data_df.copy()
+        if save_dir is None and df_path is not None:
             save_dir = os.path.dirname(df_path)
-        self.df_path: str = df_path
+        self.df_path: Optional[str] = df_path
         self.type: str = type
-        self.data_df: pd.DataFrame = pd.read_json(df_path)
+        self.data_df: pd.DataFrame = data_df
         print(f"Available coloumns: {self.data_df.columns.tolist()}")
-        embeddings = getArrayFromDF(self.data_df, type)
+        if embeddings is None:
+            embeddings = getArrayFromDF(self.data_df, type)
+        embeddings = np.asarray(embeddings)
+        assert len(embeddings) == len(self.data_df), \
+            f"embeddings has {len(embeddings)} rows but data_df has {len(self.data_df)}"
         nan_mask = np.isnan(embeddings)
         assert not nan_mask.any(
         ), f"Yes we have {nan_mask.sum()} nans in the array"
@@ -194,7 +203,7 @@ class EmbeddingAnalysis:
             **kwargs,
         )
         self.predLabels = (
-            self.classify(binary=binary, mapping=classMapping)
+            self.classify(mapping=classMapping)
             if self._has_gt
             else np.zeros(len(self.data_df), dtype=int)
         )
@@ -222,7 +231,6 @@ class EmbeddingAnalysis:
         gtColumn: str = None,
         save_dir: str = None,
         classMapping: dict = None,
-        binary: bool = False,
         dbscan: bool = False,
         leiden: bool = True,
         leiden_resolution: float = 1.0,
@@ -505,7 +513,7 @@ class EmbeddingAnalysis:
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
-    def classify(self, binary: bool = False, train_size: float = 0.6, mapping: dict = None, classifier_weights=None) -> np.ndarray:
+    def classify(self, train_size: float = 0.6, mapping: dict = None, classifier_weights=None) -> np.ndarray:
 
         if classifier_weights is None:
             X_train, X_val, y_train, y_val = train_test_split(
