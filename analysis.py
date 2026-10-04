@@ -1,6 +1,6 @@
 import base64
 import logging
-from typing import Optional
+from typing import Literal, Optional
 from dataclasses import dataclass
 import os
 import pathlib
@@ -13,7 +13,9 @@ import pandas as pd
 import plotly
 import seaborn as sns
 import skimage
+from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from PIL import Image
 from sklearn.cluster import DBSCAN
 from sklearn.decomposition import PCA
@@ -130,7 +132,13 @@ class ClusteringConfig:
     distance_metric: str = "euclidean"
 
 
+PlotBackend = Literal["plotly", "matplotlib"]
+
+
 class EmbeddingAnalysis:
+    # matplotlib for raster sinks (TensorBoard): plotly's static export needs a
+    # headless browser.
+    plot_backend: PlotBackend = "plotly"
 
     # ------------------------------------------------------------------ #
     # Construction                                                         #
@@ -153,6 +161,7 @@ class EmbeddingAnalysis:
         metadDataFramePath: Optional[str] = None,
         classifier_method: str = "LogisticRegression",
         greyBackground:bool = False,
+        plot_backend: PlotBackend = "plotly",
         data_df: Optional[pd.DataFrame] = None,
         embeddings: Optional[np.ndarray] = None,
         **kwargs,
@@ -168,6 +177,7 @@ class EmbeddingAnalysis:
         if save_dir is None and df_path is not None:
             save_dir = os.path.dirname(df_path)
         self.df_path: Optional[str] = df_path
+        self.plot_backend = plot_backend
         self.type: str = type
         self.data_df: pd.DataFrame = data_df
         print(f"Available coloumns: {self.data_df.columns.tolist()}")
@@ -765,55 +775,84 @@ class EmbeddingAnalysis:
                        mapping: dict = {}, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
-                       show: bool = False, **kwargs) -> plotly.graph_objs.Figure:
-        import plotly.express as px
+                       show: bool = False, **kwargs):
+        """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
+        With ``precomputed_colors`` the column holds per-point colours (hex
+        strings or numbers for a colour scale); otherwise class labels.
+        """
         plot_df = self.results_df.copy()
+        palette = None
 
-        if precomputed_colors:
-            # Color column already contains plotly-compatible rgba strings — use directly
-            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
-            fig.update_traces(marker=dict(
-                color=plot_df[classColoumn].tolist(), size=4))
-        else:
-
+        if not precomputed_colors:
             if classColoumn not in plot_df.columns:
                 print(f"{classColoumn} is not a column in DataFrame")
                 plot_df[classColoumn] = 0
 
-            plot_df[classColoumn] = plot_df[classColoumn].fillna(0)
-            classLabels = sorted(
-                plot_df[classColoumn].unique().astype(int).tolist())
+            classLabels = plot_df[classColoumn].fillna(0).astype(int)
 
             def _label(k: int) -> str:
                 if k == 0 and color_background:
                     return "background"
                 return mapping.get(k, self.classMapping.get(k, str(k)))
 
-            color_map = {
-                _label(k): f"rgba{self.color_space.rgba_tuple_by_index(k)}" for k in classLabels}
-            if not color_background:
-                color_map[_label(0)] = "rgba(128, 128, 128, 0.5)"
-            plot_df[classColoumn] = plot_df[classColoumn].astype(
-                int).map(_label)
+            def _color(k: int) -> str:
+                if k == 0:
+                    return "#808080" if color_background else "#80808080"
+                return to_hex(np.divide(self.color_space.rgba_tuple_by_index(k), 255),
+                              keep_alpha=True)
 
+            palette = {_label(k): _color(k) for k in sorted(classLabels.unique())}
+            plot_df[classColoumn] = classLabels.map(_label)
+
+        draw = (self._scatter_matplotlib if self.plot_backend == "matplotlib"
+                else self._scatter_plotly)
+        fig = draw(
+            plot_df, xColumn, yColumn, classColoumn, palette,
+            xaxis_title=xaxis_title, yaxis_title=yaxis_title,
+            legend_title=legend_title if withLegendTitle else None,
+            show_axes=show_axes,
+            marker_size=kwargs.get("markerSize", 3),
+            opacity=kwargs.get("markerOpacity", 0.8),
+        )
+
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            path = os.path.join(save_dir, f"{classColoumn}_{legend_title}.svg")
+            if isinstance(fig, Figure):
+                fig.savefig(path)
+            else:
+                fig.write_image(path)
+        # Displaying is independent of saving: this used to sit inside the branch
+        # above, so a caller could not save without also popping the figure open.
+        # Off by default - training/validation logging routes figures to
+        # TensorBoard/WandB and must not render anything. Notebooks either let
+        # Jupyter render the returned figure or pass show=True.
+        if show:
+            fig.show()
+        return fig
+
+    @staticmethod
+    def _scatter_plotly(plot_df, xColumn, yColumn, classColoumn, palette, *,
+                        xaxis_title, yaxis_title, legend_title, show_axes,
+                        marker_size, opacity) -> plotly.graph_objs.Figure:
+        import plotly.express as px
+
+        if palette is None:
+            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
+            fig.update_traces(marker=dict(color=plot_df[classColoumn].tolist()))
+        else:
             fig = px.scatter(
                 plot_df, x=xColumn, y=yColumn, color=classColoumn,
-                color_discrete_map=color_map,
-                category_orders={classColoumn: [
-                    _label(k) for k in classLabels]},
+                color_discrete_map=palette,
+                category_orders={classColoumn: list(palette)},
             )
 
-        if not withLegendTitle:
-            legend_title = None
-
+        axis = dict(showgrid=False, zeroline=False, showticklabels=show_axes,
+                    visible=True, showline=show_axes, linecolor="black",
+                    ticks="outside" if show_axes else "", tickfont=dict(color="white"))
         fig.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
-                       visible=True, showline=show_axes, linecolor="black",
-                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
-                       visible=True, showline=show_axes, linecolor="black",
-                       ticks="outside" if show_axes else "", tickfont=dict(color="white")),
+            xaxis=axis, yaxis=axis,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=True,
@@ -824,20 +863,28 @@ class EmbeddingAnalysis:
             legend_title_text=legend_title,
             xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
+        fig.update_traces(marker=dict(size=marker_size, opacity=opacity))
+        return fig
 
-        fig.update_traces(marker=dict(size=kwargs.get(
-            "markerSize", 3), opacity=kwargs.get("markerOpacity", 0.8)))
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.write_image(os.path.join(
-                save_dir, f"{classColoumn}_{legend_title}.svg"))
-        # Displaying is independent of saving: this used to sit inside the branch
-        # above, so a caller could not save without also popping the figure open.
-        # Off by default - training/validation logging routes figures to
-        # TensorBoard/WandB and must not render anything. Notebooks either let
-        # Jupyter render the returned figure or pass show=True.
-        if show:
-            fig.show()
+    @staticmethod
+    def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
+                            xaxis_title, yaxis_title, legend_title, show_axes,
+                            marker_size, opacity) -> Figure:
+        colors = plot_df[classColoumn]
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.scatter(plot_df[xColumn], plot_df[yColumn],
+                   c=colors if palette is None else colors.map(palette),
+                   s=marker_size ** 2, alpha=opacity, linewidths=0)  # s is an area
+        if palette is not None:
+            ax.legend(handles=[Line2D([], [], ls="", marker="o", color=c, label=label)
+                               for label, c in palette.items()],
+                      title=legend_title, loc="lower left", bbox_to_anchor=(1, 0))
+        ax.set(xlabel=xaxis_title, ylabel=yaxis_title)
+        ax.grid(False)
+        if not show_axes:
+            ax.set(xticks=[], yticks=[])
+            ax.spines[:].set_visible(False)
+        fig.tight_layout()
         return fig
 
     # ------------------------------------------------------------------ #
