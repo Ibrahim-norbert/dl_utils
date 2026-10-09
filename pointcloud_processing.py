@@ -3,14 +3,14 @@ import os
 import pandas as pd
 from matplotlib import pyplot as plt
 
-from dl_utils import MOBIE_LABEL_KEY, util
-from dl_utils.SampleLoader import SampleLoaderBioImage
-from dl_utils.cell_geometry import mask_to_surface_points
-from dl_utils.n5_processing import BaseObjectBBOXDataset
+import MOBIE_LABEL_KEY, util
+from SampleLoader import SampleLoaderBioImage
+from cell_geometry import mask_to_surface_points
+from n5_processing import BaseObjectBBOXDataset
 from skimage.morphology import skeletonize
 import numpy as np
 
-from dl_utils.vizualizations import CustomMatplotlib
+from vizualizations import CustomMatplotlib
 
 
 # TODO: The baseclass deals with N5 processing, here it is point cloud processing

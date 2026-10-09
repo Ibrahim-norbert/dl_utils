@@ -32,12 +32,14 @@ from matplotlib import pyplot as plt
 from numpy import ndarray, dtype
 from skimage.transform import resize
 
-from dl_utils import img2patch as img2ps, util, MOBIE_LABEL_KEY
-from dl_utils.SampleLoader import SampleLoaderBioImage
-from dl_utils.datasets import BaseDataset
-from dl_utils.util import getArrayFromDF
-from dl_utils.util_base import save2DFcolumn
-from dl_utils.vizualizations import CustomMatplotlib
+import img2patch as img2ps
+import util
+from constants import MOBIE_LABEL_KEY
+from SampleLoader import SampleLoaderBioImage
+from datasets import BaseDataset
+from util import getArrayFromDF
+from util_base import save2DFcolumn
+from vizualizations import CustomMatplotlib
 
 logger = logging.getLogger(__name__)
 

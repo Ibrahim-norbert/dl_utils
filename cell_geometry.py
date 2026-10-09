@@ -16,7 +16,7 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from .SampleTypes import CellGeometry, Data
+from SampleTypes import CellGeometry, Data
 from skimage.measure import marching_cubes
 
 logger = logging.getLogger(__name__)

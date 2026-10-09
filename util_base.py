@@ -11,8 +11,8 @@ import yaml
 # Import the module (not the values) so that NUCL_TABLE / LM_DF are read at call
 # time. These constants start as None and are reassigned elsewhere at runtime;
 # `from .constants import NUCL_TABLE` would bind the None value permanently.
-from . import constants
-from .constants import MOBIE_LABEL_KEY
+from constants import MOBIE_LABEL_KEY
+import constants
 
 
 dfFileNamePrefix = "bbox"

@@ -12,8 +12,8 @@ import pytorch_lightning as pl
 import yaml
 from torch.utils.data.dataloader import default_collate
 
-from .constants import LOSS_KEY
-from .util import save_model as _save_model, load_model as _load_model, OneCycleLR, CosineScheduler
+from constants import LOSS_KEY
+from util import save_model as _save_model, load_model as _load_model, OneCycleLR, CosineScheduler
 
 logger = logging.getLogger(__name__)
 

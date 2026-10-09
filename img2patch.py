@@ -3,7 +3,7 @@
 import pandas as pd
 import skimage.io
 
-from dl_utils import MOBIE_LABEL_KEY
+from constants import MOBIE_LABEL_KEY
 
 # Column layout for BBoxes arrays: [label, z_min, z_max, y_min, y_max, x_min, x_max]
 BBOX_LABEL_IDX = 0

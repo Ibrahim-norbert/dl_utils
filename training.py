@@ -21,9 +21,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
-import dl_utils.datasets as datasets
+import datasets as datasets
 from pytorch_lightning.callbacks import DeviceStatsMonitor
-from pytorch_lightning.callbacks import LearningRateMonitor
 import gc
 import logging
 import shutil
@@ -280,29 +279,11 @@ class GarbageCollectionCallback(pl.Callback):
 
 
 class BaseClassTrainerAndPredictor(pl.Trainer):
-    def __init__(
-        self,
-        max_epochs=4,
-        ckptPath=None,
-        modelName="SMLMSegmentation",
-        reproducibility_seed=43,
-        num_workers=1,
-        fast_dev_run=False,
-        dataset: str = "SMLM",
-        trainFrac: float = 0.8,
-        batch_size=1,
-        shuffle=True,
-        modelConfig: typing.Union[None, dict] = None,
-        datasetConfig: typing.Union[None, dict] = None,
-        limit_val_batches=0,
-        accumulate_grad_batches=10,
-        use_fsdp: bool = False,
-        devices="auto",
-        num_nodes: int = 1,
-        precision=None,
-        fsdpConfig: typing.Union[None, dict] = None,
-        args={},
-    ) -> types.NoneType:
+    def __init__(self, max_epochs=4, ckptPath=None, modelName="SMLMSegmentation", reproducibility_seed=43,
+                 num_workers=1, fast_dev_run=False, dataset: str = "SMLM", batch_size=1, shuffle=True,
+                 modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
+                 limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
+                 num_nodes: int = 1, precision=None, fsdpConfig: typing.Union[None, dict] = None, args={}) -> types.NoneType:
 
         self.save_hyperparameters()
 
@@ -316,7 +297,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.num_workers = num_workers
         self.fast_dev_run = fast_dev_run
         self.dataset = dataset
-        self.trainFrac = trainFrac
         self.shuffle = shuffle
 
         # Print entries of modelConfig:
@@ -339,17 +319,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         for key, value in vars(self.hparams).items():
             print(f"{key}: {value}")
 
-        # if ckptPath is not None and os.path.exists(ckptPath):
-        #     self.ckpt = BaseClassTrainerAndPredictor.getcheckpointinfoandargs(ckptPath)
-        #     self.epoch = self.ckpt["epoch"]
-        #     max_epochs += self.epoch
-        #     self.epoch_start = max_epochs - self.epoch
-        #     self.epoch_end = max_epochs
-        
-        # Resolve the boolean FSDP switch into a Lightning strategy. Kept as an
-        # overridable hook: this generic base cannot build a model-aware FSDP
-        # wrap policy, so subclasses (e.g. SMLMSegmentationTraining) override
-        # _resolve_strategy to construct the real FSDPStrategy from the model class.
+
         strategy = self._resolve_strategy(use_fsdp, fsdpConfig)
 
         super().__init__(
@@ -530,14 +500,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         )
         return val_ds
 
-    def splitDataset(self, dataset: datasets.BaseDataset, **kwargs):
-        n_total: int = len(dataset)
-        n_train = int(self.trainFrac * n_total)
-        n_val: int = n_total - n_train
-
-        train_ds, val_ds = random_split(dataset, [n_train, n_val], **kwargs)
-
-        return train_ds, val_ds
 
     def getTrainDataloader(self, ds: datasets.BaseDataset, **kwargs):
         dsdl = datasets.BaseDataset.getDataloader(
@@ -549,16 +511,13 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         )
         return dsdl
 
-    def getTrainValDataloader(
-        self, dataset: datasets.BaseDataset, segmentor
-    ):
-        train_ds, val_ds = self.splitDataset(dataset=dataset)
+    @abstractmethod
+    def getDataset(self, dataType, **kwargs):
+        pass
 
-        train_ds = self.getTrainDataloader(train_ds, collate_fn=segmentor.collate_fn)
-
-        val_ds = self.getValDataloader(val_ds=val_ds, collate_fn=segmentor.collate_fn)
-
-        return train_ds, val_ds
+    @abstractmethod
+    def getModel(self, **kwargs):
+        pass
 
     @staticmethod
     def getcheckpointinfoandargs(pnt: typing.Union[str, Path]):
@@ -752,10 +711,6 @@ class SafeEarlyStopping(EarlyStopping):
 
 
 class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
-    _MODEL_METRIC_PREFIXES = {
-        "PointClassifier": ("train/", "val/no_promptlabels/"),
-        "SAMSerialized": ("train/", "val/no_promptlabels/"),
-    }
 
     def __init__(
         self,
@@ -796,14 +751,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         self.save_hyperparameters()
 
         self.kwargs = kwargs
+        self.trainFrac = trainFrac
 
-        # Metric-name prefixes each model family actually logs. Only families whose tags
-        # diverge from the trainer's defaults need an entry; anything unlisted is skipped
-        # rather than guessed at.
-        _MODEL_METRIC_PREFIXES = {
-            "PointClassifier": ("train/", "val/no_promptlabels/"),
-            "SAMSerialized": ("train/", "val/no_promptlabels/"),
-        }
 
         # Allow subclasses to customise the root save directory before versioning.
         # The result is also written into self.hparams so it ends up in the saved YAML.
@@ -881,30 +830,17 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             "gradient_clip_val": gradient_clip_val,
         }
 
-        super().__init__(
-            modelName=modelName,
-            max_epochs=max_epochs,
-            ckptPath=self.hparams.ckptPath,
-            reproducibility_seed=self.hparams.reproducibility_seed,
-            num_workers=self.hparams.num_workers,
-            batch_size=self.hparams.batch_size,
-            trainFrac=self.hparams.trainFrac,
-            shuffle=self.hparams.shuffle,
-            datasetConfig=self.hparams.datasetConfig,
-            modelConfig=self.modelConfig,
-            dataset=self.hparams.dataset,
-            fast_dev_run=self.hparams.fast_dev_run,
-            limit_val_batches=limit_val_batches,
-            accumulate_grad_batches=accumulate_grad_batches,
-            # Distributed knobs: read from hparams so a config-file YAML (merged
-            # by save_hyperparameters above) can flip them, e.g. `use_fsdp: true`.
-            use_fsdp=getattr(self.hparams, "use_fsdp", False),
-            devices=getattr(self.hparams, "devices", "auto"),
-            num_nodes=getattr(self.hparams, "num_nodes", 1),
-            precision=getattr(self.hparams, "precision", None),
-            fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
-            args=args,
-        )
+        super().__init__(max_epochs=max_epochs, ckptPath=self.hparams.ckptPath, modelName=modelName,
+                         reproducibility_seed=self.hparams.reproducibility_seed, num_workers=self.hparams.num_workers,
+                         fast_dev_run=self.hparams.fast_dev_run, dataset=self.hparams.dataset,
+                         batch_size=self.hparams.batch_size, shuffle=self.hparams.shuffle, modelConfig=self.modelConfig,
+                         datasetConfig=self.hparams.datasetConfig, limit_val_batches=limit_val_batches,
+                         accumulate_grad_batches=accumulate_grad_batches,
+                         use_fsdp=getattr(self.hparams, "use_fsdp", False),
+                         devices=getattr(self.hparams, "devices", "auto"),
+                         num_nodes=getattr(self.hparams, "num_nodes", 1),
+                         precision=getattr(self.hparams, "precision", None),
+                         fsdpConfig=getattr(self.hparams, "fsdpConfig", None), args=args)
 
     def _warn_on_unlogged_monitors(self) -> None:
         """Flag a ModelCheckpoint/EarlyStopping monitor the chosen model never logs.
@@ -921,7 +857,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         ``PreliminaryGNN/configs/pointclassifier.yaml`` for a config that lines up.
         """
         hp = self.hparams
-        prefixes = self._MODEL_METRIC_PREFIXES.get(getattr(hp, "modelName", ""))
+        prefixes = getattr(hp, "modelName", "")
         if not prefixes:
             return
         for setting, fatal in (
@@ -1132,11 +1068,45 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         """
         return os.path.expanduser(getattr(self.hparams, "save_dir", "") or "")
 
-    def fit(self, segmentor, train, val, **kwargs):
+    def splitDataset(self, dataset: datasets.BaseDataset, **kwargs):
+        n_total: int = len(dataset)
+        n_train = int(self.trainFrac * n_total)
+        n_val: int = n_total - n_train
 
+        train_ds, val_ds = random_split(dataset, [n_train, n_val], **kwargs)
+
+        return train_ds, val_ds
+
+    @abstractmethod
+    def getTrainValDataloader(
+            self, dataset: datasets.BaseDataset, segmentor
+    ):
+        train_ds, val_ds = self.splitDataset(dataset=dataset)
+
+        train_ds = self.getTrainDataloader(train_ds, collate_fn=segmentor.collate_fn)
+
+        val_ds = self.getValDataloader(val_ds=val_ds, collate_fn=segmentor.collate_fn)
+
+        return train_ds, val_ds
+
+    def fit(self, **kwargs):
    
         try:
-            super().fit(segmentor, train, val, **kwargs)
+
+            segmentor = self.getModel()
+
+            dataset = self.getDataset(self.dataset, **self.datasetConfig)
+
+            train, val = self.getTrainValDataloader(dataset, segmentor)
+
+            ckpt_path = (
+                self.hparams.ckptPath
+                if self.hparams.ckptPath and os.path.exists(self.hparams.ckptPath)
+                else None
+            )
+
+            super().fit(segmentor, train, val, ckpt_path=ckpt_path, **kwargs)
+
             self.hparams.ckptPath = self.checkpoint_callback.best_model_path
 
         except:
@@ -1148,15 +1118,3 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
         finally:
             self.saveConfig()
-
-    @abstractmethod
-    def getDataset(self, dataType, kwargs):
-        pass
-
-    @abstractmethod
-    def getModel(self, kwargs):
-        pass
-
-    @abstractmethod
-    def getTrainValDataloader(self, dataset, segmentor):
-        pass
