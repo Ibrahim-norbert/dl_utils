@@ -110,16 +110,6 @@ class EmbeddingsNumpy:
     pred_labels: Optional[np.ndarray] = None
     misc: Optional[dict] = None
 
-
-
-
-
-
-
-
-
-
-
 @dataclass(frozen=False, eq=False)
 class Embeddings:
     data: torch.Tensor
@@ -151,6 +141,18 @@ class Embeddings:
 
     def detach_cpu(self) -> "Embeddings":
         return self._apply(_t_detach_cpu)
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 @dataclass(frozen=False, eq=False)

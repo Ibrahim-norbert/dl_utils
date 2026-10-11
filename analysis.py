@@ -780,7 +780,7 @@ class EmbeddingAnalysis:
                        mapping: Optional[dict] = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        heatmap: bool = False,
-                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
+                       show_axes: bool = False, color_background: bool = False, withLegend=True,
                        show: bool = False, **kwargs):
         """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
@@ -788,11 +788,12 @@ class EmbeddingAnalysis:
         - ``precomputed_colors``: the column already holds per-point colours
         - ``heatmap``: float values are normalised over vmin..vmax (``vmin``/``vmax``
           via kwargs, default: min..max of the non-background values) and shown
-          with a normalised 0..1 colour bar titled *classColoumn*.
+          with a normalised 0..1 colour bar titled *classColoumn*. Background is
+          label 0 in ``self.gtColumn``.
+        - ``withLegend``: show the legend (or, for ``heatmap``, the colour bar).
         Background (0) and NaN are always grey and never part of a colour scale.
         """
         df, col, lut = self.results_df.copy(), classColoumn, self.color_space
-        title = legend_title if withLegendTitle else None
         is_mpl = self.plot_backend == "matplotlib"
         draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
                       else (self._scatter_plotly, "write_image"))
@@ -801,23 +802,32 @@ class EmbeddingAnalysis:
         palette = None
 
         if heatmap:
-            # (n, 4) uint8 RGBA, unpacked once from the packed ARGB LUT
-            argb = np.asarray(lut.indices, dtype=np.uint32)[:, None]
+            # (n, 4) uint8 RGBA, unpacked once from the packed ARGB LUT.
+            # Entry 0 belongs to label 0 (background) -> not part of the colour scale.
+            argb = np.asarray(lut.indices, dtype=np.uint32)[1:, None]
             rgba = (argb >> np.array([16, 8, 0, 24], dtype=np.uint32)) & 0xFF
             n = len(rgba)
 
             values = pd.to_numeric(df[col], errors="coerce").replace(0, np.nan).to_numpy(dtype=float)
-            valid = values[~np.isnan(values)]
-            lo, hi = (valid.min(), valid.max()) if valid.size else (0.0, 1.0)  # adaptive data range
+            # Background is defined by label 0 in the label column, not by the plotted value.
+            bg_col = self.gtColumn if self._has_gt else None
+            if bg_col is not None and bg_col in df.columns:
+                bg_labels = pd.to_numeric(df[bg_col], errors="coerce").to_numpy(dtype=float)
+                values[bg_labels == 0] = np.nan
+            background = np.isnan(values)
+
+            valid = values[~background]
+            lo, hi = (valid.min(), valid.max()) if valid.size else (0.0, 1.0)  # range over foreground only
             vmin, vmax = kwargs.get("vmin"), kwargs.get("vmax")
             vmin = lo if vmin is None else float(vmin)
             vmax = hi if vmax is None else float(vmax)
             vmax = vmin + ((vmax - vmin) or 1.0)  # equal limits -> range 1
 
             norm = np.clip((values - vmin) / (vmax - vmin), 0, 1)
-            slot = np.nan_to_num(norm * (n - 1), nan=n).astype(int)  # NaN/background -> grey slot n
+            slot = np.nan_to_num(norm * (n - 1), nan=n).astype(int)  # background/NaN -> grey slot n
 
             df[col] = np.array([to_hex(*c) for c in rgba.tolist()] + [grey])[slot]
+            df = df.iloc[np.argsort(~background, kind="stable")]  # grey drawn first, underneath
 
         elif not precomputed_colors:
             labels = pd.Series(df.get(col, 0), index=df.index).fillna(0).astype(int)
@@ -831,29 +841,32 @@ class EmbeddingAnalysis:
 
         fig = draw(df, xColumn, yColumn, col, palette,
                    xaxis_title=xaxis_title, yaxis_title=yaxis_title,
-                   legend_title=None if heatmap else title,
+                   legend_title=None if heatmap else legend_title,
                    show_axes=show_axes,
                    marker_size=kwargs.get("markerSize", 3),
                    opacity=kwargs.get("markerOpacity", 0.8))
 
-        if heatmap:  # normalised 0..1 colour bar instead of legend, built from the same LUT
+        if heatmap or not withLegend:  # heatmaps get a colour bar instead of a legend
+            if is_mpl:
+                for legend in filter(None, [fig.axes[0].get_legend(), *fig.legends]):
+                    legend.remove()
+                fig.tight_layout()
+            else:
+                fig.update_layout(showlegend=False)
+
+        if heatmap and withLegend:  # normalised 0..1 colour bar, built from the same LUT
             ticks = np.linspace(0, 1, 5)
             ticktext = [f"{t:.2g}" for t in ticks]
-            cbar_title = col if withLegendTitle else None
             if is_mpl:
-                ax = fig.axes[0]
-                for legend in filter(None, [ax.get_legend(), *fig.legends]):
-                    legend.remove()
                 sm = ScalarMappable(Normalize(0, 1), ListedColormap(rgba / 255.0))
-                fig.colorbar(sm, ax=ax, ticks=ticks, label=cbar_title).set_ticklabels(ticktext)
+                fig.colorbar(sm, ax=fig.axes[0], ticks=ticks, label=col).set_ticklabels(ticktext)
             else:
                 scale = [[i / (n - 1), f"rgba({r},{g},{b},{a / 255:.3f})"]
                          for i, (r, g, b, a) in enumerate(rgba.tolist())]
-                fig.update_layout(showlegend=False)
                 fig.add_trace(Scatter(  # invisible trace that only carries the colour bar
                     x=[None], y=[None], mode="markers", hoverinfo="skip", showlegend=False,
                     marker=dict(colorscale=scale, cmin=0, cmax=1, color=[0], showscale=True,
-                                colorbar=dict(title=cbar_title, tickvals=list(ticks), ticktext=ticktext))))
+                                colorbar=dict(title=col, tickvals=list(ticks), ticktext=ticktext))))
 
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
