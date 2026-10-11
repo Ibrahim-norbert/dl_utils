@@ -21,12 +21,14 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger as logger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
-import datasets as datasets
+
 from pytorch_lightning.callbacks import DeviceStatsMonitor
 import gc
 import logging
 import shutil
 from datetime import timedelta
+
+from datasets import BaseDataset
 
 #from dl_utils.util import _tolerant_pickle_module
 
@@ -282,7 +284,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def __init__(self, max_epochs=4, ckptPath=None, modelName="SMLMSegmentation", reproducibility_seed=43,
                  num_workers=1, fast_dev_run=False, dataset: str = "SMLM", batch_size=1, shuffle=True,
                  modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
-                 limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
+                 config_file = None, limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
                  num_nodes: int = 1, precision=None, fsdpConfig: typing.Union[None, dict] = None, args={}) -> types.NoneType:
 
         self.save_hyperparameters()
@@ -298,7 +300,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         self.fast_dev_run = fast_dev_run
         self.dataset = dataset
         self.shuffle = shuffle
-
+        self.config_file = config_file
         # Print entries of modelConfig:
         self.device = self.modelConfig.accelerator
 
@@ -340,6 +342,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             num_sanity_val_steps=1,
             **args,
         )
+
 
     def _resolve_strategy(
         self,
@@ -452,6 +455,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("checkpoint", checkpoint)
+        state_dict = state_dict.get("state_dict", state_dict)
         # Drop keys whose shapes don't match the module before loading, so an
         # architecture change in the tokenizer/decoder head doesn't abort the load
         # (load_state_dict raises on a shape mismatch even with strict=False). These
@@ -489,9 +493,9 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             raise FileNotFoundError(f"[getModel] weightsCkptPath not found: {weights_path}")
         return self.loadWeights(weights_path, module)
 
-    def getValDataloader(self, val_ds: datasets.BaseDataset, **kwargs):
+    def getValDataloader(self, val_ds: BaseDataset, **kwargs):
 
-        val_ds = datasets.BaseDataset.getDataloader(
+        val_ds = BaseDataset.getDataloader(
             val_ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -501,8 +505,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return val_ds
 
 
-    def getTrainDataloader(self, ds: datasets.BaseDataset, **kwargs):
-        dsdl = datasets.BaseDataset.getDataloader(
+    def getTrainDataloader(self, ds: BaseDataset, **kwargs):
+        dsdl = BaseDataset.getDataloader(
             ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -512,7 +516,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return dsdl
 
     @abstractmethod
-    def getDataset(self, dataType, **kwargs):
+    def getDataset(self, **kwargs):
         pass
 
     @abstractmethod
@@ -524,6 +528,22 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         print("Predicting features for", pnt)
         checkpoint_info = torch.load(pnt, map_location="cpu")
         return checkpoint_info
+
+    @classmethod
+    def fromConfig(cls, configPath):
+        import yaml
+
+        with open(configPath, encoding="utf-8") as _f:
+            _cfg = yaml.safe_load(_f)
+        # Extract top-level scalar overrides so they are passed as explicit
+        # kwargs rather than relying on config_file parsing (which only works
+        # when the trainer is launched via the CLI argument parser).
+        _scalar_keys = {
+            k: v
+            for k, v in _cfg.items()
+            if not isinstance(v, (dict, list)) and k != "config_file"
+        }
+        return cls(config_file=configPath, **_scalar_keys)
 
     def getConfig(self):
 
@@ -840,7 +860,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                          devices=getattr(self.hparams, "devices", "auto"),
                          num_nodes=getattr(self.hparams, "num_nodes", 1),
                          precision=getattr(self.hparams, "precision", None),
-                         fsdpConfig=getattr(self.hparams, "fsdpConfig", None), args=args)
+                         fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
+                         config_file=config_file,
+                         args=args)
 
     def _warn_on_unlogged_monitors(self) -> None:
         """Flag a ModelCheckpoint/EarlyStopping monitor the chosen model never logs.
@@ -866,7 +888,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         ):
             monitor = str(getattr(hp, setting, "") or "")
             if monitor and not monitor.startswith(prefixes):
-                logger.warning(
+                print(
                     "%s=%r is never logged by %s, which logs under %s. %s Set a "
                     "matching monitor (see PreliminaryGNN/configs/pointclassifier.yaml).",
                     setting,
@@ -884,23 +906,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
     @classmethod
     def get_class_name(cls):
         return cls.__name__
-
-    @classmethod
-    def fromConfig(cls, configPath):
-        import yaml
-
-        with open(configPath, encoding="utf-8") as _f:
-            _cfg = yaml.safe_load(_f)
-        # Extract top-level scalar overrides so they are passed as explicit
-        # kwargs rather than relying on config_file parsing (which only works
-        # when the trainer is launched via the CLI argument parser).
-        _scalar_keys = {
-            k: v
-            for k, v in _cfg.items()
-            if not isinstance(v, (dict, list)) and k != "config_file"
-        }
-        return cls(config_file=configPath, **_scalar_keys)
-
 
     @classmethod
     def get_args(
@@ -1068,7 +1073,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         """
         return os.path.expanduser(getattr(self.hparams, "save_dir", "") or "")
 
-    def splitDataset(self, dataset: datasets.BaseDataset, **kwargs):
+    def splitDataset(self, dataset: BaseDataset, **kwargs):
         n_total: int = len(dataset)
         n_train = int(self.trainFrac * n_total)
         n_val: int = n_total - n_train
@@ -1079,7 +1084,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
     @abstractmethod
     def getTrainValDataloader(
-            self, dataset: datasets.BaseDataset, segmentor
+            self, dataset: BaseDataset, segmentor
     ):
         train_ds, val_ds = self.splitDataset(dataset=dataset)
 
@@ -1095,7 +1100,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
             segmentor = self.getModel()
 
-            dataset = self.getDataset(self.dataset, **self.datasetConfig)
+            dataset = self.getDataset()
 
             train, val = self.getTrainValDataloader(dataset, segmentor)
 

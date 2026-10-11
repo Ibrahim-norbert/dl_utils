@@ -37,7 +37,7 @@ _AXIS_CANDIDATES = (
 
 
 def resolve_vertices_col(
-        columns, input_dim: int = 2, strict: bool = False
+        columns, input_dim: int = 3, strict: bool = False
 ) -> list[str] | None:
     """Default coordinate columns for a given model ``input_dim``.
 
@@ -69,7 +69,7 @@ def resolve_vertices_col(
 def get_vertices(
         item_df: pd.DataFrame,
         vertices_col: list[str] | None = None,
-        input_dim: int = 2,
+        input_dim: int = 3,
 ) -> np.ndarray:
     """Return the coordinate columns of ``item_df`` as an ``(N, D)`` float32 array.
 

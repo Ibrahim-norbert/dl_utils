@@ -15,9 +15,11 @@ import pandas as pd
 import plotly
 import seaborn as sns
 import skimage
-from matplotlib.colors import to_hex
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import to_hex, Normalize, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
+from plotly.graph_objs import Scatter
 from sklearn.cluster import DBSCAN
 from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
@@ -224,6 +226,7 @@ class EmbeddingAnalysis:
             plot_backend: PlotBackend = "plotly",
             data_df: Optional[pd.DataFrame] = None,
             embeddings: Optional[np.ndarray] = None,
+            subplots_kwargs : Optional[dict] = None,
             **kwargs,
     ) -> None:
         """Load, validate and prepare the data. Runs no analysis.
@@ -285,11 +288,12 @@ class EmbeddingAnalysis:
         self.classMappedColumn = "Mapped"
         self.classColumn = "Class"
         self.plot_backend = plot_backend
-        self.subplots_kwargs = {"s": 6}
+        self.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
 
         self.results_df = self._scalar_columns(data_df)
         self.getLabels()
         print(f"Embeddings shape: {self.embeddings.shape}")
+        self.color_space = MoBie_coloring.GlasbeyARGBLut()
 
     def analyse(self, **kwargs) -> np.ndarray:
         """Default analysis, formerly run automatically at the end of ``__init__``.
@@ -300,7 +304,6 @@ class EmbeddingAnalysis:
         """
         # TODO: DBSCAN
         self.predLabels = self.classify(**kwargs) if self._has_gt else self._dbscan(self.embeddings, **kwargs)
-        self.results_df[self.classColumn] = self.predLabels
 
         # Add ground truth column as mapping
         if self._has_gt:
@@ -314,9 +317,6 @@ class EmbeddingAnalysis:
             self.plot_kl_divergence_heatmap()
         return self.predLabels
 
-    @property
-    def color_space(self):
-        return MoBie_coloring.GlasbeyARGBLut()
 
     @classmethod
     def from_dataframe(
@@ -493,23 +493,17 @@ class EmbeddingAnalysis:
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
-        valid = ~pd.isna(self.gtlabels)
 
-        if not self.greyBackground and 0 in self.gtlabels[valid]:
-            self.gtlabels = np.where(valid, self.gtlabels + 1, self.gtlabels)
-            if self._has_gt:
-                self.data_df[self.gtColumn] = self.gtlabels
 
         self.instancelabels: np.ndarray = getArrayFromDF(self.data_df, self.instancelabelColumn) if (self.instancelabelColumn is not None and self.instancelabelColumn in self.data_df.columns) else np.zeros(n, dtype=int)
 
+        valid = ~pd.isna(self.gtlabels)
         n_valid = int(valid.sum())
         if n_valid < n:
             warnings.warn(
                 f"Labels contain {n - n_valid} inactive/NaN value(s). "
                 f"Training on {n_valid} of {len(self.embeddings)} samples."
             )
-            # Turn nan values to 0 but filter for training classifier
-            self.gtlabels[~valid] = 0
             self.traingt = self.gtlabels[valid].astype(int)
             self.trainEmbeddings = self.embeddings[valid]
         else:
@@ -564,6 +558,7 @@ class EmbeddingAnalysis:
         clustering = DBSCAN(eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)).fit(embeddings)
         self.classColumn = "DBSCAN_cluster"
         self.predLabels = clustering.labels_.astype(int) + 1
+        self.results_df[self.classColumn] = self.predLabels
         return self.predLabels
 
     def tune_clustering(
@@ -780,74 +775,96 @@ class EmbeddingAnalysis:
             save_dir=self.save_dir,
             precomputed_colors=precomputed_colors
         )
-
-    @staticmethod
-    def visualiseCoord(points: dict, title="", labels=None, save_dir=None, **subplots_kwargs):
-        return CustomMatplotlib.simpleScatter(
-            points, labels, title=title, save_dir=save_dir, **subplots_kwargs,
-        )[0]
-
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       mapping: dict = {}, legend_title: str = "Classes",
+                       mapping: Optional[dict] = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
+                       heatmap: bool = False,
                        show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
                        show: bool = False, **kwargs):
         """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
-        With ``precomputed_colors`` the column holds per-point colours (hex
-        strings or numbers for a colour scale); otherwise class labels.
+        - default: integer class labels -> named classes with a legend
+        - ``precomputed_colors``: the column already holds per-point colours
+        - ``heatmap``: float values are normalised over vmin..vmax (``vmin``/``vmax``
+          via kwargs, default: min..max of the non-background values) and shown
+          with a normalised 0..1 colour bar titled *classColoumn*.
+        Background (0) and NaN are always grey and never part of a colour scale.
         """
-        plot_df = self.results_df.copy()
+        df, col, lut = self.results_df.copy(), classColoumn, self.color_space
+        title = legend_title if withLegendTitle else None
+        is_mpl = self.plot_backend == "matplotlib"
+        draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
+                      else (self._scatter_plotly, "write_image"))
+        to_hex = "#{:02x}{:02x}{:02x}{:02x}".format
+        grey = "#808080" if color_background else "#80808080"
         palette = None
 
-        if not precomputed_colors:
-            if classColoumn not in plot_df.columns:
-                print(f"{classColoumn} is not a column in DataFrame")
-                plot_df[classColoumn] = 0
+        if heatmap:
+            # (n, 4) uint8 RGBA, unpacked once from the packed ARGB LUT
+            argb = np.asarray(lut.indices, dtype=np.uint32)[:, None]
+            rgba = (argb >> np.array([16, 8, 0, 24], dtype=np.uint32)) & 0xFF
+            n = len(rgba)
 
-            classLabels = plot_df[classColoumn].fillna(0).astype(int)
-            lut = self.color_space  # build the LUT once, not per class
+            values = pd.to_numeric(df[col], errors="coerce").replace(0, np.nan).to_numpy(dtype=float)
+            valid = values[~np.isnan(values)]
+            lo, hi = (valid.min(), valid.max()) if valid.size else (0.0, 1.0)  # adaptive data range
+            vmin, vmax = kwargs.get("vmin"), kwargs.get("vmax")
+            vmin = lo if vmin is None else float(vmin)
+            vmax = hi if vmax is None else float(vmax)
+            vmax = vmin + ((vmax - vmin) or 1.0)  # equal limits -> range 1
 
-            def _label(k: int) -> str:
-                if k == 0 and color_background:
-                    return "background"
-                return mapping.get(k, self.classMapping.get(k, str(k)))
+            norm = np.clip((values - vmin) / (vmax - vmin), 0, 1)
+            slot = np.nan_to_num(norm * (n - 1), nan=n).astype(int)  # NaN/background -> grey slot n
 
-            def _color(k: int) -> str:
-                if k == 0:
-                    return "#808080" if color_background else "#80808080"
-                return to_hex(np.divide(lut.rgba_tuple_by_index(k), 255), keep_alpha=True)
+            df[col] = np.array([to_hex(*c) for c in rgba.tolist()] + [grey])[slot]
 
-            keys = sorted(classLabels.unique())
-            names = {k: _label(k) for k in keys}
-            palette = {names[k]: _color(k) for k in keys}
-            plot_df[classColoumn] = classLabels.map(names)
+        elif not precomputed_colors:
+            labels = pd.Series(df.get(col, 0), index=df.index).fillna(0).astype(int)
+            names = {**self.classMapping, **(mapping or {})}
+            names.update({0: "background"} if color_background else {})
+            label_of = {k: names.get(k, str(k)) for k in sorted(labels.unique())}
 
-        draw = (self._scatter_matplotlib if self.plot_backend == "matplotlib"
-                else self._scatter_plotly)
-        fig = draw(
-            plot_df, xColumn, yColumn, classColoumn, palette,
-            xaxis_title=xaxis_title, yaxis_title=yaxis_title,
-            legend_title=legend_title if withLegendTitle else None,
-            show_axes=show_axes,
-            marker_size=kwargs.get("markerSize", 3),
-            opacity=kwargs.get("markerOpacity", 0.8),
-        )
+            palette = {name: to_hex(*lut.rgba_tuple_by_index(k)) if k else grey
+                       for k, name in label_of.items()}
+            df[col] = labels.map(label_of)
+
+        fig = draw(df, xColumn, yColumn, col, palette,
+                   xaxis_title=xaxis_title, yaxis_title=yaxis_title,
+                   legend_title=None if heatmap else title,
+                   show_axes=show_axes,
+                   marker_size=kwargs.get("markerSize", 3),
+                   opacity=kwargs.get("markerOpacity", 0.8))
+
+        if heatmap:  # normalised 0..1 colour bar instead of legend, built from the same LUT
+            ticks = np.linspace(0, 1, 5)
+            ticktext = [f"{t:.2g}" for t in ticks]
+            cbar_title = col if withLegendTitle else None
+            if is_mpl:
+                ax = fig.axes[0]
+                for legend in filter(None, [ax.get_legend(), *fig.legends]):
+                    legend.remove()
+                sm = ScalarMappable(Normalize(0, 1), ListedColormap(rgba / 255.0))
+                fig.colorbar(sm, ax=ax, ticks=ticks, label=cbar_title).set_ticklabels(ticktext)
+            else:
+                scale = [[i / (n - 1), f"rgba({r},{g},{b},{a / 255:.3f})"]
+                         for i, (r, g, b, a) in enumerate(rgba.tolist())]
+                fig.update_layout(showlegend=False)
+                fig.add_trace(Scatter(  # invisible trace that only carries the colour bar
+                    x=[None], y=[None], mode="markers", hoverinfo="skip", showlegend=False,
+                    marker=dict(colorscale=scale, cmin=0, cmax=1, color=[0], showscale=True,
+                                colorbar=dict(title=cbar_title, tickvals=list(ticks), ticktext=ticktext))))
 
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            path = os.path.join(save_dir, f"{classColoumn}_{legend_title}.svg")
-            if isinstance(fig, Figure):
-                fig.savefig(path)
-            else:
-                fig.write_image(path)
+            getattr(fig, save)(os.path.join(save_dir, f"{col}_{legend_title}.svg"))
         # Displaying is independent of saving. Off by default - training/validation
         # logging routes figures to TensorBoard/WandB and must not render anything.
-        # Notebooks either let Jupyter render the returned figure or pass show=True.
         if show:
             fig.show()
         return fig
+
+
 
     @staticmethod
     def _scatter_plotly(plot_df, xColumn, yColumn, classColoumn, palette, *,

@@ -242,3 +242,56 @@ class ViridisARGBLut(SeismicARGBLut):
         - int: ARGB integer representation.
         """
         return (a << 24) | (r << 16) | (g << 8) | b  # Packing into ARGB format
+
+
+
+class HeatmapARGBLut(GlasbeyARGBLut):
+    """
+    Single-colour LUT whose opacity scales with the value:
+    lowest value -> fully transparent, highest value -> `alpha`.
+    """
+
+    def __init__(self, alpha=255, num_colors=256, base_index=1):
+        super().__init__(alpha)
+        if num_colors < 2:
+            raise ValueError("num_colors must be >= 2")
+        self.num_colors = num_colors
+        self.name = "HEATMAP"
+
+        # Take the RGB of one Glasbey colour and build an alpha ramp over it
+        base = self.indices[base_index]
+        r, g, b = (base >> 16) & 0xFF, (base >> 8) & 0xFF, base & 0xFF
+        self.indices = [
+            self.rgba(r, g, b, int(round(alpha * k / (num_colors - 1))))
+            for k in range(num_colors)
+        ]
+
+    @staticmethod
+    def _unpack(argb):
+        return ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF, (argb >> 24) & 0xFF)
+
+    # --- index based (0 .. num_colors-1) ---------------------------------
+    def get_argb_by_index(self, i):
+        # Clamp instead of wrapping: an intensity above the max stays opaque
+        index = int(np.clip(i, 0, self.num_colors - 1))
+        return self.indices[index]
+
+    def rgba_tuple_by_index(self, i: int):
+        return self._unpack(self.get_argb_by_index(i))
+
+    # rgba_plt_by_index / rgba_mobie_by_index are inherited and now work.
+
+    # --- normalised (0.0 .. 1.0) -----------------------------------------
+    # get_argb(x) is inherited from GlasbeyARGBLut (clips x to [0, 1]).
+    def rgba_tuple_by_normalized(self, x: float):
+        if np.isnan(x):
+            return (128, 128, 128, 1)
+        return self._unpack(self.get_argb(x))
+
+    def rgba_plt_by_normalized(self, x: float):
+        r, g, b, a = self.rgba_tuple_by_normalized(x)
+        return (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+
+    def rgba_mobie_by_normalized(self, x: float):
+        r, g, b, a = self.rgba_tuple_by_normalized(x)
+        return f"{r}-{g}-{b}-{a}"
