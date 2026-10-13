@@ -1,9 +1,12 @@
 from dataclasses import dataclass, replace, fields
-from typing import NamedTuple, Any, Optional, ClassVar
+from typing import NamedTuple, Any, Optional, ClassVar, Annotated
 import numpy as np
+import pandas as pd
 import torch
 from huggingface_hub import dataclasses
-from constants import LOSS_KEY
+from constants import EMBED_DICT_EMBED, GT_LABEL_KEY, LOSS_KEY, PREDICTED_LABEL_KEY
+from dl_utils import MOBIE_LABEL_KEY
+
 
 class TrainingSampleLM(NamedTuple):
     features: np.ndarray
@@ -142,17 +145,21 @@ class Embeddings:
     def detach_cpu(self) -> "Embeddings":
         return self._apply(_t_detach_cpu)
 
+    def dataframe(self) -> pd.DataFrame:
+        """One row per point: the embedding vector, x/y(/z) from ``misc['coord']`` when
+        present, and the GT / predicted labels when set. A leading batch dim of 1 is dropped."""
+        features = _to_numpy(self.data)
+        df = pd.DataFrame({EMBED_DICT_EMBED: list(features.reshape(-1, features.shape[-1]))})
 
-
-
-
-
-
-
-
-
-
-
+        coord = (self.misc or {}).get("coord")
+        if coord is not None:
+            coord = _to_numpy(coord)
+            df[list("xyz"[: coord.shape[-1]])] = coord.reshape(-1, coord.shape[-1])
+        if self.labels is not None:
+            df[MOBIE_LABEL_KEY] = _to_numpy(self.labels).reshape(-1).astype(int)
+        if self.pred_labels is not None:
+            df[PREDICTED_LABEL_KEY] = _to_numpy(self.pred_labels).reshape(-1)
+        return df
 
 
 @dataclass(frozen=False, eq=False)
@@ -160,8 +167,8 @@ class EmbeddingsPrompts(Embeddings):
     """
     Must contain prompt_target and prompt_indices
     """
-    prompt_target : Optional[torch.Tensor] = None
-    prompt_indices : Optional[torch.Tensor] = None
+    prompt_target : Optional[Annotated[torch.Tensor, "(K, 1)"]] = None
+    prompt_indices : Optional[Annotated[torch.Tensor, "(K, 1)"]] = None
 
     def detach(self) -> "EmbeddingsPrompts":
         """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays

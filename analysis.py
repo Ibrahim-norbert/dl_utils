@@ -224,7 +224,6 @@ class EmbeddingAnalysis:
             raise TypeError(f"Unexpected keyword argument(s): {sorted(kwargs)}")
 
         data_df = self._read_dataframe(df_path, data_df)
-        print(f"Available coloumns: {data_df.columns.tolist()}")
         embeddings = self._validated_embeddings(data_df, type, embeddings)
         if save_dir is None and df_path is not None:
             save_dir = os.path.dirname(df_path)
@@ -279,7 +278,6 @@ class EmbeddingAnalysis:
 
         self.results_df = self._scalar_columns(data_df)
         self.getLabels()
-        print(f"Embeddings shape: {self.embeddings.shape}")
         self.color_space = MoBie_coloring.GlasbeyARGBLut()
 
     def analyse(self, **kwargs) -> np.ndarray:
@@ -768,7 +766,7 @@ class EmbeddingAnalysis:
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        heatmap: bool = False,
                        show_axes: bool = False, color_background: bool = False, withLegend=True,
-                       show: bool = False, **kwargs):
+                       show: bool = False, mask_background: bool = True, **kwargs):
         """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
         - default: integer class labels -> named classes with a legend
@@ -778,6 +776,8 @@ class EmbeddingAnalysis:
           with a normalised 0..1 colour bar titled *classColoumn*. Background is
           label 0 in ``self.gtColumn``.
         - ``withLegend``: show the legend (or, for ``heatmap``, the colour bar).
+        - ``mask_background``: heatmap only; False colours label-0 points too instead
+          of greying them.
         - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
           overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
         Background (0) and NaN are always grey and never part of a colour scale.
@@ -801,7 +801,7 @@ class EmbeddingAnalysis:
 
             values = pd.to_numeric(df[col], errors="coerce").replace(0, np.nan).to_numpy(dtype=float)
             # Background is defined by label 0 in the label column, not by the plotted value.
-            bg_col = self.gtColumn if self._has_gt else None
+            bg_col = self.gtColumn if (self._has_gt and mask_background) else None
             if bg_col is not None and bg_col in df.columns:
                 bg_labels = pd.to_numeric(df[bg_col], errors="coerce").to_numpy(dtype=float)
                 values[bg_labels == 0] = np.nan
