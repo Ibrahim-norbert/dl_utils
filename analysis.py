@@ -206,29 +206,14 @@ class EmbeddingAnalysis:
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
-    def __init__(
-            self,
-            df_path: Optional[str] = None,
-            type: str = EMBED_DICT_EMBED,
-            instancelabelColumn: str = MOBIE_LABEL_KEY,
-            gtColumn: str = None,
-            classMapping: dict = None,
-            save_dir: str = None,
-            dbscan: bool = False,
-            leiden: bool = True,
-            leiden_resolution: float = 1.0,
-            leiden_n_iterations: int = 2,
-            leiden_n_neighbors: int = 15,
-            leiden_distance_metric: str = "euclidean",
-            metadDataFramePath: Optional[str] = None,
-            classifier_method: str = "LogisticRegression",
-            greyBackground:bool = False,
-            plot_backend: PlotBackend = "plotly",
-            data_df: Optional[pd.DataFrame] = None,
-            embeddings: Optional[np.ndarray] = None,
-            subplots_kwargs : Optional[dict] = None,
-            **kwargs,
-    ) -> None:
+    def __init__(self, df_path: Optional[str] = None, type: str = EMBED_DICT_EMBED,
+                 instancelabelColumn: str = MOBIE_LABEL_KEY, gtColumn: str = None, classMapping: dict = None,
+                 save_dir: str = None, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
+                 leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean",
+                 metadDataFramePath: Optional[str] = None, classifier_method: str = "LogisticRegression",
+                 greyBackground: bool = False, plot_backend: PlotBackend = "plotly",
+                 data_df: Optional[pd.DataFrame] = None, embeddings: Optional[np.ndarray] = None,
+                 plotly_kwargs: Optional[dict] = None, marker_size: float = 3, **kwargs) -> None:
         """Load, validate and prepare the data. Runs no analysis.
 
         Every constructor ends up here; call :meth:`analyse` afterwards to train
@@ -288,7 +273,9 @@ class EmbeddingAnalysis:
         self.classMappedColumn = "Mapped"
         self.classColumn = "Class"
         self.plot_backend = plot_backend
-        self.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
+        # Forwarded to fig.update_layout() of every plotly figure, overriding the defaults.
+        self.plotly_kwargs = plotly_kwargs if plotly_kwargs is not None else {}
+        self.marker_size = marker_size  # scatter point size; per call: specialScatter(markerSize=...)
 
         self.results_df = self._scalar_columns(data_df)
         self.getLabels()
@@ -355,7 +342,6 @@ class EmbeddingAnalysis:
             **kwargs
         )
         instance.classColumn = "cluster"
-        instance.subplots_kwargs = {"s": 1}
         return instance
 
     @classmethod
@@ -761,7 +747,7 @@ class EmbeddingAnalysis:
 
         return fig
 
-    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True):
+    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True, **kwargs):
         col = classColoumn if classColoumn is not None else self.classColumn
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
@@ -774,6 +760,7 @@ class EmbeddingAnalysis:
             legend_title=f"PC - {self.gtColumn if self._has_gt else col}",
             save_dir=self.save_dir,
             precomputed_colors=precomputed_colors
+            , **kwargs
         )
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
@@ -791,14 +778,18 @@ class EmbeddingAnalysis:
           with a normalised 0..1 colour bar titled *classColoumn*. Background is
           label 0 in ``self.gtColumn``.
         - ``withLegend``: show the legend (or, for ``heatmap``, the colour bar).
+        - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
+          overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
         Background (0) and NaN are always grey and never part of a colour scale.
         """
         df, col, lut = self.results_df.copy(), classColoumn, self.color_space
         is_mpl = self.plot_backend == "matplotlib"
         draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
                       else (self._scatter_plotly, "write_image"))
-        to_hex = "#{:02x}{:02x}{:02x}{:02x}".format
-        grey = "#808080" if color_background else "#80808080"
+        # matplotlib takes #RRGGBBAA, plotly does not -> rgba() string for plotly.
+        to_hex = ("#{:02x}{:02x}{:02x}{:02x}".format if is_mpl
+                  else lambda r, g, b, a: f"rgba({r},{g},{b},{a / 255:.3f})")
+        grey = to_hex(128, 128, 128, 255 if color_background else 128)
         palette = None
 
         if heatmap:
@@ -843,8 +834,11 @@ class EmbeddingAnalysis:
                    xaxis_title=xaxis_title, yaxis_title=yaxis_title,
                    legend_title=None if heatmap else legend_title,
                    show_axes=show_axes,
-                   marker_size=kwargs.get("markerSize", 3),
-                   opacity=kwargs.get("markerOpacity", 0.8))
+                   marker_size=kwargs.get("markerSize", self.marker_size),
+                   opacity=kwargs.get("markerOpacity", 0.8),
+                   **({} if is_mpl else {"plotly_kwargs": self.plotly_kwargs}))
+        if not is_mpl and kwargs.get("plotly_kwargs"):  # per-call layout, over self.plotly_kwargs
+            fig.update_layout(**kwargs["plotly_kwargs"])
 
         if heatmap or not withLegend:  # heatmaps get a colour bar instead of a legend
             if is_mpl:
@@ -882,17 +876,20 @@ class EmbeddingAnalysis:
     @staticmethod
     def _scatter_plotly(plot_df, xColumn, yColumn, classColoumn, palette, *,
                         xaxis_title, yaxis_title, legend_title, show_axes,
-                        marker_size, opacity) -> plotly.graph_objs.Figure:
+                        marker_size, opacity, plotly_kwargs=None) -> plotly.graph_objs.Figure:
         import plotly.express as px
 
+        # render_mode="svg": the "auto" default switches to WebGL above 1000 points,
+        # which write_image can only embed as a bitmap inside the SVG.
         if palette is None:
-            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
+            fig = px.scatter(plot_df, x=xColumn, y=yColumn, render_mode="svg")
             fig.update_traces(marker=dict(color=plot_df[classColoumn].tolist()))
         else:
             fig = px.scatter(
                 plot_df, x=xColumn, y=yColumn, color=classColoumn,
                 color_discrete_map=palette,
                 category_orders={classColoumn: list(palette)},
+                render_mode="svg",
             )
 
         axis = dict(showgrid=False, zeroline=False, showticklabels=show_axes,
@@ -910,6 +907,10 @@ class EmbeddingAnalysis:
             legend_title_text=legend_title,
             xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
+        # Separate call: update_layout merges nested dicts recursively, so e.g.
+        # xaxis_tickfont_size only overrides that key and keeps the defaults above.
+        if plotly_kwargs:
+            fig.update_layout(**plotly_kwargs)
         fig.update_traces(marker=dict(size=marker_size, opacity=opacity))
         return fig
 
@@ -1088,14 +1089,17 @@ class EmbeddingAnalysis:
             distfun=lambda X: pdist(X, metric=metric),
             linkagefun=lambda d: sch.linkage(d, method=linkage),
         )
-        fig.update_layout(
-            title_text=f"Class dendrogram — {metric} distance, {linkage} linkage",
-            template="plotly_dark",
-            width=800,
-            height=max(400, len(classes) * 40),
-            xaxis=dict(title=f"{metric} distance"),
-            yaxis=dict(title=""),
-        )
+        fig.update_layout(**{
+            **dict(
+                title_text=f"Class dendrogram — {metric} distance, {linkage} linkage",
+                template="plotly_dark",
+                width=800,
+                height=max(400, len(classes) * 40),
+                xaxis=dict(title=f"{metric} distance"),
+                yaxis=dict(title=""),
+            ),
+            **self.plotly_kwargs,
+        })
 
         save_dir = save_dir or self.save_dir
         if save_dir:
@@ -1434,12 +1438,15 @@ class EmbeddingAnalysis:
             ), row=2, col=2)
 
         # ── Layout ────────────────────────────────────────────────────────
-        fig.update_layout(
-            height=900,
-            title_text="Trajectory analysis — PAGA + diffusion pseudotime",
-            template="plotly_dark",
-            legend=dict(itemsizing="constant", font=dict(size=10)),
-        )
+        fig.update_layout(**{
+            **dict(
+                height=900,
+                title_text="Trajectory analysis — PAGA + diffusion pseudotime",
+                template="plotly_dark",
+                legend=dict(itemsizing="constant", font=dict(size=10)),
+            ),
+            **self.plotly_kwargs,
+        })
         fig.update_xaxes(showgrid=False, showticklabels=False)
         fig.update_yaxes(showgrid=False, showticklabels=False)
 
