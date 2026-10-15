@@ -217,6 +217,8 @@ class EmbeddingAnalysis:
     plotContext: str = "notebook"
     fontScale: float = 1.0
 
+
+
     def _plottingContext(self):
         """seaborn context manager for figures this class draws."""
         return sns.plotting_context(self.plotContext, font_scale=self.fontScale)
@@ -254,7 +256,10 @@ class EmbeddingAnalysis:
                  leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean",
                  metadDataFramePath: Optional[str] = None, classifier_method: str | None = "LogisticRegression",
                  greyBackground: bool = False, data_df: pd.DataFrame | None = None,
-                 embeddings: np.ndarray | None = None, default_class_column: str = "Class") -> None:
+                 embeddings: np.ndarray | None = None, default_class_column: str = "Class",
+                 color_space: MoBie_coloring.GlasbeyARGBLut = MoBie_coloring.GlasbeyARGBLut,
+                 **kwargs
+                 ) -> None:
         """Analyse a set of embeddings.
 
         Give exactly one source: *df_path* (a JSON table), *data_df* (an in-memory
@@ -270,6 +275,8 @@ class EmbeddingAnalysis:
         ``assert not kwargs``, which replaced Python's own precise TypeError for an
         unexpected keyword with a weaker assertion that vanishes under ``python -O``.
         """
+
+        self.color_space = color_space()   # override on the class (before init) or per instance
         # -- inputs --------------------------------------------------------
         self.df_path: str | None = df_path
         self.type: str | None = type
@@ -399,9 +406,6 @@ class EmbeddingAnalysis:
         self.data_df = self.data_df.merge(meta, on=self.instancelabelColumn, how="left")
         print(f"Metadata DataFrame loaded from: {path}")
 
-    @property
-    def color_space(self):
-        return MoBie_coloring.GlasbeyARGBLut()
 
     @property
     def classOrder(self) -> list:
@@ -421,7 +425,7 @@ class EmbeddingAnalysis:
                        leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15,
                        leiden_distance_metric: str = "euclidean", metadDataFramePath: str | None = None,
                        classifier_method: str | None = "LogisticRegression",
-                       greyBackground: bool = False) -> "EmbeddingAnalysis":
+                       greyBackground: bool = False, **kwargs) -> "EmbeddingAnalysis":
         """Construct from an in-memory table; vectors come from its *type* column.
 
         An ordinary call to ``__init__`` -- this used to forge an instance with
@@ -440,6 +444,7 @@ class EmbeddingAnalysis:
             leiden_distance_metric=leiden_distance_metric,
             metadDataFramePath=metadDataFramePath,
             classifier_method=classifier_method, greyBackground=greyBackground,
+            **kwargs
         )
         instance.subplots_kwargs = {"s": 1}   # read at plot time; not an init concern
         return instance

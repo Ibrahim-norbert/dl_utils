@@ -84,8 +84,6 @@ class BBoxes:
         if not np.issubdtype(mask.dtype, np.integer):
             raise TypeError(f"mask must be integer-labeled; got dtype={mask.dtype}")
 
-        if image is not None:
-            image = image / np.quantile(image.flatten(),0.997) # 3rd std
 
         # Get indexes of nonzero elements
         props = regionprops_table(mask, image, properties=('label', 'bbox', "area", 'centroid', *features))

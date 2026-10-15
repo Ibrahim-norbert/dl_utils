@@ -224,6 +224,8 @@ class BaseVolumeDataset(BaseDataset):
 
     """
 
+
+
     # NOTE: Coloumn where all N5 keys are saved
     CHANNEL_COLUMN : str = "channel" # Ensure this exists in samplemapper dataframe
     N5_KEY_COLUMN: str = "volume_key"
@@ -568,6 +570,8 @@ class BaseMaskDataset(BaseVolumeDataset):
     # full range, so it is the one bin grid every sample already shares. Kept apart from
     # toUint16's `ceiling`: that is a max (65535), this is a count.
     INTENSITY_LEVELS: int = np.iinfo(np.uint16).max + 1
+
+    # TODO: Confirm after creating the N5 Files, we still require the Tiff File paths, if so make it agnostic
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
                  features : tuple[str] = ("area",),
                  resolution: Optional[List[int]] = None,
