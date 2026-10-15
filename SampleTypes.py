@@ -142,26 +142,15 @@ class Embeddings:
     def detach_cpu(self) -> "Embeddings":
         return self._apply(_t_detach_cpu)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 @dataclass(frozen=False, eq=False)
-class EmbeddingsPrompts(Embeddings):
+class EmbeddingsTraining(Embeddings):
+    """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
+
+    ``loss`` is ``None`` when ``shared_step`` runs a loss-free forward (e.g. the
+    embedding path used by prediction).
     """
-    Must contain prompt_target and prompt_indices
-    """
-    prompt_target : Optional[torch.Tensor] = None
-    prompt_indices : Optional[torch.Tensor] = None
+
+    loss: Optional[torch.Tensor] = None
 
     def detach(self) -> "EmbeddingsPrompts":
         """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
@@ -173,6 +162,17 @@ class EmbeddingsPrompts(Embeddings):
         ``misc['loss']``, kept attached and on-device for ``backward()``.
         ``prev_iters`` are recursed, so their GPU tensors are freed."""
         return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
+
+
+
+@dataclass(frozen=False, eq=False)
+class EmbeddingsPrompts(EmbeddingsTraining):
+    """
+    Must contain prompt_target and prompt_indices
+    """
+    prompt_target : Optional[torch.Tensor] = None
+    prompt_indices : Optional[torch.Tensor] = None
+
 
 @dataclass(frozen=False, eq=False)
 class EmbeddingsPromptsFeat(EmbeddingsPrompts):
@@ -196,20 +196,10 @@ class EmbeddingsPromptsFeat(EmbeddingsPrompts):
             offset=offset,
         )
 
-    def detach(self) -> "EmbeddingsPromptsFeat":
-        """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
-        attached so ``backward()`` can still run on it."""
-        return self._apply(_t_detach, skip_misc_keys=(LOSS_KEY,))
-
-    def detach_cpu(self) -> "EmbeddingsPromptsFeat":
-        """New bundle with every tensor detached and moved to CPU EXCEPT
-        ``misc['loss']``, kept attached and on-device for ``backward()``.
-        ``prev_iters`` are recursed, so their GPU tensors are freed."""
-        return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
 
 
 @dataclass(frozen=False, eq=False)
-class EmbeddingsSAM(Embeddings):
+class EmbeddingsSAM(EmbeddingsTraining):
     """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
 
     ``misc['loss']`` is ``None`` when ``shared_step`` runs a loss-free forward
@@ -217,24 +207,6 @@ class EmbeddingsSAM(Embeddings):
     """
     prev_iters: Optional[list["Embeddings"]] = None
 
-    def detach(self) -> "EmbeddingsSAM":
-        """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
-        attached so ``backward()`` can still run on it."""
-        return self._apply(_t_detach, skip_misc_keys=(LOSS_KEY,))
-
-    def detach_cpu(self) -> "EmbeddingsSAM":
-        """New bundle with every tensor detached and moved to CPU EXCEPT
-        ``misc['loss']``, kept attached and on-device for ``backward()``.
-        ``prev_iters`` are recursed, so their GPU tensors are freed."""
-        return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
 
 
-class EmbeddingsTraining(NamedTuple):
-    """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
 
-    ``loss`` is ``None`` when ``shared_step`` runs a loss-free forward (e.g. the
-    embedding path used by prediction).
-    """
-
-    loss: Optional[torch.Tensor]
-    data: Embeddings
