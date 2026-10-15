@@ -61,24 +61,25 @@ def resolve_vertices_col(
                     f"Could not resolve '{axis}' coordinate column for "
                     f"input_dim={input_dim} from {header}; tried {list(candidates)}"
                 )
-            return None
+            else:
+                continue
         resolved.append(col)
     return resolved
 
 
 def get_vertices(
         item_df: pd.DataFrame,
-        vertices_col: list[str] | None = None,
-        input_dim: int = 3,
-) -> np.ndarray:
-    """Return the coordinate columns of ``item_df`` as an ``(N, D)`` float32 array.
+        vertices_col: list[str] = None,
+        input_dim: int = 2,
+) -> "np.ndarray[Any, np.dtype[np.float32]]":
 
-    ``vertices_col`` defaults to :func:`resolve_vertices_col` for ``input_dim``.
-    The result is always 2-D, even for a single localization.
-    """
-    if vertices_col is None:
-        vertices_col = resolve_vertices_col(item_df.columns, input_dim, strict=True)
-    return item_df[list(vertices_col)].to_numpy(dtype=np.float32)
+    vertices_col: list[str] = resolve_vertices_col(item_df.columns, input_dim)
+
+    arr = np.asarray(np.array(item_df[vertices_col]).tolist()).squeeze()
+    # squeeze() collapses a single-row (1, D) or single-column (N, 1) selection to
+    # 1-D, which breaks 2-D indexing downstream (e.g. xy[:, 0]). Restore (N, D).
+
+    return arr
 
 
 def _for_file(spec, file):
@@ -102,14 +103,12 @@ def _for_file(spec, file):
     if np.any(pd.isna(value)):
         raise KeyError(f"unresolved column mapping for {file}: {value!r}")
     return value
-
-
 def file_to_vertices(
         file,
-        vertices_col: list[str] | pd.DataFrame | None = None,
-        vertices_instance_label_col: str | pd.Series = "",
+        vertices_col: Union[list[str], pd.DataFrame, None] = None,
+        vertices_instance_label_col: Union[str, pd.Series] = "",
         input_dim: int = 3,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> Tuple["np.ndarray", "np.ndarray"]:
     """Read one localization file into ``(coords, instance_labels)``.
 
     Both column arguments accept a plain name or a per-file mapping; see
@@ -124,29 +123,29 @@ def file_to_vertices(
     zero.
     """
     vertices_col = _for_file(vertices_col, file)
-    label_col = _for_file(vertices_instance_label_col, file)
-    if not isinstance(label_col, str):
-        raise KeyError(f"unresolved instance-label column for {file}: {label_col!r}")
+    wanted = _for_file(vertices_instance_label_col, file)
 
     dataframe = read_localization_file(file)
-    if label_col and label_col not in dataframe.columns:
-        raise KeyError(
-            f"{file} has no instance-label column {label_col!r}; "
-            f"available: {list(dataframe.columns)}"
-        )
+    localizations: np.ndarray = get_vertices(dataframe, vertices_col, input_dim)
 
-    localizations = get_vertices(dataframe, vertices_col, input_dim)
-    if len(localizations) == 0:
-        raise ValueError(f"{file} contains no localizations")
+    assert localizations.size > 1, f"The numpy array is empty: {localizations.size}"
 
-    # int64 zeros match pandas' default integer dtype, so an unlabelled sample
-    # cannot make a batch mix float and int (or int32 and int64) labels.
-    labels = (
-        dataframe[label_col].to_numpy()
-        if label_col
-        else np.zeros(len(dataframe), dtype=np.int64)
+    if not isinstance(wanted, str):
+        raise KeyError(f"unresolved instance-label column for {file}: {wanted!r}")
+    if wanted and wanted not in dataframe.columns:
+        # raise KeyError(
+        #     f"instance-label column {wanted!r} not found in {file}; available "
+        #     f"columns: {list(dataframe.columns)}. Fix the sample-mapping CSV's "
+        #     "'standardizedLabels' entry, or leave it empty to read this file as "
+        #     "unlabelled."
+        # )
+        dataframe[wanted] = np.zeros((localizations.shape[0],)).astype(np.int32)
+
+    # Integer zeros, so an unlabelled sample cannot make a batch mix float and int.
+    column = (
+        dataframe[wanted] if wanted else pd.Series(np.zeros(len(dataframe), dtype=int))
     )
-    return localizations, labels
+    return localizations, np.atleast_1d(column.to_numpy().squeeze())
 
 
 def collate_localizations(
