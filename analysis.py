@@ -707,6 +707,21 @@ class EmbeddingAnalysis:
             save_dir=self.save_dir, **kwargs
         )
 
+    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True):
+        col = classColoumn if classColoumn is not None else self.classColumn
+        # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
+        # columns are never temporarily zeroed by subclass overrides, allowing
+        # every sample to be coloured by its predicted class.
+        return EmbeddingAnalysis.specialScatter(
+            self,
+            xColumn="PCA x", yColumn="PCA y",
+            xaxis_title="PC 1", yaxis_title="PC 2",
+            classColoumn=col,
+            legend_title=f"PC - {self.gtColumn if self._has_gt else col}",
+            save_dir=self.save_dir,
+            precomputed_colors=precomputed_colors
+        )
+
     # ------------------------------------------------------------------ #
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
@@ -761,20 +776,7 @@ class EmbeddingAnalysis:
 
         return fig
 
-    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True):
-        col = classColoumn if classColoumn is not None else self.classColumn
-        # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
-        # columns are never temporarily zeroed by subclass overrides, allowing
-        # every sample to be coloured by its predicted class.
-        return EmbeddingAnalysis.specialScatter(
-            self,
-            xColumn="PCA x", yColumn="PCA y",
-            xaxis_title="PC 1", yaxis_title="PC 2",
-            classColoumn=col,
-            legend_title=f"PC - {self.gtColumn if self._has_gt else col}",
-            save_dir=self.save_dir,
-            precomputed_colors=precomputed_colors
-        )
+
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: Optional[dict] = None, legend_title: str = "Classes",
