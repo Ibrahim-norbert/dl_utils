@@ -152,16 +152,29 @@ class EmbeddingsTraining(Embeddings):
 
     loss: Optional[torch.Tensor] = None
 
+
+    def _mapped(self, fn, skip_fields: tuple = ()) -> dict:
+        """Field->value dict with ``fn`` mapped over every tensor (recursing
+        into nested bundles/lists), leaving the named fields untouched."""
+        out = {}
+        for f in dataclasses.fields(self):
+            v = getattr(self, f.name)
+            out[f.name] = v if f.name in skip_fields else _apply_recursive(v, fn)
+        return out
+
+    def _apply(self, fn, skip_fields: tuple = ()) -> "EmbeddingsTraining":
+        return replace(self, **self._mapped(fn, skip_fields))
+
     def detach(self) -> "EmbeddingsPrompts":
         """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
         attached so ``backward()`` can still run on it."""
-        return self._apply(_t_detach, skip_misc_keys=(LOSS_KEY,))
+        return self._apply(_t_detach, skip_fields=(LOSS_KEY,))
 
     def detach_cpu(self) -> "EmbeddingsPrompts":
         """New bundle with every tensor detached and moved to CPU EXCEPT
         ``misc['loss']``, kept attached and on-device for ``backward()``.
         ``prev_iters`` are recursed, so their GPU tensors are freed."""
-        return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
+        return self._apply(_t_detach_cpu, skip_fields=(LOSS_KEY,))
 
 
 
