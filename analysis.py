@@ -707,7 +707,7 @@ class EmbeddingAnalysis:
             save_dir=self.save_dir, **kwargs
         )
 
-    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True):
+    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True, **kwargs):
         col = classColoumn if classColoumn is not None else self.classColumn
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
@@ -719,7 +719,8 @@ class EmbeddingAnalysis:
             classColoumn=col,
             legend_title=f"PC - {self.gtColumn if self._has_gt else col}",
             save_dir=self.save_dir,
-            precomputed_colors=precomputed_colors
+            precomputed_colors=precomputed_colors,
+            **kwargs
         )
 
     # ------------------------------------------------------------------ #
@@ -916,24 +917,33 @@ class EmbeddingAnalysis:
         return fig
 
     @staticmethod
+    def visualiseCoord(
+            points: dict, title="", labels=None, save_dir=None, **subplots_kwargs
+    ):
+
+        return CustomMatplotlib.simpleScatter(
+            points,
+            labels,
+            title=title,
+            save_dir=save_dir,
+            **subplots_kwargs,
+        )[0]
+
+    @staticmethod
     def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
                             xaxis_title, yaxis_title, legend_title, show_axes,
                             marker_size, opacity) -> Figure:
-        colors = plot_df[classColoumn]
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.scatter(plot_df[xColumn], plot_df[yColumn],
-                   c=colors if palette is None else colors.map(palette),
-                   s=marker_size ** 2, alpha=opacity, linewidths=0)  # s is an area
-        if palette is not None:
-            ax.legend(handles=[Line2D([], [], ls="", marker="o", color=c, label=label)
-                               for label, c in palette.items()],
-                      title=legend_title, loc="lower left", bbox_to_anchor=(1, 0))
-        ax.set(xlabel=xaxis_title, ylabel=yaxis_title)
-        ax.grid(False)
-        if not show_axes:
-            ax.set(xticks=[], yticks=[])
-            ax.spines[:].set_visible(False)
-        fig.tight_layout()
+        # hue rides in `points`: subScatter splats it straight into sns.scatterplot
+        fig = EmbeddingAnalysis.visualiseCoord(
+            {"x": plot_df[xColumn].to_numpy(),
+             "y": plot_df[yColumn].to_numpy(),
+             "hue": plot_df[classColoumn].to_numpy()},
+            palette=palette,
+            s=marker_size ** 2,  # s is an area
+            alpha=opacity,
+            linewidth=0,
+            legend=palette is not None,
+        )
         return fig
 
     # ------------------------------------------------------------------ #

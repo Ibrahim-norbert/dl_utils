@@ -125,6 +125,21 @@ def _log_scalar(experiment: Any, tag: str, value: float, step: int) -> None:
     elif hasattr(experiment, "log"):
         experiment.log({tag: value}, step=step)
 
+def _loggable(d: Optional[dict]) -> dict:
+    """Subset of ``d`` that ``self.log`` accepts: int/float/str/bool or a
+    one-element tensor. Everything else (arrays, coords, nested dicts) is dropped."""
+    return {
+        k: v
+        for k, v in (d or {}).items()
+        if isinstance(v, (int, float, str, bool))
+           or (isinstance(v, torch.Tensor) and v.numel() == 1)
+    }
+
+def _log_hparams(experiment: Any, hparam_dict: dict, run_name=None, step=None) -> None:
+    """Duck-typed scalar dispatch: TensorBoard (`add_scalar`) or WandB (`log`)."""
+    if hasattr(experiment, "add_hparams"):
+        experiment.add_hparams(hparam_dict=_loggable(hparam_dict),metric_dict={}, run_name=run_name, global_step=step)
+
 
 class IterationInfoCallback(pl.Callback):
     """Periodic one-line training status: loss, LR, data/batch time, ETA.
@@ -510,7 +525,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=False,
+            persistent_workers=True,
             **kwargs,
         )
         return dsdl

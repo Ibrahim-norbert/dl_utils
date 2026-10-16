@@ -416,6 +416,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.weight_decay_scheduler.iter = self.trainer.global_step
         self.minweight_decay = self.minweight_decay
 
+
     def on_before_optimizer_step(self, optimizer):
         """Advance the WD ramp and write it to every non-exempt group.
 
@@ -435,17 +436,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         for group in optimizer.param_groups:
             if group.get("apply_wd_schedule", True):
                 group["minweight_decay"] = self.minweight_decay
-        # Guarded: the hook must stay callable with a bare optimizer and no Trainer
-        # (unit tests, manual stepping). self.log needs Lightning's result collection.
-        if getattr(self.trainer, "loggers", None):
-            self.log(
-                "params/minweight_decay",
-                self.minweight_decay,
-                on_step=True,
-                on_epoch=False,
-                logger=True,
-                batch_size=self.batch_size,
-            )
 
     @abstractmethod
     def _is_global_zero(self):
@@ -532,7 +522,8 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _log_probe_results(self, df, emb_np, pred_labels, gt_labels_bin, save_dir):
+    def _F1_Accuracy(self, pred_labels: torch.Tensor, gt_labels_bin: np.ndarray,
+                     tag : str ="Validation"):
         """Phase 5 — compute metrics, log F1, and run the full visual analysis."""
         pass
 
@@ -563,14 +554,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         """
         pass
 
-    @abstractmethod
-    def run_validation_epoch(self):
-        """Overridable epoch-end template. Subclasses may extend via ``super()``.
-
-        The base pass logs the npc_jonas linear probe; :class:`SMLMSonata` overrides
-        this to also log the feature space and the SSL crops.
-        """
-        pass
 
     @abstractmethod
     def predict_step(self, point_dict, batch_idx):
