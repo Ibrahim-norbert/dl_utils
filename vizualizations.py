@@ -87,8 +87,9 @@ class CustomMatplotlib:
 
         if labels is not None:
             if kwargs.get("showLegend", kwargs.get("legend", False)):
+                palette = kwargs.pop("palette", "tab20")
                 ax = CustomMatplotlib.subScatter(
-                    ax=ax, points=points, hue=np.asarray(labels), palette="tab20", **kwargs)
+                    ax=ax, points=points, hue=np.asarray(labels), palette=palette, **kwargs)
             else:
                 ax = CustomMatplotlib.subScatter(
                     ax=ax, color=CustomMatplotlib.labels2colors(labels), points=points, **kwargs)

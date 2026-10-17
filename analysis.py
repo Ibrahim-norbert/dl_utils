@@ -201,6 +201,9 @@ class EmbeddingAnalysis:
     # matplotlib for raster sinks (TensorBoard): plotly's static export needs a
     # headless browser.
     plot_backend: PlotBackend = "plotly"
+    # MoBIE Glasbey LUT. Class-level (read-only after construction) so callers
+    # without an instance can colour labels consistently: Analysis.color_space.
+    color_space = MoBie_coloring.GlasbeyARGBLut()
 
     # ------------------------------------------------------------------ #
     # Construction                                                         #
@@ -293,7 +296,6 @@ class EmbeddingAnalysis:
         self.results_df = self._scalar_columns(data_df)
         self.getLabels()
         print(f"Embeddings shape: {self.embeddings.shape}")
-        self.color_space = MoBie_coloring.GlasbeyARGBLut()
 
     def analyse(self, **kwargs) -> np.ndarray:
         """Default analysis, formerly run automatically at the end of ``__init__``.
@@ -933,16 +935,23 @@ class EmbeddingAnalysis:
     def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
                             xaxis_title, yaxis_title, legend_title, show_axes,
                             marker_size, opacity) -> Figure:
+        hue = plot_df[classColoumn].to_numpy()
+        legend = palette is not None
+        if palette is None:
+            # Precomputed per-point colours: map each colour to itself, otherwise
+            # seaborn treats them as category names and recolours them.
+            palette = {c: c for c in pd.unique(hue)}
+
         # hue rides in `points`: subScatter splats it straight into sns.scatterplot
         fig = EmbeddingAnalysis.visualiseCoord(
             {"x": plot_df[xColumn].to_numpy(),
              "y": plot_df[yColumn].to_numpy(),
-             "hue": plot_df[classColoumn].to_numpy()},
+             "hue": hue},
             palette=palette,
             s=marker_size ** 2,  # s is an area
             alpha=opacity,
             linewidth=0,
-            legend=palette is not None,
+            legend=legend,
         )
         return fig
 
