@@ -300,7 +300,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                  num_workers=1, fast_dev_run=False, dataset: str = "SMLM", batch_size=1, shuffle=True,
                  modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
                  config_file = None, limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
-                 num_nodes: int = 1, precision=None, fsdpConfig: typing.Union[None, dict] = None, args={}) -> types.NoneType:
+                 num_nodes: int = 1, precision=None, enable_progress_bar=True, fsdpConfig: typing.Union[None, dict] = None, args={}) -> types.NoneType:
 
         self.save_hyperparameters()
 
@@ -339,6 +339,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
         strategy = self._resolve_strategy(use_fsdp, fsdpConfig)
 
+        args.pop("enable_progress_bar", None)
         super().__init__(
             accelerator=self.device,
             strategy=strategy,
@@ -355,6 +356,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # error there would otherwise abort the run before any training
             # metric is flushed, leaving TensorBoard empty.
             num_sanity_val_steps=1,
+            enable_progress_bar=enable_progress_bar,
             **args,
         )
 
@@ -780,6 +782,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         config_file: typing.Union[str, None] = None,
         accumulate_grad_batches=10,
         gradient_clip_val = 1.,
+        enable_progress_bar=True,
         **kwargs,
     ) -> types.NoneType:
 
@@ -876,6 +879,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                          num_nodes=getattr(self.hparams, "num_nodes", 1),
                          precision=getattr(self.hparams, "precision", None),
                          fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
+                         enable_progress_bar= enable_progress_bar,
                          config_file=config_file,
                          args=args)
 
@@ -1005,6 +1009,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--info_log_interval", type=int, default=10)
         # >0 enables GarbageCollectionCallback with that collect interval.
         parser.add_argument("--gc_collect_interval", type=int, default=0)
+        parser.add_argument("--enable_progress_bar", action="store_false")
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser
