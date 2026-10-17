@@ -1,6 +1,6 @@
 """Per-cell geometry features: sin/cos positional embedding of an object's COM.
 
-Shared by every dataset that feeds the SONATA-family collate (training
+Shared by every dataset that feeds the SSL-family collate (training
 ``PointCloudObjects``, validation ``ProbeDataset``, inference
 ``_SuperMasterObjectDataset``) so the constructed ``point.feat`` is identical
 across train / val / inference. The sin/cos formula is the per-axis block of

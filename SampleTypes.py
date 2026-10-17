@@ -68,7 +68,7 @@ class CellGeometry(NamedTuple):
     Mirrors :class:`Vertices` (``data`` + ``BaseDataset.SAMPLE_PATH_COLUMN``) and adds ``feat`` — the
     ``(6,)`` normalized sin/cos centre-of-mass embedding built by
     :func:`dl_utils.cell_geometry.cell_geometry_from_row`. When present, the
-    SONATA-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
+    SSL-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
     color+normal supplements while keeping ``coord``); when ``None`` the collate
     falls back to the computed ``[coord, color, normal]`` features.
     """
