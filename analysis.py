@@ -933,16 +933,23 @@ class EmbeddingAnalysis:
     def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
                             xaxis_title, yaxis_title, legend_title, show_axes,
                             marker_size, opacity) -> Figure:
+        hue = plot_df[classColoumn].to_numpy()
+        legend = palette is not None
+        if palette is None:
+            # Precomputed per-point colours: map each colour to itself, otherwise
+            # seaborn treats them as category names and recolours them.
+            palette = {c: c for c in pd.unique(hue)}
+
         # hue rides in `points`: subScatter splats it straight into sns.scatterplot
         fig = EmbeddingAnalysis.visualiseCoord(
             {"x": plot_df[xColumn].to_numpy(),
              "y": plot_df[yColumn].to_numpy(),
-             "hue": plot_df[classColoumn].to_numpy()},
+             "hue": hue},
             palette=palette,
             s=marker_size ** 2,  # s is an area
             alpha=opacity,
             linewidth=0,
-            legend=palette is not None,
+            legend=legend,
         )
         return fig
 
