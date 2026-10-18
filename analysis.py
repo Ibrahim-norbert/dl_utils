@@ -242,7 +242,6 @@ class EmbeddingAnalysis:
             raise TypeError(f"Unexpected keyword argument(s): {sorted(kwargs)}")
 
         data_df = self._read_dataframe(df_path, data_df)
-        print(f"Available coloumns: {data_df.columns.tolist()}")
         embeddings = self._validated_embeddings(data_df, type, embeddings)
         if save_dir is None and df_path is not None:
             save_dir = os.path.dirname(df_path)
@@ -295,7 +294,6 @@ class EmbeddingAnalysis:
 
         self.results_df = self._scalar_columns(data_df)
         self.getLabels()
-        print(f"Embeddings shape: {self.embeddings.shape}")
 
     def analyse(self, **kwargs) -> np.ndarray:
         """Default analysis, formerly run automatically at the end of ``__init__``.
