@@ -246,7 +246,10 @@ class EmbeddingAnalysis:
         if save_dir is None and df_path is not None:
             save_dir = os.path.dirname(df_path)
 
-        data_df = self._merge_metadata(data_df, metadDataFramePath, instancelabelColumn)
+
+
+        if metadDataFramePath is not None:
+            data_df = self._merge_metadata(data_df, metadDataFramePath, instancelabelColumn)
         classMapping = classMapping or {}
         if gtColumn is not None:
             # Standardise label column(s) into a single integer column before getLabels runs.
@@ -675,7 +678,7 @@ class EmbeddingAnalysis:
         ratio = pca_model.explained_variance_ratio_
         print(f"Explained variance      : {ratio[:5].round(3)}")
         print(f"Cumulative (first 3)    : {ratio[:3].sum():.3f}")
-        self.explained_variance_ratio = ratio[:3].sum()
+        self.PCA_Variance_Ratio = ratio[:3].sum()
         self.concatDF(pd.DataFrame(
             pcs[:, :3], columns=["PCA x", "PCA y", "PCA z"], index=self.data_df.index,
         ))
