@@ -26,8 +26,8 @@ class TrainingSampleLMTensor(NamedTuple):
 
 
 class Data(NamedTuple):
-    vertices: np.ndarray[Any, np.dtype[np.float32]]
-    label: np.ndarray[Any, np.dtype[np.int32]]
+    vertices:  torch.Tensor[Any, np.dtype[np.float32]] | np.ndarray[Any, np.dtype[np.float32]]
+    label: torch.Tensor[Any, np.dtype[np.float32]] | np.ndarray[Any, np.dtype[np.int32]]
 
 
 class Volume(NamedTuple):
