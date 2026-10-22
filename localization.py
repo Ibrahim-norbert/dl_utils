@@ -108,7 +108,7 @@ def get_vertices(
     return item_df[list(vertices_col)].to_numpy(dtype=np.float32)
 
 
-def _for_file(spec, file):
+def _for_file(spec, file, allow_missing: bool = False):
     """Resolve a per-file column mapping to this file's entry.
 
     ``spec`` is either a plain column name (or list of names) applied to every file,
@@ -117,6 +117,9 @@ def _for_file(spec, file):
     in scope, is what keeps every caller from having to do it; the ones that forgot
     used to hand pandas a whole Series as a column key, which ``DataFrame.get``
     swallowed into an all-zero fallback.
+
+    A NaN entry raises, unless ``allow_missing`` (then ``None``): an empty label entry
+    in the mapping is how an unlabelled file is declared.
     """
     if not isinstance(spec, (pd.DataFrame, pd.Series)):
         return spec
@@ -127,6 +130,8 @@ def _for_file(spec, file):
     if isinstance(value, pd.Series):
         value = value.tolist()
     if np.any(pd.isna(value)):
+        if allow_missing:
+            return None
         raise KeyError(f"unresolved column mapping for {file}: {value!r}")
     return value
 def file_to_vertices(
@@ -149,7 +154,8 @@ def file_to_vertices(
     zero.
     """
     vertices_col = _for_file(vertices_col, file)
-    wanted = _for_file(vertices_instance_label_col, file)
+    # No label entry for this file in the mapping -> unlabelled, same as an empty name.
+    wanted = _for_file(vertices_instance_label_col, file, allow_missing=True) or ""
 
     dataframe = read_localization_file(file)
     localizations: np.ndarray = get_vertices(dataframe, vertices_col, input_dim)

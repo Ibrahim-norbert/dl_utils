@@ -898,8 +898,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         ``PreliminaryGNN/configs/pointclassifier.yaml`` for a config that lines up.
         """
         hp = self.hparams
-        prefixes = getattr(hp, "modelName", "")
-        if not prefixes:
+        lineage = self._model_lineage()
+        prefixes = next(
+            (self._MONITOR_PREFIXES[name] for name in lineage if name in self._MONITOR_PREFIXES),
+            None,
+        )
+        if not prefixes:  # unknown family: skip rather than guess
             return
         for setting, fatal in (
             ("ModelCheckpoint_monitor", True),
@@ -907,12 +911,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         ):
             monitor = str(getattr(hp, setting, "") or "")
             if monitor and not monitor.startswith(prefixes):
-                print(
+                logging.getLogger(__name__).warning(
                     "%s=%r is never logged by %s, which logs under %s. %s Set a "
                     "matching monitor (see PreliminaryGNN/configs/pointclassifier.yaml).",
                     setting,
                     monitor,
-                    getattr(hp, "modelName", ""),
+                    lineage[0],
                     " / ".join(repr(p) for p in prefixes),
                     (
                         "ModelCheckpoint will raise at the first validation epoch end."
@@ -920,6 +924,14 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                         else "Early stopping will be skipped."
                     ),
                 )
+
+    # Model (class) name -> metric-name prefixes that model family logs. Filled by the
+    # project trainer; families not listed are skipped by _warn_on_unlogged_monitors.
+    _MONITOR_PREFIXES: dict = {}
+
+    def _model_lineage(self) -> list:
+        """Names to look up in ``_MONITOR_PREFIXES``, most specific first."""
+        return [str(getattr(self.hparams, "modelName", "") or "")]
 
 
     @classmethod
@@ -1140,6 +1152,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             # final-epoch file in best_model_path; the top-k callback no longer
             # tracks last_model_path.
             self.hparams.ckptPath = self.latest_checkpoint_callback.best_model_path
+            # Re-raise after the bookkeeping (finally still saves the config): a
+            # swallowed crash made the process exit 0, so SLURM reported success.
+            raise
 
         finally:
             self.saveConfig()
