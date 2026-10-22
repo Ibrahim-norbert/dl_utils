@@ -51,8 +51,10 @@ class Vertices(NamedTuple):
     """Container for localization data with vertices, labels, and file paths."""
 
     data: Data
-    frame : np.ndarray | torch.Tensor
     filePath: str | Path
+    # (N,) frame index per localisation, or None when the file has no frame column.
+    # Last and defaulted, so two-field constructions stay valid.
+    frame: Optional[np.ndarray | torch.Tensor] = None
 
 
 

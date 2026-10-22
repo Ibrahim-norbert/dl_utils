@@ -95,13 +95,17 @@ def get_vertices(
         input_dim: int = 2,
 ) -> "np.ndarray[Any, np.dtype[np.float32]]":
 
-    vertices_col: list[str] = resolve_vertices_col(item_df.columns, input_dim)
+    if isinstance(vertices_col, str):
+        vertices_col = [vertices_col]
+    # An explicit column list wins when this file has it; otherwise (none given, or a
+    # heterogeneous dataset whose files name their axes differently) resolve from the
+    # candidate lists, as before.
+    if not vertices_col or not set(vertices_col).issubset(item_df.columns):
+        vertices_col = resolve_vertices_col(item_df.columns, input_dim)
 
-    arr = np.asarray(np.array(item_df[vertices_col]).tolist()).squeeze()
-    # squeeze() collapses a single-row (1, D) or single-column (N, 1) selection to
-    # 1-D, which breaks 2-D indexing downstream (e.g. xy[:, 0]). Restore (N, D).
-
-    return arr
+    # (N, D): no squeeze(), which collapsed a single-row (1, D) or single-column (N, 1)
+    # selection to 1-D and broke 2-D indexing downstream (e.g. xy[:, 0]).
+    return item_df[list(vertices_col)].to_numpy(dtype=np.float32)
 
 
 def _for_file(spec, file):
@@ -207,6 +211,14 @@ def collate_localizations(
             ),
             **extras,
         }
+        # Frame index as an optional (N, 1) feature channel, per-sample scaled to [0, 1]
+        # like NormalizeCoord scales coord; raw frame numbers (up to ~1e5) would swamp the
+        # unit-sphere coords. Absent from the file -> no "frame" key (Collect names it).
+        if localizations.frame is not None:
+            frame = np.asarray(localizations.frame, dtype=np.float32).reshape(-1, 1)  # (N, 1)
+            frame = frame - np.nanmin(frame, initial=np.inf)                          # NaN-safe min
+            frame = frame / max(float(np.nanmax(frame, initial=0.0)), 1.0)
+            point["frame"] = np.nan_to_num(frame, nan=0.0)  # a NaN frame must not poison the cloud
 
         point = forward_transform(point)  # per-sample; all tensors now
         point["filePath"] = localizations.filePath
