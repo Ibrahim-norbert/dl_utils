@@ -7,7 +7,7 @@ import warnings
 from dataclasses import dataclass
 from functools import reduce
 from io import BytesIO
-from typing import Literal, Optional
+from typing import Literal, Optional, Union, List
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,6 +15,7 @@ import pandas as pd
 import plotly
 import seaborn as sns
 import skimage
+from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import to_hex, Normalize, ListedColormap
 from matplotlib.figure import Figure
@@ -780,6 +781,39 @@ class EmbeddingAnalysis:
 
         return fig
 
+    @staticmethod
+    def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
+                            xaxis_title, yaxis_title, legend_title, show_axes,
+                            marker_size, opacity) -> Figure:
+        """Matplotlib twin of :meth:`_scatter_plotly` (same arguments), drawn by
+        ``CustomMatplotlib.simpleScatter``."""
+        labels = plot_df[classColoumn].to_numpy()  # (N,) class names, or precomputed colours
+        precomputed = palette is None
+        if precomputed:
+            # Each colour maps to itself, otherwise seaborn treats the colours as
+            # category names and recolours them.
+            palette = {c: c for c in pd.unique(labels)}
+
+        # showLegend=True takes simpleScatter's hue+palette path (its other path ignores
+        # `palette`); the legend is dropped again for precomputed colours.
+        fig, ax = CustomMatplotlib.simpleScatter(
+            {"x": plot_df[xColumn].to_numpy(), "y": plot_df[yColumn].to_numpy()},
+            labels,
+            palette=palette,
+            showLegend=True,
+            s=marker_size ** 2,  # s is an area
+            alpha=opacity,
+            linewidth=0,
+        )
+        ax.set_xlabel(xaxis_title)
+        ax.set_ylabel(yaxis_title)
+        if (legend := ax.get_legend()) is not None:
+            if precomputed:
+                legend.remove()
+            elif legend_title:
+                legend.set_title(legend_title)
+        return fig
+
 
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
@@ -932,29 +966,50 @@ class EmbeddingAnalysis:
             **subplots_kwargs,
         )[0]
 
-    @staticmethod
-    def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
-                            xaxis_title, yaxis_title, legend_title, show_axes,
-                            marker_size, opacity) -> Figure:
-        hue = plot_df[classColoumn].to_numpy()
-        legend = palette is not None
-        if palette is None:
-            # Precomputed per-point colours: map each colour to itself, otherwise
-            # seaborn treats them as category names and recolours them.
-            palette = {c: c for c in pd.unique(hue)}
+    # TODO: Duplicate from Visualization
+    @classmethod
+    def simpleScatter(
+            cls,
+            points: dict[str, np.ndarray],
+            labels: Union[List[int],
+            np.ndarray[Literal["1"], np.dtype[np.int32]]] = None,
+            title: str = "",
+            style_set_context="paper",
+            save_dir=None,
+            **kwargs,
+    ) -> tuple[Figure, Axes]:
+        import MoBie_coloring
 
-        # hue rides in `points`: subScatter splats it straight into sns.scatterplot
-        fig = EmbeddingAnalysis.visualiseCoord(
-            {"x": plot_df[xColumn].to_numpy(),
-             "y": plot_df[yColumn].to_numpy(),
-             "hue": hue},
-            palette=palette,
-            s=marker_size ** 2,  # s is an area
-            alpha=opacity,
-            linewidth=0,
-            legend=legend,
-        )
-        return fig
+        sns.set_context("notebook", font_scale=0.5)
+        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+
+        if labels is not None:
+            labels = np.asarray(labels)
+            # Same Glasbey LUT as Analysis; label 0 (background) is opaque grey, since
+            # rgba_plt_by_index(0) has alpha 1/255 and would be invisible.
+            lut = MoBie_coloring.GlasbeyARGBLut()
+            palette = {
+                k: lut.rgba_plt_by_index(int(k)) if k else (0.5, 0.5, 0.5, 1.0)
+                for k in np.unique(labels)
+            }
+            if kwargs.get("showLegend", kwargs.get("legend", False)):
+                ax = CustomMatplotlib.subScatter(
+                    ax=ax, points=points, hue=labels, palette=palette, **kwargs)
+            else:
+                ax = CustomMatplotlib.subScatter(
+                    ax=ax, points=points, color=[palette[l] for l in labels], **kwargs)
+        else:
+            ax: Axes = CustomMatplotlib.subScatter(
+                ax=ax, points=points, **kwargs)
+
+        ax.set_title(title)
+
+        fig.tight_layout()
+
+        cls.saveFig(fig, save_dir=save_dir,
+                    title=title, func=cls.simpleScatter)
+
+        return fig, ax
 
     # ------------------------------------------------------------------ #
     # Results & mask                                                       #

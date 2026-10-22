@@ -7,12 +7,14 @@ resolve/extract logic have a single home (they were previously duplicated across
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, Union, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import default_collate
+from torchvision.transforms.v2.functional import get_num_frames
+
 from constants import MOBIE_LABEL_KEY
 from SampleLoader import read_localization_file
 from SampleTypes import Vertices
@@ -34,6 +36,26 @@ _AXIS_CANDIDATES = (
     ("y", Y_COLUMN_CANDIDATES),
     ("z", Z_COLUMN_CANDIDATES),
 )
+
+
+FRAME_COLUMN_CANDIDATES = ("frame", "Frame", "frame [#]", "frame_ix", "t", "time")
+PHOTON_COLUMN_CANDIDATES = ("photons", "phot", "intensity [photon]", "intensity", "Intensity", "amplitude", "I")
+
+
+def _first_column(dataframe: pd.DataFrame, candidates: tuple[str, ...]) -> np.ndarray | None:
+    """Return the first candidate column present in *dataframe* as a 1D array, else None."""
+    name = next((c for c in candidates if c in dataframe.columns), None)
+    return None if name is None else np.atleast_1d(dataframe[name].to_numpy().squeeze())
+
+
+def get_frames(dataframe: pd.DataFrame) -> np.ndarray | None:
+    """Frame index per localization (ThunderSTORM / Picasso / SMAP / DECODE naming)."""
+    return _first_column(dataframe, FRAME_COLUMN_CANDIDATES)
+
+
+def get_photons(dataframe: pd.DataFrame) -> np.ndarray | None:
+    """Photon count / intensity per localization (ThunderSTORM / Picasso / SMAP / DECODE naming)."""
+    return _first_column(dataframe, PHOTON_COLUMN_CANDIDATES)
 
 
 def resolve_vertices_col(
@@ -108,7 +130,7 @@ def file_to_vertices(
         vertices_col: Union[list[str], pd.DataFrame, None] = None,
         vertices_instance_label_col: Union[str, pd.Series] = "",
         input_dim: int = 3,
-) -> Tuple["np.ndarray", "np.ndarray"]:
+) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray", "np.ndarray"]:
     """Read one localization file into ``(coords, instance_labels)``.
 
     Both column arguments accept a plain name or a per-file mapping; see
@@ -145,7 +167,11 @@ def file_to_vertices(
     column = (
         dataframe[wanted] if wanted else pd.Series(np.zeros(len(dataframe), dtype=int))
     )
-    return localizations, np.atleast_1d(column.to_numpy().squeeze())
+
+    frame : np.ndarray = get_frames(dataframe)
+    photons : np.ndarray = get_photons(dataframe)
+
+    return localizations, np.atleast_1d(column.to_numpy().squeeze()), frame, photons
 
 
 def collate_localizations(

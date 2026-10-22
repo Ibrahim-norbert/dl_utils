@@ -1,4 +1,5 @@
-from dataclasses import dataclass, replace, fields
+from dataclasses import dataclass, replace, fields, field
+from pathlib import Path
 from typing import NamedTuple, Any, Optional, ClassVar
 import numpy as np
 import torch
@@ -26,8 +27,8 @@ class TrainingSampleLMTensor(NamedTuple):
 
 
 class Data(NamedTuple):
-    vertices:  torch.Tensor[Any, np.dtype[np.float32]] | np.ndarray[Any, np.dtype[np.float32]]
-    label: torch.Tensor[Any, np.dtype[np.float32]] | np.ndarray[Any, np.dtype[np.int32]]
+    vertices:  torch.Tensor | np.ndarray[Any, np.dtype[np.float32]]
+    label: torch.Tensor | np.ndarray[Any, np.dtype[np.int32]]
 
 
 class Volume(NamedTuple):
@@ -50,7 +51,10 @@ class Vertices(NamedTuple):
     """Container for localization data with vertices, labels, and file paths."""
 
     data: Data
-    filePath: str
+    frame : np.ndarray | torch.Tensor
+    filePath: str | Path
+
+
 
 
 class PromptData(Data):

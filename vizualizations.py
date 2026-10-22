@@ -78,11 +78,11 @@ class CustomMatplotlib:
         labels: Union[List[int],
                       np.ndarray[Literal["1"], np.dtype[np.int32]]] = None,
         title: str = "",
-        style_set_context="paper",
+        style_set_context="notebook",
         save_dir=None,
         **kwargs,
     ) -> tuple[Figure, Axes]:
-        sns.set_context(style_set_context, font_scale=0.5)
+        sns.set_context("notebook", font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
 
         if labels is not None:
