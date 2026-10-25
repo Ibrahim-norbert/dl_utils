@@ -1,4 +1,4 @@
-"""Volume/mask datasets serialised into a single N5 file.
+"""Volume/mask datasets SAMserialised into a single N5 file.
 
 :class:`BaseVolumeDataset` and :class:`BaseMaskDataset` were moved here from
 :mod:`dl_utils.datasets`; :class:`MultiDirectoryN5Dataset` extends them from one source
