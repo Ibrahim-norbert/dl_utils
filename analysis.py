@@ -813,32 +813,38 @@ class EmbeddingAnalysis:
             elif legend_title:
                 legend.set_title(legend_title)
         return fig
-
-
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
                        mapping: Optional[dict] = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        heatmap: bool = False,
                        show_axes: bool = False, color_background: bool = False, withLegend=True,
-                       show: bool = False, **kwargs):
+                       show: bool = False, mask_background: bool = True, **kwargs):
         """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
         - default: integer class labels -> named classes with a legend
         - ``precomputed_colors``: the column already holds per-point colours
         - ``heatmap``: float values are normalised over vmin..vmax (``vmin``/``vmax``
           via kwargs, default: min..max of the non-background values) and shown
-          with a normalised 0..1 colour bar titled *classColoumn*. Background is
-          label 0 in ``self.gtColumn``.
+          with a colour bar titled *classColoumn*, ticked in vmin..vmax. When GT
+          labels exist, background is GT label <= 0 / missing: always grey and
+          excluded from the colour mapping, its range and the colour bar; a value
+          of 0 is then an ordinary value. Without labels, value 0 is background.
         - ``withLegend``: show the legend (or, for ``heatmap``, the colour bar).
-        Background (0) and NaN are always grey and never part of a colour scale.
+        - ``mask_background``: heatmap only; False colours label-0 points too instead
+          of greying them (e.g. logit maps).
+        - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
+          overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
+        Background and NaN are always grey and never part of a colour scale.
         """
         df, col, lut = self.results_df.copy(), classColoumn, self.color_space
         is_mpl = self.plot_backend == "matplotlib"
         draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
                       else (self._scatter_plotly, "write_image"))
-        to_hex = "#{:02x}{:02x}{:02x}{:02x}".format
-        grey = "#808080" if color_background else "#80808080"
+        # matplotlib takes #RRGGBBAA, plotly does not -> rgba() string for plotly.
+        to_hex = ("#{:02x}{:02x}{:02x}{:02x}".format if is_mpl
+                  else lambda r, g, b, a: f"rgba({r},{g},{b},{a / 255:.3f})")
+        grey = to_hex(128, 128, 128, 255 if color_background else 128)
         palette = None
 
         if heatmap:
@@ -848,12 +854,17 @@ class EmbeddingAnalysis:
             rgba = (argb >> np.array([16, 8, 0, 24], dtype=np.uint32)) & 0xFF
             n = len(rgba)
 
-            values = pd.to_numeric(df[col], errors="coerce").replace(0, np.nan).to_numpy(dtype=float)
+            values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
             # Background is defined by label 0 in the label column, not by the plotted value.
-            bg_col = self.gtColumn if self._has_gt else None
-            if bg_col is not None and bg_col in df.columns:
+            bg_col = self.gtColumn if (self._has_gt and self.gtColumn in df.columns) else None
+            if bg_col is None:
+                values[values == 0] = np.nan  # no labels: fall back to value 0 as background
+            elif mask_background:
+                # Labels exist -> background is label <= 0 (or missing), whatever its value:
+                # always grey, and excluded from the colour scale, its range and the colour bar.
                 bg_labels = pd.to_numeric(df[bg_col], errors="coerce").to_numpy(dtype=float)
-                values[bg_labels == 0] = np.nan
+                values[~(bg_labels > 0)] = np.nan
+            # With labels, a value of 0 is a real value (e.g. the middle of a -1..1 scale).
             background = np.isnan(values)
 
             valid = values[~background]
@@ -883,8 +894,10 @@ class EmbeddingAnalysis:
                    xaxis_title=xaxis_title, yaxis_title=yaxis_title,
                    legend_title=None if heatmap else legend_title,
                    show_axes=show_axes,
-                   marker_size=kwargs.get("markerSize", 3),
+                   marker_size=kwargs.get("markerSize", getattr(self, "marker_size", 6)),
                    opacity=kwargs.get("markerOpacity", 0.8))
+        if not is_mpl:  # layout overrides: instance-wide first, then per call
+            fig.update_layout(**getattr(self, "plotly_kwargs", {}), **kwargs.get("plotly_kwargs", {}))
 
         if heatmap or not withLegend:  # heatmaps get a colour bar instead of a legend
             if is_mpl:
@@ -894,9 +907,9 @@ class EmbeddingAnalysis:
             else:
                 fig.update_layout(showlegend=False)
 
-        if heatmap and withLegend:  # normalised 0..1 colour bar, built from the same LUT
+        if heatmap and withLegend:  # colour bar from the same LUT, labelled in vmin..vmax (foreground only)
             ticks = np.linspace(0, 1, 5)
-            ticktext = [f"{t:.2g}" for t in ticks]
+            ticktext = [f"{vmin + t * (vmax - vmin):.2g}" for t in ticks]
             if is_mpl:
                 sm = ScalarMappable(Normalize(0, 1), ListedColormap(rgba / 255.0))
                 fig.colorbar(sm, ax=fig.axes[0], ticks=ticks, label=col).set_ticklabels(ticktext)
@@ -955,16 +968,18 @@ class EmbeddingAnalysis:
 
     @staticmethod
     def visualiseCoord(
-            points: dict, title="", labels=None, save_dir=None, **subplots_kwargs
+            points: dict, title="", labels=None, save_dir=None,
+            classMapping=None, **subplots_kwargs
     ):
 
         return CustomMatplotlib.simpleScatter(
-            points,
-            labels,
-            title=title,
-            save_dir=save_dir,
+            points, labels, title=title, save_dir=save_dir,
+            color_space=type(MoBie_coloring.GlasbeyARGBLut()), classMapping=classMapping,
             **subplots_kwargs,
         )[0]
+
+
+
 
     # TODO: Duplicate from Visualization
     @classmethod
