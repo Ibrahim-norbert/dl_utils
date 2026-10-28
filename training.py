@@ -1155,8 +1155,11 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             print(f"Exited prematurely with exception: {full_stack()}")
             # latest_checkpoint_callback (monitor=None) stores its rolling
             # final-epoch file in best_model_path; the top-k callback no longer
-            # tracks last_model_path.
-            self.hparams.ckptPath = self.latest_checkpoint_callback.best_model_path
+            # tracks last_model_path. Empty when the crash precedes the first save:
+            # keep the ckptPath this run started from instead of blanking it.
+            self.hparams.ckptPath = (
+                self.latest_checkpoint_callback.best_model_path or self.hparams.ckptPath
+            )
             # Re-raise after the bookkeeping (finally still saves the config): a
             # swallowed crash made the process exit 0, so SLURM reported success.
             raise
