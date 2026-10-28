@@ -58,7 +58,9 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.accelerator = accelerator
         self.version_name = version_name
         self.no_weight_decay_keywords = tuple(no_weight_decay_keywords or ())
-        self.save_hyperparameters()
+        # logger=False: the trainer logs its full config (incl. modelConfig) as the
+        # run's hparams; checkpoints still store these.
+        self.save_hyperparameters(logger=False)
 
 
         torch.set_float32_matmul_precision("medium")

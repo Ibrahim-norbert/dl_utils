@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 import time
 import os
+import re
 import sys
 import torch
 from pytorch_lightning.utilities import parsing
@@ -18,7 +19,7 @@ import yaml
 from pytorch_lightning import seed_everything
 from torch.utils.data import random_split
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger as logger
+from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 
@@ -134,11 +135,6 @@ def _loggable(d: Optional[dict]) -> dict:
         if isinstance(v, (int, float, str, bool))
            or (isinstance(v, torch.Tensor) and v.numel() == 1)
     }
-
-def _log_hparams(experiment: Any, hparam_dict: dict, run_name=None, step=None) -> None:
-    """Duck-typed scalar dispatch: TensorBoard (`add_scalar`) or WandB (`log`)."""
-    if hasattr(experiment, "add_hparams"):
-        experiment.add_hparams(hparam_dict=_loggable(hparam_dict),metric_dict={}, run_name=run_name, global_step=step)
 
 
 class IterationInfoCallback(pl.Callback):
@@ -564,10 +560,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
     def getConfig(self):
 
-        path: str = os.path.join(self.save_dir, self.__class__.__name__)
-
-        # Test if each value is acceptable to yaml
-        filpath: str = f"{path}.yaml"
+        filpath: str = os.path.join(self.save_dir, TensorBoardLogger.NAME_HPARAMS_FILE)
 
         with open(filpath, "r") as f:
             hparams = yaml.safe_load(f)
@@ -578,9 +571,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         # Writing the data to a YAML file
 
         if os.path.exists(self.save_dir):
-            # Save to yaml file
-            path: str = os.path.join(self.save_dir, self.__class__.__name__)
-
             # Any argparse Namespaces in hparams are converted to dicts
             for key, value in vars(self.hparams).items():
                 if isinstance(value, argparse.Namespace):
@@ -590,7 +580,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
 
             # Test if each value is acceptable to yaml
-            filpath: str = f"{path}.yaml"
+            # The logger's own hparams file, so each run dir holds a single YAML.
+            filpath: str = os.path.join(self.save_dir, TensorBoardLogger.NAME_HPARAMS_FILE)
             print(f"Saving config here: {filpath}")
             with open(filpath, "w") as file:
                 yaml.dump(vars(self.hparams), file)
@@ -795,16 +786,26 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         # Allow subclasses to customise the root save directory before versioning.
         # The result is also written into self.hparams so it ends up in the saved YAML.
         root_save_dir = self._compute_save_dir()
+        # A save_dir read back from a saved run YAML already ends in version_N.
+        if re.fullmatch(r"version_\d+", os.path.basename(os.path.normpath(root_save_dir))):
+            root_save_dir = os.path.dirname(os.path.normpath(root_save_dir))
 
-        # Checkpoints, TB logs and config all go directly into the specified
-        # save_dir. name="" + version="" stop TensorBoardLogger from appending
-        # name/version_N, so its log_dir == root_save_dir (re-runs reuse/overwrite
-        # this dir; Lightning's ModelCheckpoint manages top-k/last files).
-        self.save_dir = root_save_dir
+        # Checkpoints, TB logs and config all go into one run dir. A new training
+        # gets Lightning's next free root_save_dir/version_N; resuming from
+        # ckptPath (same condition as fit()) reuses the checkpoint's own folder.
+        # name="" stops TensorBoardLogger from adding a name level.
+        ckpt = self.hparams.ckptPath
+        if ckpt and os.path.exists(ckpt):
+            run_dir = os.path.dirname(os.path.abspath(ckpt))
+            tensorboard_logger = TensorBoardLogger(
+                save_dir=os.path.dirname(run_dir), name="", version=os.path.basename(run_dir)
+            )
+        else:
+            tensorboard_logger = TensorBoardLogger(save_dir=root_save_dir, name="", version=None)
+
+        self.save_dir = tensorboard_logger.log_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
-
-        wandb_logger = logger(save_dir=root_save_dir, name="", version="")
 
         print(
             f"\n[TensorBoard] logging to: {self.save_dir}\n"
@@ -813,6 +814,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         )
 
         self.saveConfig()
+        # The trainer config is the run's only hparams record (the model uses
+        # save_hyperparameters(logger=False)), so the HPARAMS tab and the logger's
+        # hparams.yaml hold the same config that saveConfig() just wrote.
+        tensorboard_logger.log_hyperparams(vars(self.hparams))
 
         # Top-k best checkpoints, ranked by the monitored metric.
         checkpoint_callback = ModelCheckpoint(
@@ -864,7 +869,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             callbacks.append(GarbageCollectionCallback(interval=gc_interval))
         args = {
             "callbacks": callbacks,
-            "logger": wandb_logger,
+            "logger": tensorboard_logger,
             "gradient_clip_val": gradient_clip_val,
         }
 
