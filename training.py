@@ -1151,6 +1151,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
             self.hparams.ckptPath = self.checkpoint_callback.best_model_path
 
+            return segmentor
+
         except:
             print(f"Exited prematurely with exception: {full_stack()}")
             # latest_checkpoint_callback (monitor=None) stores its rolling

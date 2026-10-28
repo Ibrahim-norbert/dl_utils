@@ -538,7 +538,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _validate_linear_probe(self, emb, save_dir):
+    def _validation_log_linear_probe(self, emb, save_dir):
         """Fit + log the SegHead linear probe on the configured npc_jonas crop.
 
         Loads the fixed probe crop from :attr:`_VAL_PROBE` (falling back to
