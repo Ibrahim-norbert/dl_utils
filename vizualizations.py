@@ -91,6 +91,8 @@ class CustomMatplotlib:
         lut = color_space()
         code_to_color = {c: lut.rgba_plt_by_index(c)[:3] for c in np.unique(codes)}  # drop alpha: background's is ~0
         return [code_to_color[c] for c in codes]
+
+
     @classmethod
     def simpleScatter(
             cls,
@@ -107,10 +109,14 @@ class CustomMatplotlib:
         sns.set_context(style_set_context, font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
 
-        # Consumed here, never forwarded: seaborn only uses `palette` with a `hue`.
+        # Consumed here, never forwarded: seaborn/matplotlib don't know these.
         show_legend = kwargs.pop("showLegend", kwargs.pop("legend", False))
         palette = kwargs.pop("palette", None)
-        legend = "auto" if show_legend else False
+        color_space = kwargs.pop("color_space", None) or MoBie_coloring.GlasbeyARGBLut
+        class_mapping = kwargs.pop("classMapping", None)
+        if class_mapping:
+            kwargs.setdefault("labelNames", class_mapping)  # subScatter renames the legend
+        legend = show_legend if isinstance(show_legend, str) else ("auto" if show_legend else False)
 
         if labels is None:
             ax = CustomMatplotlib.subScatter(ax=ax, points=points, **kwargs)
@@ -125,10 +131,10 @@ class CustomMatplotlib:
                 # no palette + strings -> already colours (e.g. '#e5e5ffff' from a heatmap)
                 ax = CustomMatplotlib.subScatter(ax=ax, points=points, c=labels.tolist(), **kwargs)
             else:
-                # integer labels -> Analysis' Glasbey LUT; 0 (background) is opaque grey
+                # integer labels -> the color_space LUT (Glasbey by default); 0 (background) is grey
                 codes = np.nan_to_num(labels.astype(float)).astype(int)
                 if palette is None:
-                    lut = MoBie_coloring.GlasbeyARGBLut()
+                    lut = color_space() if isinstance(color_space, type) else color_space
                     palette = {k: lut.rgba_plt_by_index(int(k)) if k else (0.5, 0.5, 0.5, 1.0)
                                for k in np.unique(codes)}
                 if show_legend or not isinstance(palette, dict):
@@ -149,7 +155,6 @@ class CustomMatplotlib:
                     title=title, func=cls.simpleScatter)
 
         return fig, ax
-
 
 
     @classmethod

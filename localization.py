@@ -165,13 +165,17 @@ def file_to_vertices(
     if not isinstance(wanted, str):
         raise KeyError(f"unresolved instance-label column for {file}: {wanted!r}")
     if wanted and wanted not in dataframe.columns:
-        # raise KeyError(
-        #     f"instance-label column {wanted!r} not found in {file}; available "
-        #     f"columns: {list(dataframe.columns)}. Fix the sample-mapping CSV's "
-        #     "'standardizedLabels' entry, or leave it empty to read this file as "
-        #     "unlabelled."
-        # )
-        dataframe[wanted] = np.zeros((localizations.shape[0],)).astype(np.int32)
+        # Named column absent in THIS file: fall back to the candidate names, so a
+        # heterogeneous dataset (`labels` here, `cluster_id` there) still loads its labels.
+        fallback = next((c for c in LABEL_COLUMN_CANDIDATES if c in dataframe.columns), None)
+        if fallback is None:
+            raise KeyError(
+                f"instance-label column {wanted!r} not found in {file}; tried "
+                f"{LABEL_COLUMN_CANDIDATES}; available columns: {list(dataframe.columns)}. "
+                "Fix the sample-mapping CSV's 'standardizedLabels' entry, or leave it "
+                "empty to read this file as unlabelled."
+            )
+        wanted = fallback
 
     # Integer zeros, so an unlabelled sample cannot make a batch mix float and int.
     column = (
