@@ -21,6 +21,8 @@ from matplotlib.colors import to_hex, Normalize, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from plotly.graph_objs import Scatter, Scatter3d
+from plotly.graph_objs.layout import Template
+import plotly.io as pio
 from sklearn.cluster import DBSCAN
 from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
@@ -57,10 +59,33 @@ def _png_buffer_to_data_url(buf: BytesIO) -> str:
     return f"data:image/png;base64,{encoded_image}"
 
 
-def _plotly_rgb_palette(name: str, keys) -> dict:
-    """Map each key to a plotly ``rgb(r, g, b)`` string from seaborn palette *name*."""
-    palette = sns.color_palette(name, len(keys))
-    return {k: f"rgb{tuple(int(c * 255) for c in rgb)}" for k, rgb in zip(keys, palette)}
+# Plotly's analogue of sns.set_context: a named template with the scatter axis styling.
+# Used as "plotly+scatter_axes", so it only adds to plotly's default template, and any
+# explicit layout (plotly_kwargs) still overrides it.
+_AXIS_STYLE = dict(tickfont=dict(size=16, color="black"), title_font=dict(size=20),
+                   linecolor="black")
+pio.templates["scatter_axes"] = Template(layout=dict(
+    xaxis=_AXIS_STYLE, yaxis=_AXIS_STYLE,
+    scene=dict(xaxis=_AXIS_STYLE, yaxis=_AXIS_STYLE, zaxis=_AXIS_STYLE),
+))
+
+
+def _glasbey_rgb_palette(keys, offset: int = 0) -> dict:
+    """Map each key to a plotly ``rgb(r, g, b)`` string from the MoBIE Glasbey LUT.
+
+    Integer-like keys use their own code (+ *offset*), so a label gets the same colour
+    as in MoBIE and ``specialScatter``; codes <= 0 (background) are grey. Other keys
+    take LUT entries 1, 2, ... in order.
+    """
+    lut = MoBie_coloring.GlasbeyARGBLut()
+
+    def code(i, key):
+        try:
+            return int(float(key)) + offset
+        except (TypeError, ValueError):
+            return i + 1
+
+    return {k: f"rgb{lut.rgba_tuple_by_index(code(i, k))[:3]}" for i, k in enumerate(keys)}
 
 
 def convert_array_to_data_url(path) -> str:
@@ -799,13 +824,13 @@ class EmbeddingAnalysis:
             # category names and recolours them.
             palette = {c: c for c in pd.unique(labels)}
 
-        # showLegend=True takes simpleScatter's hue+palette path (its other path ignores
+        # showlegend=True takes simpleScatter's hue+palette path (its other path ignores
         # `palette`); the legend is dropped again for precomputed colours.
         fig, ax = CustomMatplotlib.simpleScatter(
             {"x": plot_df[xColumn].to_numpy(), "y": plot_df[yColumn].to_numpy()},
             labels,
             palette=palette,
-            showLegend=True,
+            showlegend=True,
             s=marker_size ** 2,  # s is an area
             alpha=opacity,
             linewidth=0,
@@ -818,12 +843,12 @@ class EmbeddingAnalysis:
             elif legend_title:
                 legend.set_title(legend_title)
         return fig
-    def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
-                       yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
+    def specialScatter(self, xColumn, yColumn, xaxis_title: Optional[str] = None,
+                       yaxis_title: Optional[str] = None, classColoumn: str = "color",
                        mapping: Optional[dict] = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        heatmap: bool = False,
-                       show_axes: bool = False, color_background: bool = False, withLegend=True,
+                       show_axes: bool = True, color_background: bool = False, showlegend=True,
                        show: bool = False, mask_background: bool = True, **kwargs):
         """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
@@ -835,7 +860,9 @@ class EmbeddingAnalysis:
           labels exist, background is GT label <= 0 / missing: always grey and
           excluded from the colour mapping, its range and the colour bar; a value
           of 0 is then an ordinary value. Without labels, value 0 is background.
-        - ``withLegend``: show the legend (or, for ``heatmap``, the colour bar).
+        - ``xaxis_title`` / ``yaxis_title``: default to *xColumn* / *yColumn*.
+        - ``show_axes`` (default True): draw axis lines, ticks and tick labels.
+        - ``showlegend``: show the legend (or, for ``heatmap``, the colour bar).
         - ``mask_background``: heatmap only; False colours label-0 points too instead
           of greying them (e.g. logit maps).
         - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
@@ -846,6 +873,8 @@ class EmbeddingAnalysis:
         """
         df, col, lut = self.results_df.copy(), classColoumn, self.color_space
         is_mpl = self.plot_backend == "matplotlib"
+        xaxis_title = xColumn if xaxis_title is None else xaxis_title
+        yaxis_title = yColumn if yaxis_title is None else yaxis_title
         zColumn = kwargs.get("zColumn")
         if zColumn is not None and is_mpl:
             raise ValueError("3-D specialScatter (zColumn) needs plot_backend='plotly'.")
@@ -914,7 +943,7 @@ class EmbeddingAnalysis:
             fig.update_layout(**self.plotly_kwargs)
             fig.update_layout(**kwargs.get("plotly_kwargs", {}))
 
-        if heatmap or not withLegend:  # heatmaps get a colour bar instead of a legend
+        if heatmap or not showlegend:  # heatmaps get a colour bar instead of a legend
             if is_mpl:
                 for legend in filter(None, [fig.axes[0].get_legend(), *fig.legends]):
                     legend.remove()
@@ -922,7 +951,7 @@ class EmbeddingAnalysis:
             else:
                 fig.update_layout(showlegend=False)
 
-        if heatmap and withLegend:  # colour bar from the same LUT, labelled in vmin..vmax (foreground only)
+        if heatmap and showlegend:  # colour bar from the same LUT, labelled in vmin..vmax (foreground only)
             ticks = np.linspace(0, 1, 5)
             ticktext = [f"{vmin + t * (vmax - vmin):.2g}" for t in ticks]
             if is_mpl:
@@ -939,9 +968,8 @@ class EmbeddingAnalysis:
                     marker=dict(colorscale=scale, cmin=0, cmax=1, color=[0], showscale=True,
                                 colorbar=dict(title=col, tickvals=list(ticks), ticktext=ticktext))))
 
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            getattr(fig, save)(os.path.join(save_dir, f"{col}_{legend_title}.svg"))
+        if save_dir is not None:  # a folder, or a full file path ending in .png/.svg/...
+            getattr(fig, save)(CustomMatplotlib.resolve_save_path(save_dir, f"{col}_{legend_title}.svg"))
         # Displaying is independent of saving. Off by default - training/validation
         # logging routes figures to TensorBoard/WandB and must not render anything.
         if show:
@@ -973,9 +1001,10 @@ class EmbeddingAnalysis:
                 category_orders={classColoumn: list(palette)},
             )
 
+        # Fonts and colours come from the "scatter_axes" template.
         axis = dict(showgrid=False, zeroline=False, showticklabels=show_axes,
-                    visible=True, showline=show_axes, linecolor="black",
-                    ticks="outside" if show_axes else "", tickfont=dict(color="white"))
+                    visible=True, showline=show_axes,
+                    ticks="outside" if show_axes else "")
         if zColumn is None:
             axes = dict(xaxis=axis, yaxis=axis,
                         xaxis_title=xaxis_title, yaxis_title=yaxis_title)
@@ -990,6 +1019,7 @@ class EmbeddingAnalysis:
             **axes,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly+scatter_axes",
             showlegend=True,
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
@@ -1000,65 +1030,47 @@ class EmbeddingAnalysis:
         fig.update_traces(marker=dict(size=marker_size, opacity=opacity))
         return fig
 
-    @staticmethod
-    def visualiseCoord(
-            points: dict, title="", labels=None, save_dir=None,
-            classMapping=None, **subplots_kwargs
-    ):
-
-        return CustomMatplotlib.simpleScatter(
-            points, labels, title=title, save_dir=save_dir,
-            color_space=type(MoBie_coloring.GlasbeyARGBLut()), classMapping=classMapping,
-            **subplots_kwargs,
-        )[0]
-
-
-
-
-    # TODO: Duplicate from Visualization
     @classmethod
-    def simpleScatter(
-            cls,
-            points: dict[str, np.ndarray],
-            labels: Union[List[int],
-            np.ndarray[Literal["1"], np.dtype[np.int32]]] = None,
-            title: str = "",
-            style_set_context="paper",
-            save_dir=None,
-            **kwargs,
-    ) -> tuple[Figure, Axes]:
-        import MoBie_coloring
+    def visualiseCoord(
+            cls, points: dict, title="", labels=None, save_dir=None,
+            classMapping=None, backend: Literal["seaborn", "plotly"] = "seaborn",
+            **subplots_kwargs
+    ):
+        """Scatter of *points* (``{"x": ..., "y": ...}``, plus ``"z"`` for 3-D with plotly)
+        coloured by *labels* (or ``points["hue"]``).
 
-        sns.set_context("notebook", font_scale=0.5)
-        fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+        ``backend="seaborn"`` draws with ``CustomMatplotlib.simpleScatter`` and returns a
+        matplotlib Figure. ``backend="plotly"`` routes through :meth:`specialScatter` and
+        returns a plotly Figure; *subplots_kwargs* then go to ``specialScatter``
+        (e.g. ``heatmap=True`` for continuous values, ``plotly_kwargs``).
+        """
+        if backend == "seaborn":
+            return CustomMatplotlib.simpleScatter(
+                points, labels, title=title, save_dir=save_dir,
+                color_space=type(MoBie_coloring.GlasbeyARGBLut()), classMapping=classMapping,
+                **subplots_kwargs,
+            )[0]
 
-        if labels is not None:
-            labels = np.asarray(labels)
-            # Same Glasbey LUT as Analysis; label 0 (background) is opaque grey, since
-            # rgba_plt_by_index(0) has alpha 1/255 and would be invisible.
-            lut = MoBie_coloring.GlasbeyARGBLut()
-            palette = {
-                k: lut.rgba_plt_by_index(int(k)) if k else (0.5, 0.5, 0.5, 1.0)
-                for k in np.unique(labels)
-            }
-            if kwargs.get("showLegend", kwargs.get("legend", False)):
-                ax = CustomMatplotlib.subScatter(
-                    ax=ax, points=points, hue=labels, palette=palette, **kwargs)
-            else:
-                ax = CustomMatplotlib.subScatter(
-                    ax=ax, points=points, color=[palette[l] for l in labels], **kwargs)
-        else:
-            ax: Axes = CustomMatplotlib.subScatter(
-                ax=ax, points=points, **kwargs)
-
-        ax.set_title(title)
-
-        fig.tight_layout()
-
-        cls.saveFig(fig, save_dir=save_dir,
-                    title=title, func=cls.simpleScatter)
-
-        return fig, ax
+        coords = {k: np.asarray(points[k]) for k in ("x", "y", "z") if k in points}
+        labels = points.get("hue") if labels is None else labels
+        label_col = "label"
+        df = pd.DataFrame({
+            **coords,
+            label_col: np.zeros(len(coords["x"]), dtype=int) if labels is None else np.asarray(labels),
+        })
+        fig = cls.from_dataframe(
+            df,
+            embeddings=np.column_stack(list(coords.values())),  # scatter needs no embeddings
+            gtColumn=label_col,
+            instancelabelColumn=label_col,
+            classMapping=classMapping,
+            leiden=False,
+            plot_backend="plotly",
+        ).specialScatter(
+            "x", "y", classColoumn=label_col, save_dir=save_dir,
+            **({"zColumn": "z"} if "z" in coords else {}), **subplots_kwargs,
+        )
+        return fig.update_layout(title_text=title) if title else fig
 
     # ------------------------------------------------------------------ #
     # Results & mask                                                       #
@@ -1451,8 +1463,8 @@ class EmbeddingAnalysis:
         unique_groups = [str(g) for g in adata.obs["leiden_trajectory"].cat.categories]
         group_masks = {g: groups == g for g in unique_groups}
 
-        # Shared palette — tab20 avoids the grey-for-0 override in specialScatter
-        group_color = _plotly_rgb_palette("tab20", unique_groups)
+        # Shared palette; offset 1 because Leiden group 0 is a real group, not background.
+        group_color = _glasbey_rgb_palette(unique_groups, offset=1)
 
         has_extra = self._has_gt and color_by != "dpt_pseudotime"
 
@@ -1518,7 +1530,7 @@ class EmbeddingAnalysis:
         if has_extra:
             gt_vals = df[color_by].astype(str).to_numpy()
             unique_gt = sorted(np.unique(gt_vals))
-            gt_color = _plotly_rgb_palette("Set2", unique_gt)
+            gt_color = _glasbey_rgb_palette(unique_gt)
             for v in unique_gt:
                 mask = gt_vals == v
                 fig.add_trace(go.Scatter(

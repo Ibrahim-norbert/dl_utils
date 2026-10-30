@@ -47,10 +47,24 @@ class CustomMatplotlib:
         assert ndim <= 3, f"points2Dict supports up to 3 dimensions, got {ndim}"
         return {axes[i]: x.flatten() for i, x in enumerate(np.vsplit(points.T, ndim))}
 
+    # Extensions that mark save_dir as a file path. A plain splitext test is not enough:
+    # folder names like "RealData-Florian-30.10.2025" would read as having a ".2025" suffix.
+    FIGURE_EXTENSIONS = (".svg", ".png", ".pdf", ".jpg", ".jpeg", ".webp", ".eps")
+
+    @classmethod
+    def resolve_save_path(cls, save_dir, default_name) -> str:
+        """*save_dir* ending in a figure extension is the full output path; otherwise
+        it is a folder and *default_name* is written inside it. Creates the folder."""
+        path = (save_dir if os.path.splitext(save_dir)[1].lower() in cls.FIGURE_EXTENSIONS
+                else os.path.join(save_dir, default_name))
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        return path
+
     @classmethod
     def saveFig(cls, fig, save_dir, title="", func=None, fileExtension="svg",
                 filename: str = None, close: bool = True) -> None:
-        """Write *fig* into *save_dir*, creating the directory if needed.
+        """Write *fig* into *save_dir*, creating the directory if needed. A *save_dir*
+        ending in a figure extension (e.g. ``.png``) is used as the full file path.
 
         *filename* overrides the ``{title}-{func.__name__}.{ext}`` convention for
         callers that already know the name they want; *close* can be turned off by
@@ -59,9 +73,8 @@ class CustomMatplotlib:
         Both default to the previous behaviour.
         """
         if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
             name = filename if filename is not None else f"{title}-{func.__name__}.{fileExtension}"
-            fig.savefig(os.path.join(save_dir, name), dpi=500, bbox_inches="tight")  # keep outside legends
+            fig.savefig(cls.resolve_save_path(save_dir, name), dpi=500, bbox_inches="tight")  # keep outside legends
         if close:
             plt.close(fig)
 
@@ -110,7 +123,7 @@ class CustomMatplotlib:
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
 
         # Consumed here, never forwarded: seaborn/matplotlib don't know these.
-        show_legend = kwargs.pop("showLegend", kwargs.pop("legend", False))
+        show_legend = kwargs.pop("showlegend", kwargs.pop("legend", False))
         palette = kwargs.pop("palette", None)
         color_space = kwargs.pop("color_space", None) or MoBie_coloring.GlasbeyARGBLut
         class_mapping = kwargs.pop("classMapping", None)
@@ -236,7 +249,7 @@ class CustomMatplotlib:
         s = kwargs.pop("markerSize", kwargs.pop("s", 4))
         kwargs["s"] = s
 
-        legend = kwargs.pop("showLegend", kwargs.pop("legend", "auto"))
+        legend = kwargs.pop("showlegend", kwargs.pop("legend", "auto"))
         kwargs["legend"] = legend
 
         # {label: name}; seaborn has no such argument, so relabel the legend afterwards
