@@ -20,7 +20,7 @@ from matplotlib.cm import ScalarMappable
 from matplotlib.colors import to_hex, Normalize, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
-from plotly.graph_objs import Scatter
+from plotly.graph_objs import Scatter, Scatter3d
 from sklearn.cluster import DBSCAN
 from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
@@ -835,10 +835,19 @@ class EmbeddingAnalysis:
           of greying them (e.g. logit maps).
         - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
           overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
+        - ``zColumn`` (via kwargs, plotly only): draw a 3-D scatter with *zColumn* as z;
+          ``zaxis_title`` (via kwargs) names that axis (default: *zColumn*).
         Background and NaN are always grey and never part of a colour scale.
         """
         df, col, lut = self.results_df.copy(), classColoumn, self.color_space
         is_mpl = self.plot_backend == "matplotlib"
+        zColumn = kwargs.get("zColumn")
+        if zColumn is not None and is_mpl:
+            raise ValueError("3-D specialScatter (zColumn) needs plot_backend='plotly'.")
+        # Only the plotly drawer takes a z axis; the 2-D call is unchanged.
+        z_kw = {} if zColumn is None else {
+            "zColumn": zColumn, "zaxis_title": kwargs.get("zaxis_title", zColumn)
+        }
         draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
                       else (self._scatter_plotly, "write_image"))
         # matplotlib takes #RRGGBBAA, plotly does not -> rgba() string for plotly.
@@ -895,7 +904,7 @@ class EmbeddingAnalysis:
                    legend_title=None if heatmap else legend_title,
                    show_axes=show_axes,
                    marker_size=kwargs.get("markerSize", getattr(self, "marker_size", 6)),
-                   opacity=kwargs.get("markerOpacity", 0.8))
+                   opacity=kwargs.get("markerOpacity", 0.8), **z_kw)
         if not is_mpl:  # layout overrides: instance-wide first, then per call
             fig.update_layout(**getattr(self, "plotly_kwargs", {}), **kwargs.get("plotly_kwargs", {}))
 
@@ -916,8 +925,11 @@ class EmbeddingAnalysis:
             else:
                 scale = [[i / (n - 1), f"rgba({r},{g},{b},{a / 255:.3f})"]
                          for i, (r, g, b, a) in enumerate(rgba.tolist())]
-                fig.add_trace(Scatter(  # invisible trace that only carries the colour bar
-                    x=[None], y=[None], mode="markers", hoverinfo="skip", showlegend=False,
+                # invisible trace that only carries the colour bar; a 3-D figure needs
+                # a 3-D trace, or plotly overlays a 2-D axis on the scene.
+                fig.add_trace((Scatter if zColumn is None else Scatter3d)(
+                    x=[None], y=[None], **({} if zColumn is None else {"z": [None]}),
+                    mode="markers", hoverinfo="skip", showlegend=False,
                     marker=dict(colorscale=scale, cmin=0, cmax=1, color=[0], showscale=True,
                                 colorbar=dict(title=col, tickvals=list(ticks), ticktext=ticktext))))
 
@@ -935,15 +947,19 @@ class EmbeddingAnalysis:
     @staticmethod
     def _scatter_plotly(plot_df, xColumn, yColumn, classColoumn, palette, *,
                         xaxis_title, yaxis_title, legend_title, show_axes,
-                        marker_size, opacity) -> plotly.graph_objs.Figure:
+                        marker_size, opacity, zColumn=None,
+                        zaxis_title=None) -> plotly.graph_objs.Figure:
+        """2-D scatter, or a 3-D one (``px.scatter_3d``) when *zColumn* is given."""
         import plotly.express as px
 
+        scatter = px.scatter if zColumn is None else px.scatter_3d
+        xyz = {"x": xColumn, "y": yColumn, **({} if zColumn is None else {"z": zColumn})}
         if palette is None:
-            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
+            fig = scatter(plot_df, **xyz)
             fig.update_traces(marker=dict(color=plot_df[classColoumn].tolist()))
         else:
-            fig = px.scatter(
-                plot_df, x=xColumn, y=yColumn, color=classColoumn,
+            fig = scatter(
+                plot_df, **xyz, color=classColoumn,
                 color_discrete_map=palette,
                 category_orders={classColoumn: list(palette)},
             )
@@ -951,8 +967,18 @@ class EmbeddingAnalysis:
         axis = dict(showgrid=False, zeroline=False, showticklabels=show_axes,
                     visible=True, showline=show_axes, linecolor="black",
                     ticks="outside" if show_axes else "", tickfont=dict(color="white"))
+        if zColumn is None:
+            axes = dict(xaxis=axis, yaxis=axis,
+                        xaxis_title=xaxis_title, yaxis_title=yaxis_title)
+        else:  # 3-D axes live on the scene; keep the data's true x/y/z proportions
+            axes = dict(scene=dict(
+                xaxis={**axis, "title": xaxis_title},
+                yaxis={**axis, "title": yaxis_title},
+                zaxis={**axis, "title": zaxis_title},
+                aspectmode="data",
+            ))
         fig.update_layout(
-            xaxis=axis, yaxis=axis,
+            **axes,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
             showlegend=True,
@@ -961,7 +987,6 @@ class EmbeddingAnalysis:
                         borderwidth=1, x=1, y=0),
             width=1000, height=800,
             legend_title_text=legend_title,
-            xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
         fig.update_traces(marker=dict(size=marker_size, opacity=opacity))
         return fig
