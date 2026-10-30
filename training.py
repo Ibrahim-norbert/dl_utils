@@ -486,9 +486,11 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             print(f"  Shape-mismatched keys skipped ({len(shape_skipped)}): "
                   f"{shape_skipped[:5]}{'...' if len(shape_skipped) > 5 else ''}")
         if missing:
-            print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+            for m in missing:
+                print(f"Missing weights: {m}")
         if unexpected:
-            print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+            for m in unexpected:
+                print(f"Unexpected weights: {m}")
         return module
     
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
