@@ -1,4 +1,5 @@
-from dataclasses import dataclass, replace, fields
+from dataclasses import dataclass, replace, fields, field
+from pathlib import Path
 from typing import NamedTuple, Any, Optional, ClassVar
 import numpy as np
 import pandas as pd
@@ -29,8 +30,8 @@ class TrainingSampleLMTensor(NamedTuple):
 
 
 class Data(NamedTuple):
-    vertices: np.ndarray[Any, np.dtype[np.float32]]
-    label: np.ndarray[Any, np.dtype[np.int32]]
+    vertices:  torch.Tensor | np.ndarray[Any, np.dtype[np.float32]]
+    label: torch.Tensor | np.ndarray[Any, np.dtype[np.int32]]
 
 
 class Volume(NamedTuple):
@@ -53,7 +54,12 @@ class Vertices(NamedTuple):
     """Container for localization data with vertices, labels, and file paths."""
 
     data: Data
-    filePath: str
+    filePath: str | Path
+    # (N,) frame index per localisation, or None when the file has no frame column.
+    # Last and defaulted, so two-field constructions stay valid.
+    frame: Optional[np.ndarray | torch.Tensor] = None
+
+
 
 
 class PromptData(Data):
@@ -71,7 +77,7 @@ class CellGeometry(NamedTuple):
     Mirrors :class:`Vertices` (``data`` + ``BaseDataset.SAMPLE_PATH_COLUMN``) and adds ``feat`` — the
     ``(6,)`` normalized sin/cos centre-of-mass embedding built by
     :func:`dl_utils.cell_geometry.cell_geometry_from_row`. When present, the
-    SONATA-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
+    SSL-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
     color+normal supplements while keeping ``coord``); when ``None`` the collate
     falls back to the computed ``[coord, color, normal]`` features.
     """

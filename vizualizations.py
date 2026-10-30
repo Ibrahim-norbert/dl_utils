@@ -9,6 +9,8 @@ from matplotlib.figure import Figure
 from matplotlib.pyplot import cm
 from sklearn.preprocessing import MinMaxScaler
 
+from MoBie_coloring import GlasbeyARGBLut
+
 
 class CustomMatplotlib:
     def __init__(self, style_set_context="paper") -> None:
@@ -46,12 +48,22 @@ class CustomMatplotlib:
         return {axes[i]: x.flatten() for i, x in enumerate(np.vsplit(points.T, ndim))}
 
     @classmethod
-    def saveFig(cls, fig, save_dir, title, func, fileExtension="svg") -> None:
+    def saveFig(cls, fig, save_dir, title="", func=None, fileExtension="svg",
+                filename: str = None, close: bool = True) -> None:
+        """Write *fig* into *save_dir*, creating the directory if needed.
+
+        *filename* overrides the ``{title}-{func.__name__}.{ext}`` convention for
+        callers that already know the name they want; *close* can be turned off by
+        callers that close the figure themselves (see
+        ``EmbeddingAnalysis._returnFigure``), so a figure is never closed twice.
+        Both default to the previous behaviour.
+        """
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            save_path: str = os.path.join(save_dir, f"{title}-{func.__name__}")
-            fig.savefig(f"{save_path}.{fileExtension}", dpi=500)
-        plt.close(fig)
+            name = filename if filename is not None else f"{title}-{func.__name__}.{fileExtension}"
+            fig.savefig(os.path.join(save_dir, name), dpi=500, bbox_inches="tight")  # keep outside legends
+        if close:
+            plt.close(fig)
 
         # TODO: Add functionality to save a subplot figure as seperate figures
         # fig.savefig(
@@ -71,30 +83,69 @@ class CustomMatplotlib:
 
     # initializing function
 
+    @staticmethod
+    def labels2glasbey(labels, color_space=GlasbeyARGBLut) -> list[tuple[float, float, float]]:
+        """Integer class codes -> opaque RGB from the MoBIE LUT (NaN / codes <= 0
+        are grey), so plots match the class colours shown in MoBIE."""
+        codes = np.nan_to_num(np.asarray(labels, dtype=float)).astype(int)
+        lut = color_space()
+        code_to_color = {c: lut.rgba_plt_by_index(c)[:3] for c in np.unique(codes)}  # drop alpha: background's is ~0
+        return [code_to_color[c] for c in codes]
+
+
     @classmethod
     def simpleScatter(
-        cls,
-        points: dict[str, np.ndarray],
-        labels: Union[List[int],
-                      np.ndarray[Literal["1"], np.dtype[np.int32]]] = None,
-        title: str = "",
-        style_set_context="paper",
-        save_dir=None,
-        **kwargs,
+            cls,
+            points: dict[str, np.ndarray],
+            labels: Union[List[int],
+            np.ndarray[Literal["1"], np.dtype[np.int32]]] = None,
+            title: str = "",
+            style_set_context="paper",
+            save_dir=None,
+            **kwargs,
     ) -> tuple[Figure, Axes]:
+        import MoBie_coloring
+
         sns.set_context(style_set_context, font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
 
-        if labels is not None:
-            if kwargs.get("showLegend", kwargs.get("legend", False)):
-                ax = CustomMatplotlib.subScatter(
-                    ax=ax, points=points, hue=np.asarray(labels), palette="tab20", **kwargs)
-            else:
-                ax = CustomMatplotlib.subScatter(
-                    ax=ax, color=CustomMatplotlib.labels2colors(labels), points=points, **kwargs)
+        # Consumed here, never forwarded: seaborn/matplotlib don't know these.
+        show_legend = kwargs.pop("showLegend", kwargs.pop("legend", False))
+        palette = kwargs.pop("palette", None)
+        color_space = kwargs.pop("color_space", None) or MoBie_coloring.GlasbeyARGBLut
+        class_mapping = kwargs.pop("classMapping", None)
+        if class_mapping:
+            kwargs.setdefault("labelNames", class_mapping)  # subScatter renames the legend
+        legend = show_legend if isinstance(show_legend, str) else ("auto" if show_legend else False)
+
+        if labels is None:
+            ax = CustomMatplotlib.subScatter(ax=ax, points=points, **kwargs)
         else:
-            ax: Axes = CustomMatplotlib.subScatter(
-                ax=ax, points=points, **kwargs)
+            labels = np.asarray(labels)
+            if isinstance(palette, dict):
+                # labels are palette KEYS (e.g. class names from Analysis.specialScatter)
+                ax = CustomMatplotlib.subScatter(
+                    ax=ax, points=points, hue=labels, palette=palette,
+                    hue_order=list(palette), legend=legend, **kwargs)
+            elif labels.dtype.kind in "OUS":
+                # no palette + strings -> already colours (e.g. '#e5e5ffff' from a heatmap)
+                ax = CustomMatplotlib.subScatter(ax=ax, points=points, c=labels.tolist(), **kwargs)
+            else:
+                # integer labels -> the color_space LUT (Glasbey by default); 0 (background) is grey
+                codes = np.nan_to_num(labels.astype(float)).astype(int)
+                if palette is None:
+                    lut = color_space() if isinstance(color_space, type) else color_space
+                    palette = {k: lut.rgba_plt_by_index(int(k)) if k else (0.5, 0.5, 0.5, 1.0)
+                               for k in np.unique(codes)}
+                if show_legend or not isinstance(palette, dict):
+                    ax = CustomMatplotlib.subScatter(
+                        ax=ax, points=points, hue=codes, palette=palette, legend=legend, **kwargs)
+                else:
+                    ax = CustomMatplotlib.subScatter(
+                        ax=ax, points=points, c=[palette[k] for k in codes], **kwargs)
+
+        if ax.get_legend() is not None:
+            sns.move_legend(ax, "center left", bbox_to_anchor=(1.02, 0.5))
 
         ax.set_title(title)
 
@@ -105,17 +156,25 @@ class CustomMatplotlib:
 
         return fig, ax
 
+
     @classmethod
     def simpleHeatmap(
-        cls,
-        matrix: np.ndarray,
-        xticklabels: list = None,
-        yticklabels: list = None,
-        title: str = "",
-        save_dir: str = None,
-        cmap: str = "viridis",
-        fmt: str = ".4f",
+            cls,
+            matrix: np.ndarray,
+            xticklabels: list = None,
+            yticklabels: list = None,
+            title: str = "",
+            save_dir: str = None,
+            cmap: str = "viridis",
+            fmt: str = ".4f",
+            xtick_codes: list[int] = None,
+            ytick_codes: list[int] = None,
+            color_space=GlasbeyARGBLut,
     ) -> tuple[Figure, Axes]:
+        """*xtick_codes* / *ytick_codes* are the integer class codes behind each
+        tick (same order as the tick labels); each tick is coloured from the
+        MoBIE *color_space* LUT so it matches the class colours in MoBIE
+        (codes <= 0 are grey)."""
         n = matrix.shape[0]
         cell_size = max(1.2, min(2.0, 12 / n))
         fig_size = max(5, n * cell_size)
@@ -132,6 +191,10 @@ class CustomMatplotlib:
         ax.set_title(title, pad=12)
         ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize)
         ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
+        for ticks, codes in ((ax.get_xticklabels(), xtick_codes), (ax.get_yticklabels(), ytick_codes)):
+            if codes is not None:
+                for tick, colour in zip(ticks, cls.labels2glasbey(codes, color_space)):
+                    tick.set_color(colour)
         fig.tight_layout()
         cls.saveFig(fig, save_dir=save_dir, title=title, func=cls.simpleHeatmap)
         return fig, ax

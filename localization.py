@@ -7,7 +7,7 @@ resolve/extract logic have a single home (they were previously duplicated across
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, Any, Union, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,6 +34,26 @@ _AXIS_CANDIDATES = (
     ("y", Y_COLUMN_CANDIDATES),
     ("z", Z_COLUMN_CANDIDATES),
 )
+
+
+FRAME_COLUMN_CANDIDATES = ("frame", "Frame", "frame [#]", "frame_ix", "t", "time")
+PHOTON_COLUMN_CANDIDATES = ("photons", "phot", "intensity [photon]", "intensity", "Intensity", "amplitude", "I")
+
+
+def _first_column(dataframe: pd.DataFrame, candidates: tuple[str, ...]) -> np.ndarray | None:
+    """Return the first candidate column present in *dataframe* as a 1D array, else None."""
+    name = next((c for c in candidates if c in dataframe.columns), None)
+    return None if name is None else np.atleast_1d(dataframe[name].to_numpy().squeeze())
+
+
+def get_frames(dataframe: pd.DataFrame) -> np.ndarray | None:
+    """Frame index per localization (ThunderSTORM / Picasso / SMAP / DECODE naming)."""
+    return _first_column(dataframe, FRAME_COLUMN_CANDIDATES)
+
+
+def get_photons(dataframe: pd.DataFrame) -> np.ndarray | None:
+    """Photon count / intensity per localization (ThunderSTORM / Picasso / SMAP / DECODE naming)."""
+    return _first_column(dataframe, PHOTON_COLUMN_CANDIDATES)
 
 
 def resolve_vertices_col(
@@ -73,16 +93,20 @@ def get_vertices(
         input_dim: int = 2,
 ) -> "np.ndarray[Any, np.dtype[np.float32]]":
 
-    vertices_col: list[str] = resolve_vertices_col(item_df.columns, input_dim)
+    if isinstance(vertices_col, str):
+        vertices_col = [vertices_col]
+    # An explicit column list wins when this file has it; otherwise (none given, or a
+    # heterogeneous dataset whose files name their axes differently) resolve from the
+    # candidate lists, as before.
+    if not vertices_col or not set(vertices_col).issubset(item_df.columns):
+        vertices_col = resolve_vertices_col(item_df.columns, input_dim)
 
-    arr = np.asarray(np.array(item_df[vertices_col]).tolist()).squeeze()
-    # squeeze() collapses a single-row (1, D) or single-column (N, 1) selection to
-    # 1-D, which breaks 2-D indexing downstream (e.g. xy[:, 0]). Restore (N, D).
-
-    return arr
+    # (N, D): no squeeze(), which collapsed a single-row (1, D) or single-column (N, 1)
+    # selection to 1-D and broke 2-D indexing downstream (e.g. xy[:, 0]).
+    return item_df[list(vertices_col)].to_numpy(dtype=np.float32)
 
 
-def _for_file(spec, file):
+def _for_file(spec, file, allow_missing: bool = False):
     """Resolve a per-file column mapping to this file's entry.
 
     ``spec`` is either a plain column name (or list of names) applied to every file,
@@ -91,6 +115,9 @@ def _for_file(spec, file):
     in scope, is what keeps every caller from having to do it; the ones that forgot
     used to hand pandas a whole Series as a column key, which ``DataFrame.get``
     swallowed into an all-zero fallback.
+
+    A NaN entry raises, unless ``allow_missing`` (then ``None``): an empty label entry
+    in the mapping is how an unlabelled file is declared.
     """
     if not isinstance(spec, (pd.DataFrame, pd.Series)):
         return spec
@@ -101,6 +128,8 @@ def _for_file(spec, file):
     if isinstance(value, pd.Series):
         value = value.tolist()
     if np.any(pd.isna(value)):
+        if allow_missing:
+            return None
         raise KeyError(f"unresolved column mapping for {file}: {value!r}")
     return value
 def file_to_vertices(
@@ -108,7 +137,7 @@ def file_to_vertices(
         vertices_col: Union[list[str], pd.DataFrame, None] = None,
         vertices_instance_label_col: Union[str, pd.Series] = "",
         input_dim: int = 3,
-) -> Tuple["np.ndarray", "np.ndarray"]:
+) -> Tuple["np.ndarray", "np.ndarray", "np.ndarray", "np.ndarray"]:
     """Read one localization file into ``(coords, instance_labels)``.
 
     Both column arguments accept a plain name or a per-file mapping; see
@@ -123,7 +152,8 @@ def file_to_vertices(
     zero.
     """
     vertices_col = _for_file(vertices_col, file)
-    wanted = _for_file(vertices_instance_label_col, file)
+    # No label entry for this file in the mapping -> unlabelled, same as an empty name.
+    wanted = _for_file(vertices_instance_label_col, file, allow_missing=True) or ""
 
     dataframe = read_localization_file(file)
     localizations: np.ndarray = get_vertices(dataframe, vertices_col, input_dim)
@@ -133,19 +163,27 @@ def file_to_vertices(
     if not isinstance(wanted, str):
         raise KeyError(f"unresolved instance-label column for {file}: {wanted!r}")
     if wanted and wanted not in dataframe.columns:
-        # raise KeyError(
-        #     f"instance-label column {wanted!r} not found in {file}; available "
-        #     f"columns: {list(dataframe.columns)}. Fix the sample-mapping CSV's "
-        #     "'standardizedLabels' entry, or leave it empty to read this file as "
-        #     "unlabelled."
-        # )
-        dataframe[wanted] = np.zeros((localizations.shape[0],)).astype(np.int32)
+        # Named column absent in THIS file: fall back to the candidate names, so a
+        # heterogeneous dataset (`labels` here, `cluster_id` there) still loads its labels.
+        fallback = next((c for c in LABEL_COLUMN_CANDIDATES if c in dataframe.columns), None)
+        if fallback is None:
+            raise KeyError(
+                f"instance-label column {wanted!r} not found in {file}; tried "
+                f"{LABEL_COLUMN_CANDIDATES}; available columns: {list(dataframe.columns)}. "
+                "Fix the sample-mapping CSV's 'standardizedLabels' entry, or leave it "
+                "empty to read this file as unlabelled."
+            )
+        wanted = fallback
 
     # Integer zeros, so an unlabelled sample cannot make a batch mix float and int.
     column = (
         dataframe[wanted] if wanted else pd.Series(np.zeros(len(dataframe), dtype=int))
     )
-    return localizations, np.atleast_1d(column.to_numpy().squeeze())
+
+    frame : np.ndarray = get_frames(dataframe)
+    photons : np.ndarray = get_photons(dataframe)
+
+    return localizations, np.atleast_1d(column.to_numpy().squeeze()), frame, photons
 
 
 def collate_localizations(
@@ -181,6 +219,14 @@ def collate_localizations(
             ),
             **extras,
         }
+        # Frame index as an optional (N, 1) feature channel, per-sample scaled to [0, 1]
+        # like NormalizeCoord scales coord; raw frame numbers (up to ~1e5) would swamp the
+        # unit-sphere coords. Absent from the file -> no "frame" key (Collect names it).
+        if localizations.frame is not None:
+            frame = np.asarray(localizations.frame, dtype=np.float32).reshape(-1, 1)  # (N, 1)
+            frame = frame - np.nanmin(frame, initial=np.inf)                          # NaN-safe min
+            frame = frame / max(float(np.nanmax(frame, initial=0.0)), 1.0)
+            point["frame"] = np.nan_to_num(frame, nan=0.0)  # a NaN frame must not poison the cloud
 
         point = forward_transform(point)  # per-sample; all tensors now
         point["filePath"] = localizations.filePath

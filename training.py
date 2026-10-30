@@ -9,6 +9,7 @@ import types
 from pathlib import Path
 import time
 import os
+import re
 import sys
 import torch
 from pytorch_lightning.utilities import parsing
@@ -18,7 +19,7 @@ import yaml
 from pytorch_lightning import seed_everything
 from torch.utils.data import random_split
 from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger as logger
+from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
 
@@ -134,11 +135,6 @@ def _loggable(d: typing.Optional[dict]) -> dict:
         if isinstance(v, (int, float, str, bool))
            or (isinstance(v, torch.Tensor) and v.numel() == 1)
     }
-
-def _log_hparams(experiment: Any, hparam_dict: dict, run_name=None, step=None) -> None:
-    """Duck-typed scalar dispatch: TensorBoard (`add_scalar`) or WandB (`log`)."""
-    if hasattr(experiment, "add_hparams"):
-        experiment.add_hparams(hparam_dict=_loggable(hparam_dict),metric_dict={}, run_name=run_name, global_step=step)
 
 
 class IterationInfoCallback(pl.Callback):
@@ -300,7 +296,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                  num_workers=1, fast_dev_run=False, dataset: str = "SMLM", batch_size=1, shuffle=True,
                  modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
                  config_file = None, limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
-                 num_nodes: int = 1, precision=None, fsdpConfig: typing.Union[None, dict] = None,
+                 num_nodes: int = 1, precision=None, enable_progress_bar=True, fsdpConfig: typing.Union[None, dict] = None,
                  persistent_workers: bool = False, args={}) -> types.NoneType:
 
         self.save_hyperparameters()
@@ -360,6 +356,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # error there would otherwise abort the run before any training
             # metric is flushed, leaving TensorBoard empty.
             num_sanity_val_steps=1,
+            enable_progress_bar=enable_progress_bar,
             **args,
         )
 
@@ -493,9 +490,11 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             print(f"  Shape-mismatched keys skipped ({len(shape_skipped)}): "
                   f"{shape_skipped[:5]}{'...' if len(shape_skipped) > 5 else ''}")
         if missing:
-            print(f"  Missing keys  ({len(missing)}): {missing[:5]}{'...' if len(missing) > 5 else ''}")
+            for m in missing:
+                print(f"Missing weights: {m}")
         if unexpected:
-            print(f"  Unexpected keys ({len(unexpected)}): {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+            for m in unexpected:
+                print(f"Unexpected weights: {m}")
         return module
     
     def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
@@ -567,10 +566,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
 
     def getConfig(self):
 
-        path: str = os.path.join(self.save_dir, self.__class__.__name__)
-
-        # Test if each value is acceptable to yaml
-        filpath: str = f"{path}.yaml"
+        filpath: str = os.path.join(self.save_dir, TensorBoardLogger.NAME_HPARAMS_FILE)
 
         with open(filpath, "r") as f:
             hparams = yaml.safe_load(f)
@@ -581,9 +577,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         # Writing the data to a YAML file
 
         if os.path.exists(self.save_dir):
-            # Save to yaml file
-            path: str = os.path.join(self.save_dir, self.__class__.__name__)
-
             # Any argparse Namespaces in hparams are converted to dicts
             for key, value in vars(self.hparams).items():
                 if isinstance(value, argparse.Namespace):
@@ -593,7 +586,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # https://lightning.ai/docs/pytorch/stable/cli/lightning_cli_advanced.html#run-using-a-config-file
 
             # Test if each value is acceptable to yaml
-            filpath: str = f"{path}.yaml"
+            # The logger's own hparams file, so each run dir holds a single YAML.
+            filpath: str = os.path.join(self.save_dir, TensorBoardLogger.NAME_HPARAMS_FILE)
             print(f"Saving config here: {filpath}")
             with open(filpath, "w") as file:
                 yaml.dump(vars(self.hparams), file)
@@ -786,6 +780,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         config_file: typing.Union[str, None] = None,
         accumulate_grad_batches=10,
         gradient_clip_val = 1.,
+        enable_progress_bar=True,
         **kwargs,
     ) -> types.NoneType:
 
@@ -798,16 +793,26 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         # Allow subclasses to customise the root save directory before versioning.
         # The result is also written into self.hparams so it ends up in the saved YAML.
         root_save_dir = self._compute_save_dir()
+        # A save_dir read back from a saved run YAML already ends in version_N.
+        if re.fullmatch(r"version_\d+", os.path.basename(os.path.normpath(root_save_dir))):
+            root_save_dir = os.path.dirname(os.path.normpath(root_save_dir))
 
-        # Checkpoints, TB logs and config all go directly into the specified
-        # save_dir. name="" + version="" stop TensorBoardLogger from appending
-        # name/version_N, so its log_dir == root_save_dir (re-runs reuse/overwrite
-        # this dir; Lightning's ModelCheckpoint manages top-k/last files).
-        self.save_dir = root_save_dir
+        # Checkpoints, TB logs and config all go into one run dir. A new training
+        # gets Lightning's next free root_save_dir/version_N; resuming from
+        # ckptPath (same condition as fit()) reuses the checkpoint's own folder.
+        # name="" stops TensorBoardLogger from adding a name level.
+        ckpt = self.hparams.ckptPath
+        if ckpt and os.path.exists(ckpt):
+            run_dir = os.path.dirname(os.path.abspath(ckpt))
+            tensorboard_logger = TensorBoardLogger(
+                save_dir=os.path.dirname(run_dir), name="", version=os.path.basename(run_dir)
+            )
+        else:
+            tensorboard_logger = TensorBoardLogger(save_dir=root_save_dir, name="", version=None)
+
+        self.save_dir = tensorboard_logger.log_dir
         self.hparams.save_dir = self.save_dir
         os.makedirs(self.save_dir, exist_ok=True)
-
-        wandb_logger = logger(save_dir=root_save_dir, name="", version="")
 
         print(
             f"\n[TensorBoard] logging to: {self.save_dir}\n"
@@ -816,6 +821,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         )
 
         self.saveConfig()
+        # The trainer config is the run's only hparams record (the model uses
+        # save_hyperparameters(logger=False)), so the HPARAMS tab and the logger's
+        # hparams.yaml hold the same config that saveConfig() just wrote.
+        tensorboard_logger.log_hyperparams(vars(self.hparams))
 
         # Top-k best checkpoints, ranked by the monitored metric.
         checkpoint_callback = ModelCheckpoint(
@@ -867,7 +876,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             callbacks.append(GarbageCollectionCallback(interval=gc_interval))
         args = {
             "callbacks": callbacks,
-            "logger": wandb_logger,
+            "logger": tensorboard_logger,
             "gradient_clip_val": gradient_clip_val,
         }
 
@@ -883,6 +892,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                          precision=getattr(self.hparams, "precision", None),
                          fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
                          persistent_workers=getattr(self.hparams, "persistent_workers", False),
+                         enable_progress_bar=enable_progress_bar,
                          config_file=config_file,
                          args=args)
 
@@ -901,8 +911,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         ``PreliminaryGNN/configs/pointclassifier.yaml`` for a config that lines up.
         """
         hp = self.hparams
-        prefixes = getattr(hp, "modelName", "")
-        if not prefixes:
+        lineage = self._model_lineage()
+        prefixes = next(
+            (self._MONITOR_PREFIXES[name] for name in lineage if name in self._MONITOR_PREFIXES),
+            None,
+        )
+        if not prefixes:  # unknown family: skip rather than guess
             return
         for setting, fatal in (
             ("ModelCheckpoint_monitor", True),
@@ -910,12 +924,12 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         ):
             monitor = str(getattr(hp, setting, "") or "")
             if monitor and not monitor.startswith(prefixes):
-                print(
+                logging.getLogger(__name__).warning(
                     "%s=%r is never logged by %s, which logs under %s. %s Set a "
                     "matching monitor (see PreliminaryGNN/configs/pointclassifier.yaml).",
                     setting,
                     monitor,
-                    getattr(hp, "modelName", ""),
+                    lineage[0],
                     " / ".join(repr(p) for p in prefixes),
                     (
                         "ModelCheckpoint will raise at the first validation epoch end."
@@ -923,6 +937,14 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                         else "Early stopping will be skipped."
                     ),
                 )
+
+    # Model (class) name -> metric-name prefixes that model family logs. Filled by the
+    # project trainer; families not listed are skipped by _warn_on_unlogged_monitors.
+    _MONITOR_PREFIXES: dict = {}
+
+    def _model_lineage(self) -> list:
+        """Names to look up in ``_MONITOR_PREFIXES``, most specific first."""
+        return [str(getattr(self.hparams, "modelName", "") or "")]
 
 
     @classmethod
@@ -1015,6 +1037,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--info_log_interval", type=int, default=10)
         # >0 enables GarbageCollectionCallback with that collect interval.
         parser.add_argument("--gc_collect_interval", type=int, default=0)
+        # Stored as enable_progress_bar (YAML key); the CLI flag turns the bar off.
+        parser.add_argument("--disable_progress_bar", dest="enable_progress_bar", action="store_false")
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser
@@ -1138,12 +1162,20 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
             self.hparams.ckptPath = self.checkpoint_callback.best_model_path
 
+            return segmentor
+
         except:
             print(f"Exited prematurely with exception: {full_stack()}")
             # latest_checkpoint_callback (monitor=None) stores its rolling
             # final-epoch file in best_model_path; the top-k callback no longer
-            # tracks last_model_path.
-            self.hparams.ckptPath = self.latest_checkpoint_callback.best_model_path
+            # tracks last_model_path. Empty when the crash precedes the first save:
+            # keep the ckptPath this run started from instead of blanking it.
+            self.hparams.ckptPath = (
+                self.latest_checkpoint_callback.best_model_path or self.hparams.ckptPath
+            )
+            # Re-raise after the bookkeeping (finally still saves the config): a
+            # swallowed crash made the process exit 0, so SLURM reported success.
+            raise
 
         finally:
             self.saveConfig()

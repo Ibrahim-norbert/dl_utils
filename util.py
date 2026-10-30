@@ -804,11 +804,14 @@ class CosineScheduler(object):
         self.schedule = np.concatenate((warmup_schedule, schedule, freeze_schedule))
         self.iter = 0
 
-    def get(self, it):
+    def get(self, it) -> float:
+        # Python float, never a numpy scalar: callers write these values into optimizer
+        # param_groups and attributes that end up in checkpoints, and a numpy scalar
+        # there makes torch.load(weights_only=True) — PyTorch >= 2.6's default, used on
+        # resume — reject the checkpoint ("Unsupported global: numpy...scalar").
         if it >= self.total_iters:
-            return self.final_value
-        else:
-            return self.schedule[it]
+            return float(self.final_value)
+        return float(self.schedule[it])
 
     def step(self):
         value = self.get(self.iter)
