@@ -125,6 +125,21 @@ def _log_scalar(experiment: Any, tag: str, value: float, step: int) -> None:
     elif hasattr(experiment, "log"):
         experiment.log({tag: value}, step=step)
 
+def _loggable(d: Optional[dict]) -> dict:
+    """Subset of ``d`` that ``self.log`` accepts: int/float/str/bool or a
+    one-element tensor. Everything else (arrays, coords, nested dicts) is dropped."""
+    return {
+        k: v
+        for k, v in (d or {}).items()
+        if isinstance(v, (int, float, str, bool))
+           or (isinstance(v, torch.Tensor) and v.numel() == 1)
+    }
+
+def _log_hparams(experiment: Any, hparam_dict: dict, run_name=None, step=None) -> None:
+    """Duck-typed scalar dispatch: TensorBoard (`add_scalar`) or WandB (`log`)."""
+    if hasattr(experiment, "add_hparams"):
+        experiment.add_hparams(hparam_dict=_loggable(hparam_dict),metric_dict={}, run_name=run_name, global_step=step)
+
 
 class IterationInfoCallback(pl.Callback):
     """Periodic one-line training status: loss, LR, data/batch time, ETA.
@@ -285,8 +300,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                  num_workers=1, fast_dev_run=False, dataset: str = "SMLM", batch_size=1, shuffle=True,
                  modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
                  config_file = None, limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
-                 num_nodes: int = 1, precision=None, fsdpConfig: typing.Union[None, dict] = None,
-                 persistent_workers: bool = False, args={}) -> types.NoneType:
+                 num_nodes: int = 1, precision=None, fsdpConfig: typing.Union[None, dict] = None, args={}) -> types.NoneType:
 
         self.save_hyperparameters()
 
@@ -309,10 +323,6 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             # Ideally, you shoud not save config. As it causes problems for reusing
             #self.device = "cpu"
             self.num_workers = 1
-
-        # Keep DataLoader workers alive across epochs (no per-epoch re-spawn). PyTorch
-        # rejects persistent workers with num_workers=0, hence the guard.
-        self.persistent_workers = persistent_workers and self.num_workers > 0
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
         # Fix the seed for reproducibility
@@ -504,7 +514,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             val_ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=self.persistent_workers,
+            persistent_workers=False,
             **kwargs,
         )
         return val_ds
@@ -515,7 +525,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             ds,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            persistent_workers=self.persistent_workers,
+            persistent_workers=False,
             **kwargs,
         )
         return dsdl
@@ -746,7 +756,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         save_dir="",
         reproducibility_seed=43,
         num_workers=1,
-        persistent_workers: bool = False,
         dataset: str = "SMLMDataset",
         trainFrac: float = 0.9,
         batch_size=1,
@@ -867,7 +876,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                          num_nodes=getattr(self.hparams, "num_nodes", 1),
                          precision=getattr(self.hparams, "precision", None),
                          fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
-                         persistent_workers=getattr(self.hparams, "persistent_workers", False),
                          config_file=config_file,
                          args=args)
 
@@ -969,9 +977,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--max_epochs", type=int, default=200)
         parser.add_argument("--batch_size", type=int, default=1)
         parser.add_argument("--num_workers", type=int, default=None)
-        # Boolean switch: `persistent_workers: true` in a YAML config keeps DataLoader
-        # workers alive across epochs instead of re-spawning them every epoch.
-        parser.add_argument("--persistent_workers", action="store_true", default=False)
         parser.add_argument("--trainFrac", type=float, default=0.9)
         parser.add_argument("--shuffle", action="store_true", default=True)
         parser.add_argument("--fast_dev_run", type=int, default=0)
@@ -1092,6 +1097,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
         return train_ds, val_ds
 
+    @abstractmethod
     def getTrainValDataloader(
             self, dataset: BaseDataset, segmentor
     ):

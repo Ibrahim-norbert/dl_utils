@@ -84,13 +84,14 @@ class CustomMatplotlib:
     ) -> tuple[Figure, Axes]:
         sns.set_context(style_set_context, font_scale=0.5)
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
+
         if labels is not None:
-            ax: Axes = CustomMatplotlib.subScatter(
-                ax=ax,
-                color=CustomMatplotlib.labels2colors(labels),
-                points=points,
-                **kwargs,
-            )
+            if kwargs.get("showLegend", kwargs.get("legend", False)):
+                ax = CustomMatplotlib.subScatter(
+                    ax=ax, points=points, hue=np.asarray(labels), palette="tab20", **kwargs)
+            else:
+                ax = CustomMatplotlib.subScatter(
+                    ax=ax, color=CustomMatplotlib.labels2colors(labels), points=points, **kwargs)
         else:
             ax: Axes = CustomMatplotlib.subScatter(
                 ax=ax, points=points, **kwargs)
@@ -167,15 +168,25 @@ class CustomMatplotlib:
         return ax
 
     @staticmethod
-    def  subScatter(ax, points: dict[str, np.ndarray], **kwargs) -> Axes:
+    def subScatter(ax, points: dict[str, np.ndarray], **kwargs) -> Axes:
         # For KWARGS, : https://matplotlib.org/stable/api/_as_gen/matplotlib.axes.Axes.html#matplotlib.axes.Axes
-        
-        # Ensure ticks are small
-        #ax.tick_params(axis='both', which='both', labelsize=3, )
-        # Set axis edges and ticks to verz small
-#
+        s = kwargs.pop("markerSize", kwargs.pop("s", 4))
+        kwargs["s"] = s
 
-        return sns.scatterplot(ax=ax, **points, **kwargs)
+        legend = kwargs.pop("showLegend", kwargs.pop("legend", "auto"))
+        kwargs["legend"] = legend
+
+        # {label: name}; seaborn has no such argument, so relabel the legend afterwards
+        labelNames = kwargs.pop("labelNames", None)
+
+        ax = sns.scatterplot(ax=ax, **points, **kwargs)
+
+        if labelNames and ax.get_legend() is not None:
+            names = {str(k): str(v) for k, v in labelNames.items()}
+            for text in ax.get_legend().get_texts():
+                text.set_text(names.get(text.get_text(), text.get_text()))
+
+        return ax
 
     @staticmethod
     def square_multi_subplot(

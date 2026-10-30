@@ -206,14 +206,29 @@ class EmbeddingAnalysis:
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
-    def __init__(self, df_path: Optional[str] = None, type: str = EMBED_DICT_EMBED,
-                 instancelabelColumn: str = MOBIE_LABEL_KEY, gtColumn: str = None, classMapping: dict = None,
-                 save_dir: str = None, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
-                 leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean",
-                 metadDataFramePath: Optional[str] = None, classifier_method: str = "LogisticRegression",
-                 greyBackground: bool = False, plot_backend: PlotBackend = "plotly",
-                 data_df: Optional[pd.DataFrame] = None, embeddings: Optional[np.ndarray] = None,
-                 plotly_kwargs: Optional[dict] = None, marker_size: float = 3, **kwargs) -> None:
+    def __init__(
+            self,
+            df_path: Optional[str] = None,
+            type: str = EMBED_DICT_EMBED,
+            instancelabelColumn: str = MOBIE_LABEL_KEY,
+            gtColumn: str = None,
+            classMapping: dict = None,
+            save_dir: str = None,
+            dbscan: bool = False,
+            leiden: bool = True,
+            leiden_resolution: float = 1.0,
+            leiden_n_iterations: int = 2,
+            leiden_n_neighbors: int = 15,
+            leiden_distance_metric: str = "euclidean",
+            metadDataFramePath: Optional[str] = None,
+            classifier_method: str = "LogisticRegression",
+            greyBackground:bool = False,
+            plot_backend: PlotBackend = "plotly",
+            data_df: Optional[pd.DataFrame] = None,
+            embeddings: Optional[np.ndarray] = None,
+            subplots_kwargs : Optional[dict] = None,
+            **kwargs,
+    ) -> None:
         """Load, validate and prepare the data. Runs no analysis.
 
         Every constructor ends up here; call :meth:`analyse` afterwards to train
@@ -224,6 +239,7 @@ class EmbeddingAnalysis:
             raise TypeError(f"Unexpected keyword argument(s): {sorted(kwargs)}")
 
         data_df = self._read_dataframe(df_path, data_df)
+        print(f"Available coloumns: {data_df.columns.tolist()}")
         embeddings = self._validated_embeddings(data_df, type, embeddings)
         if save_dir is None and df_path is not None:
             save_dir = os.path.dirname(df_path)
@@ -272,12 +288,11 @@ class EmbeddingAnalysis:
         self.classMappedColumn = "Mapped"
         self.classColumn = "Class"
         self.plot_backend = plot_backend
-        # Forwarded to fig.update_layout() of every plotly figure, overriding the defaults.
-        self.plotly_kwargs = plotly_kwargs if plotly_kwargs is not None else {}
-        self.marker_size = marker_size  # scatter point size; per call: specialScatter(markerSize=...)
+        self.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
 
         self.results_df = self._scalar_columns(data_df)
         self.getLabels()
+        print(f"Embeddings shape: {self.embeddings.shape}")
         self.color_space = MoBie_coloring.GlasbeyARGBLut()
 
     def analyse(self, **kwargs) -> np.ndarray:
@@ -340,6 +355,7 @@ class EmbeddingAnalysis:
             **kwargs
         )
         instance.classColumn = "cluster"
+        instance.subplots_kwargs = {"s": 1}
         return instance
 
     @classmethod
@@ -745,7 +761,7 @@ class EmbeddingAnalysis:
 
         return fig
 
-    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True, **kwargs):
+    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True):
         col = classColoumn if classColoumn is not None else self.classColumn
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
@@ -758,7 +774,6 @@ class EmbeddingAnalysis:
             legend_title=f"PC - {self.gtColumn if self._has_gt else col}",
             save_dir=self.save_dir,
             precomputed_colors=precomputed_colors
-            , **kwargs
         )
     def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
                        yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
@@ -918,21 +933,17 @@ class EmbeddingAnalysis:
     def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
                             xaxis_title, yaxis_title, legend_title, show_axes,
                             marker_size, opacity) -> Figure:
-        colors = plot_df[classColoumn]
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.scatter(plot_df[xColumn], plot_df[yColumn],
-                   c=colors if palette is None else colors.map(palette),
-                   s=marker_size ** 2, alpha=opacity, linewidths=0)  # s is an area
-        if palette is not None:
-            ax.legend(handles=[Line2D([], [], ls="", marker="o", color=c, label=label)
-                               for label, c in palette.items()],
-                      title=legend_title, loc="lower left", bbox_to_anchor=(1, 0))
-        ax.set(xlabel=xaxis_title, ylabel=yaxis_title)
-        ax.grid(False)
-        if not show_axes:
-            ax.set(xticks=[], yticks=[])
-            ax.spines[:].set_visible(False)
-        fig.tight_layout()
+        # hue rides in `points`: subScatter splats it straight into sns.scatterplot
+        fig = EmbeddingAnalysis.visualiseCoord(
+            {"x": plot_df[xColumn].to_numpy(),
+             "y": plot_df[yColumn].to_numpy(),
+             "hue": plot_df[classColoumn].to_numpy()},
+            palette=palette,
+            s=marker_size ** 2,  # s is an area
+            alpha=opacity,
+            linewidth=0,
+            legend=palette is not None,
+        )
         return fig
 
     # ------------------------------------------------------------------ #
@@ -1089,17 +1100,14 @@ class EmbeddingAnalysis:
             distfun=lambda X: pdist(X, metric=metric),
             linkagefun=lambda d: sch.linkage(d, method=linkage),
         )
-        fig.update_layout(**{
-            **dict(
-                title_text=f"Class dendrogram — {metric} distance, {linkage} linkage",
-                template="plotly_dark",
-                width=800,
-                height=max(400, len(classes) * 40),
-                xaxis=dict(title=f"{metric} distance"),
-                yaxis=dict(title=""),
-            ),
-            **self.plotly_kwargs,
-        })
+        fig.update_layout(
+            title_text=f"Class dendrogram — {metric} distance, {linkage} linkage",
+            template="plotly_dark",
+            width=800,
+            height=max(400, len(classes) * 40),
+            xaxis=dict(title=f"{metric} distance"),
+            yaxis=dict(title=""),
+        )
 
         save_dir = save_dir or self.save_dir
         if save_dir:
@@ -1438,15 +1446,12 @@ class EmbeddingAnalysis:
             ), row=2, col=2)
 
         # ── Layout ────────────────────────────────────────────────────────
-        fig.update_layout(**{
-            **dict(
-                height=900,
-                title_text="Trajectory analysis — PAGA + diffusion pseudotime",
-                template="plotly_dark",
-                legend=dict(itemsizing="constant", font=dict(size=10)),
-            ),
-            **self.plotly_kwargs,
-        })
+        fig.update_layout(
+            height=900,
+            title_text="Trajectory analysis — PAGA + diffusion pseudotime",
+            template="plotly_dark",
+            legend=dict(itemsizing="constant", font=dict(size=10)),
+        )
         fig.update_xaxes(showgrid=False, showticklabels=False)
         fig.update_yaxes(showgrid=False, showticklabels=False)
 
