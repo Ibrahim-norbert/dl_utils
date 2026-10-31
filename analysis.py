@@ -1044,15 +1044,18 @@ class EmbeddingAnalysis:
         returns a plotly Figure; *subplots_kwargs* then go to ``specialScatter``
         (e.g. ``heatmap=True`` for continuous values, ``plotly_kwargs``).
         """
+        labels = points.get("hue") if labels is None else labels
         if backend == "seaborn":
+            # hue goes through labels: left in points, seaborn maps the integer
+            # codes to a continuous colormap and the Glasbey palette is never used
+            coords = {k: v for k, v in points.items() if k != "hue"}
             return CustomMatplotlib.simpleScatter(
-                points, labels, title=title, save_dir=save_dir,
+                coords, labels, title=title, save_dir=save_dir,
                 color_space=type(MoBie_coloring.GlasbeyARGBLut()), classMapping=classMapping,
                 **subplots_kwargs,
             )[0]
 
         coords = {k: np.asarray(points[k]) for k in ("x", "y", "z") if k in points}
-        labels = points.get("hue") if labels is None else labels
         label_col = "label"
         df = pd.DataFrame({
             **coords,
