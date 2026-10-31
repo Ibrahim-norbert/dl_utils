@@ -297,7 +297,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                  modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
                  config_file = None, limit_val_batches=0, accumulate_grad_batches=10, use_fsdp: bool = False, devices="auto",
                  num_nodes: int = 1, precision=None, enable_progress_bar=True, fsdpConfig: typing.Union[None, dict] = None,
-                 persistent_workers: bool = False, args={}) -> types.NoneType:
+                 persistent_workers=False, pin_memory: bool = False, args={}) -> types.NoneType:
 
         self.save_hyperparameters()
 
@@ -321,9 +321,8 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             #self.device = "cpu"
             self.num_workers = 1
 
-        # Keep DataLoader workers alive across epochs (no per-epoch re-spawn). PyTorch
-        # rejects persistent workers with num_workers=0, hence the guard.
-        self.persistent_workers = persistent_workers and self.num_workers > 0
+        self.persistent_workers=persistent_workers
+        self.pin_memory = pin_memory
 
         # TODO: Currently, only using https://lightning.ai/docs/pytorch/stable/common/trainer.html#testing
         # Fix the seed for reproducibility
@@ -519,6 +518,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
             **kwargs,
         )
         return val_ds
@@ -530,6 +530,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             batch_size=self.batch_size,
             num_workers=self.num_workers,
             persistent_workers=self.persistent_workers,
+            pin_memory=self.pin_memory,
             **kwargs,
         )
         return dsdl
@@ -781,6 +782,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         accumulate_grad_batches=10,
         gradient_clip_val = 1.,
         enable_progress_bar=True,
+            pin_memory=True,
         **kwargs,
     ) -> types.NoneType:
 
@@ -892,6 +894,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                          precision=getattr(self.hparams, "precision", None),
                          fsdpConfig=getattr(self.hparams, "fsdpConfig", None),
                          persistent_workers=getattr(self.hparams, "persistent_workers", False),
+                         pin_memory=pin_memory,
                          enable_progress_bar=enable_progress_bar,
                          config_file=config_file,
                          args=args)
@@ -1008,7 +1011,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--num_workers", type=int, default=None)
         # Boolean switch: `persistent_workers: true` in a YAML config keeps DataLoader
         # workers alive across epochs instead of re-spawning them every epoch.
-        parser.add_argument("--persistent_workers", action="store_true", default=False)
+        parser.add_argument("--pin_memory", action="store_true", default=False)
         parser.add_argument("--trainFrac", type=float, default=0.9)
         parser.add_argument("--shuffle", action="store_true", default=True)
         parser.add_argument("--fast_dev_run", type=int, default=0)
@@ -1037,8 +1040,7 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--info_log_interval", type=int, default=10)
         # >0 enables GarbageCollectionCallback with that collect interval.
         parser.add_argument("--gc_collect_interval", type=int, default=0)
-        # Stored as enable_progress_bar (YAML key); the CLI flag turns the bar off.
-        parser.add_argument("--disable_progress_bar", dest="enable_progress_bar", action="store_false")
+        parser.add_argument("--enable_progress_bar", action="store_false")
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser
