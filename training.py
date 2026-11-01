@@ -550,7 +550,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return checkpoint_info
 
     @classmethod
-    def fromConfig(cls, configPath):
+    def fromConfig(cls, configPath, **kwargs):
         import yaml
 
         with open(configPath, encoding="utf-8") as _f:
@@ -563,6 +563,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             for k, v in _cfg.items()
             if not isinstance(v, (dict, list)) and k != "config_file"
         }
+        _scalar_keys.update(kwargs)
         return cls(config_file=configPath, **_scalar_keys)
 
     def getConfig(self):

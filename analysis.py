@@ -107,9 +107,9 @@ class _LabelColumn:
     order and ``pd.Categorical`` for the encoding.
     """
 
-    def __init__(self, gtColumn):
-        self.sources: list = list(gtColumn) if isinstance(gtColumn, list) else []
-        self.name: str = "_".join(self.sources) or gtColumn
+    def __init__(self, gtclassColumn):
+        self.sources: list = list(gtclassColumn) if isinstance(gtclassColumn, list) else []
+        self.name: str = "_".join(self.sources) or gtclassColumn
 
     def standardise(self, data_df: pd.DataFrame, classMapping: dict) -> tuple[pd.DataFrame, str, dict]:
         df = data_df.assign(**{self.name: self._merge(data_df[self.sources])}) if self.sources else data_df.copy()
@@ -235,31 +235,15 @@ class EmbeddingAnalysis:
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
-    def __init__(
-            self,
-            df_path: Optional[str] = None,
-            type: str = EMBED_DICT_EMBED,
-            instancelabelColumn: str = MOBIE_LABEL_KEY,
-            gtColumn: str = None,
-            classMapping: dict = None,
-            save_dir: str = None,
-            dbscan: bool = False,
-            leiden: bool = True,
-            leiden_resolution: float = 1.0,
-            leiden_n_iterations: int = 2,
-            leiden_n_neighbors: int = 15,
-            leiden_distance_metric: str = "euclidean",
-            metadDataFramePath: Optional[str] = None,
-            classifier_method: str = "LogisticRegression",
-            greyBackground:bool = False,
-            plot_backend: PlotBackend = "plotly",
-            data_df: Optional[pd.DataFrame] = None,
-            embeddings: Optional[np.ndarray] = None,
-            subplots_kwargs : Optional[dict] = None,
-            plotly_kwargs: Optional[dict] = None,
-            marker_size: float = 6,
-            **kwargs,
-    ) -> None:
+    def __init__(self, df_path: Optional[str] = None, type: str = EMBED_DICT_EMBED,
+                 instancelabelColumn: str = MOBIE_LABEL_KEY, gtclassColumn: str = None, classMapping: dict = None,
+                 save_dir: str = None, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
+                 leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean",
+                 metadDataFramePath: Optional[str] = None, classifier_method: str = "LogisticRegression",
+                 greyBackground: bool = False, plot_backend: PlotBackend = "plotly",
+                 data_df: Optional[pd.DataFrame] = None, embeddings: Optional[np.ndarray] = None,
+                 subplots_kwargs: Optional[dict] = None, plotly_kwargs: Optional[dict] = None, marker_size: float = 6,
+                 **kwargs) -> None:
         """Load, validate and prepare the data. Runs no analysis.
 
         Every constructor ends up here; call :meth:`analyse` afterwards to train
@@ -279,10 +263,10 @@ class EmbeddingAnalysis:
         if metadDataFramePath is not None:
             data_df = self._merge_metadata(data_df, metadDataFramePath, instancelabelColumn)
         classMapping = classMapping or {}
-        if gtColumn is not None:
+        if gtclassColumn is not None:
             # Standardise label column(s) into a single integer column before getLabels runs.
-            data_df, gtColumn, classMapping = self._standardise_label_column(
-                data_df, gtColumn, classMapping
+            data_df, gtclassColumn, classMapping = self._standardise_label_column(
+                data_df, gtclassColumn, classMapping
             )
 
         # Data
@@ -296,7 +280,7 @@ class EmbeddingAnalysis:
             os.makedirs(self.save_dir, exist_ok=True)
 
         # Labels
-        self.gtColumn = gtColumn
+        self.gtclassColumn = gtclassColumn
         self.instancelabelColumn = instancelabelColumn
         self.classMapping = classMapping or {}
         self.greyBackground = greyBackground
@@ -358,7 +342,7 @@ class EmbeddingAnalysis:
             data_df: pd.DataFrame,
             type: str = MASKED_FEATURES_KEY,
             instancelabelColumn: str = MOBIE_LABEL_KEY,
-            gtColumn: str = None,
+            gtclassColumn: str = None,
             save_dir: str = None,
             classMapping: dict = None,
             dbscan: bool = False,
@@ -375,7 +359,7 @@ class EmbeddingAnalysis:
             data_df=data_df,
             type=type,
             instancelabelColumn=instancelabelColumn,
-            gtColumn=gtColumn,
+            gtclassColumn=gtclassColumn,
             save_dir=save_dir,
             classMapping=classMapping,
             dbscan=dbscan,
@@ -398,7 +382,7 @@ class EmbeddingAnalysis:
             embeddings: np.ndarray,
             meta_df: "pd.DataFrame",
             save_dir: str = None,
-            gtColumn: str = None,
+            gtclassColumn: str = None,
             instancelabelColumn: str = LABEL_KEY,
             leiden: bool = False,
             leiden_resolution: float = 1.0,
@@ -410,14 +394,14 @@ class EmbeddingAnalysis:
 
         Unlike ``__init__`` and ``from_dataframe``, the embeddings are supplied
         as a pre-computed ``np.ndarray``.  No classifier is trained; scatter
-        plots are coloured by *gtColumn* (or uniformly when absent).
+        plots are coloured by *gtclassColumn* (or uniformly when absent).
         """
         instance = cls(
             data_df=meta_df.reset_index(drop=True),
             embeddings=embeddings,
             type=None,
             instancelabelColumn=instancelabelColumn,
-            gtColumn=gtColumn,
+            gtclassColumn=gtclassColumn,
             save_dir=save_dir,
             dbscan=False,
             leiden=leiden,
@@ -428,7 +412,7 @@ class EmbeddingAnalysis:
         )
         # Colour by ground-truth label (the combined column for a list of GT columns)
         if instance._has_gt:
-            instance.classColumn = instance.gtColumn
+            instance.classColumn = instance.gtclassColumn
         # Skip classifier training
         instance.predLabels = instance.gtlabels
         return instance
@@ -491,13 +475,13 @@ class EmbeddingAnalysis:
             raise ValueError(f"Found {n_nans} NaN(s) in the array")
 
     @staticmethod
-    def _standardise_label_column(data_df, gtColumn, classMapping) -> tuple["pd.DataFrame", str, dict]:
+    def _standardise_label_column(data_df, gtclassColumn, classMapping) -> tuple["pd.DataFrame", str, dict]:
         """(docstring unchanged)"""
-        return _LabelColumn(gtColumn).standardise(data_df, classMapping)
+        return _LabelColumn(gtclassColumn).standardise(data_df, classMapping)
 
     @property
     def _has_gt(self) -> bool:
-        return self.gtColumn is not None and self.gtColumn in self.data_df.columns
+        return self.gtclassColumn is not None and self.gtclassColumn in self.data_df.columns
 
     def _class_name(self, label) -> str:
         return str(self.classMapping.get(int(label), int(label)))
@@ -510,12 +494,12 @@ class EmbeddingAnalysis:
     # ------------------------------------------------------------------ #
 
     def getLabels(self) -> None:
-        """Derive training labels from the (already-standardised) gtColumn.
+        """Derive training labels from the (already-standardised) gtclassColumn.
 
         Label *derivation* — list→combined-column joining, one-hot detection,
         and string→int mapping — is performed once upstream in
         :meth:`_standardise_label_column` (called from ``_init_common``).
-        By the time this runs ``self.gtColumn`` is always a single column name
+        By the time this runs ``self.gtclassColumn`` is always a single column name
         whose values are numeric, so this method only handles the remaining
         bookkeeping: the zero-offset shift, instance labels, and the
         NaN/train-mask split used to fit the classifier.
@@ -523,7 +507,7 @@ class EmbeddingAnalysis:
 
         n = len(self.data_df)
         self.gtlabels: np.ndarray = (
-            getArrayFromDF(self.data_df, self.gtColumn)
+            getArrayFromDF(self.data_df, self.gtclassColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
@@ -583,7 +567,7 @@ class EmbeddingAnalysis:
 
         self.classification.createConfusionMatrixFigure(
             x=X_val, gt=y_val, classifier=self.classifier,
-            save_dir=self.save_dir, mapping=mapping or self.classMapping, gtColumn=self.gtColumn
+            save_dir=self.save_dir, mapping=mapping or self.classMapping, gtColumn=self.gtclassColumn
         )
         return self.predLabels
 
@@ -726,7 +710,8 @@ class EmbeddingAnalysis:
             umap_array[:, :3], columns=["UMAP x", "UMAP y", "UMAP z"], index=self.data_df.index,
         )
 
-    def visualiseUMAP(self, classColoumn: str | None = None, umap_kwargs: dict | None = None, **kwargs):
+    def visualiseUMAP(self, classColoumn: str | None = None, umap_kwargs: dict | None = None,
+                      legend_title="Instance", **kwargs):
         col = classColoumn if classColoumn is not None else self.classColumn
         # umap_kwargs flow to UMAP() (e.g. n_neighbors); remaining kwargs to the
         # scatter plot. UMAP requires n_neighbors < n_samples, so small feature
@@ -737,7 +722,7 @@ class EmbeddingAnalysis:
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
             classColoumn=col,
-            legend_title=f"UMAP - {self.gtColumn if self._has_gt else self.classColumn}",
+            legend_title=f"{legend_title} - {self.gtclassColumn if self._has_gt else self.classColumn}",
             save_dir=self.save_dir, **kwargs
         )
 
@@ -746,12 +731,15 @@ class EmbeddingAnalysis:
         # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
         # columns are never temporarily zeroed by subclass overrides, allowing
         # every sample to be coloured by its predicted class.
+        if "PCA x" not in self.results_df.columns.to_list():
+            self.pca()
+
         return EmbeddingAnalysis.specialScatter(
             self,
             xColumn="PCA x", yColumn="PCA y",
             xaxis_title="PC 1", yaxis_title="PC 2",
             classColoumn=col,
-            legend_title=f"PC - {self.gtColumn if self._has_gt else col}",
+            legend_title=f"PC - {self.gtclassColumn if self._has_gt else col}",
             save_dir=self.save_dir,
             precomputed_colors=precomputed_colors,
             **kwargs
@@ -899,7 +887,7 @@ class EmbeddingAnalysis:
 
             values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
             # Background is defined by label 0 in the label column, not by the plotted value.
-            bg_col = self.gtColumn if (self._has_gt and self.gtColumn in df.columns) else None
+            bg_col = self.gtclassColumn if (self._has_gt and self.gtclassColumn in df.columns) else None
             if bg_col is None:
                 values[values == 0] = np.nan  # no labels: fall back to value 0 as background
             elif mask_background:
@@ -1064,7 +1052,7 @@ class EmbeddingAnalysis:
         fig = cls.from_dataframe(
             df,
             embeddings=np.column_stack(list(coords.values())),  # scatter needs no embeddings
-            gtColumn=label_col,
+            gtclassColumn=label_col,
             instancelabelColumn=label_col,
             classMapping=classMapping,
             leiden=False,
@@ -1293,7 +1281,7 @@ class EmbeddingAnalysis:
             Distance metric for the k-NN graph.
         color_by:
             Column in ``self.data_df`` used to colour the UMAP panels.
-            Defaults to ``self.gtColumn`` when available, else ``"dpt_pseudotime"``.
+            Defaults to ``self.gtclassColumn`` when available, else ``"dpt_pseudotime"``.
         save_dir:
             Directory in which to save the figure.  Defaults to
             ``self.save_dir``.
@@ -1312,11 +1300,11 @@ class EmbeddingAnalysis:
         # ── 1. Build AnnData from scaled embeddings ───────────────────────
         adata = ad.AnnData(X=self.embeddings.astype(np.float32))
         if color_by is None:
-            color_by = self.gtColumn if self._has_gt else "dpt_pseudotime"
+            color_by = self.gtclassColumn if self._has_gt else "dpt_pseudotime"
 
         # Carry group labels into obs so scanpy can colour by them
         if self._has_gt:
-            adata.obs[self.gtColumn] = self.data_df[self.gtColumn].astype(str).values
+            adata.obs[self.gtclassColumn] = self.data_df[self.gtclassColumn].astype(str).values
 
         # ── 2. k-NN graph ─────────────────────────────────────────────────
         sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=None,
@@ -1325,7 +1313,7 @@ class EmbeddingAnalysis:
         # ── 3a. Group definition: GT labels or Leiden clustering ───────────
         if use_gt and self._has_gt:
             gt_labels = (
-                self.data_df[self.gtColumn]
+                self.data_df[self.gtclassColumn]
                 .map(lambda v: self.classMapping.get(int(v), str(v))
                 if pd.notna(v) and v != 0 else "unlabelled")
                 .astype(str)
@@ -1363,10 +1351,10 @@ class EmbeddingAnalysis:
             root_group = _lowest_median_group()
             print(f"[trajectory] Auto-selected root group: {root_group}")
         elif root_group not in unique_groups:
-            # root_group may be a gtColumn value rather than a Leiden label —
+            # root_group may be a gtclassColumn value rather than a Leiden label —
             # find the Leiden cluster most enriched for that value.
             if self._has_gt:
-                gt_vals = self.data_df[self.gtColumn].astype(str).to_numpy()
+                gt_vals = self.data_df[self.gtclassColumn].astype(str).to_numpy()
                 enrichment = {
                     g: (gt_vals[groups == g] == str(root_group)).mean()
                     for g in unique_groups
@@ -1428,7 +1416,7 @@ class EmbeddingAnalysis:
         * **Top-left** – UMAP coloured by Leiden group with the PAGA
           connectivity graph superimposed (edges scaled by weight, nodes at
           cluster centroids).
-        * **Top-right** – UMAP coloured by ``self.gtColumn`` (only when a
+        * **Top-right** – UMAP coloured by ``self.gtclassColumn`` (only when a
           ground-truth column is available and differs from pseudotime).
         * **Bottom-left** – UMAP coloured by diffusion pseudotime.
         * **Bottom-right** – Violin plot of pseudotime per Leiden group.
@@ -1529,7 +1517,7 @@ class EmbeddingAnalysis:
             hovertemplate="Group %{text}<extra></extra>",
         ), row=1, col=1)
 
-        # ── Panel 2 (optional): UMAP coloured by gtColumn ─────────────────
+        # ── Panel 2 (optional): UMAP coloured by gtclassColumn ─────────────────
         if has_extra:
             gt_vals = df[color_by].astype(str).to_numpy()
             unique_gt = sorted(np.unique(gt_vals))
