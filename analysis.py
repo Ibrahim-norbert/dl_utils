@@ -825,6 +825,11 @@ class EmbeddingAnalysis:
         )
         ax.set_xlabel(xaxis_title)
         ax.set_ylabel(yaxis_title)
+
+        # same faint background grid as the plotly drawer, behind the points
+        ax.grid(show_axes, color="black", alpha=0.15)
+        ax.set_axisbelow(True)
+
         if (legend := ax.get_legend()) is not None:
             if precomputed:
                 legend.remove()
@@ -928,6 +933,9 @@ class EmbeddingAnalysis:
                    marker_size=kwargs.get("markerSize", self.marker_size),
                    opacity=kwargs.get("markerOpacity", 0.8), **z_kw)
         if not is_mpl:  # layout overrides: instance-wide first, then per call (may share keys)
+            fig.update_layout(                   plot_bgcolor="black",
+                                                 xaxis_gridcolor="rgba(255, 255, 255, 0.1)",   # white grid, 30% opacity
+                                                 yaxis_gridcolor="rgba(255, 255, 255, 0.1)",)
             fig.update_layout(**self.plotly_kwargs)
             fig.update_layout(**kwargs.get("plotly_kwargs", {}))
 
@@ -990,7 +998,8 @@ class EmbeddingAnalysis:
             )
 
         # Fonts and colours come from the "scatter_axes" template.
-        axis = dict(showgrid=False, zeroline=False, showticklabels=show_axes,
+        axis = dict(showgrid=show_axes, gridcolor="rgba(0,0,0,0.15)",
+                    zeroline=False, showticklabels=show_axes,
                     visible=True, showline=show_axes,
                     ticks="outside" if show_axes else "")
         if zColumn is None:

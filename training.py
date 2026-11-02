@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 from pytorch_lightning import seed_everything
 from torch.utils.data import random_split
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 import typing
@@ -869,14 +869,14 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
             checkpoint_callback,
             latest_checkpoint_callback,
             early_stopping_callback,
-            DeviceStatsMonitor(cpu_stats=False),
+            DeviceStatsMonitor(cpu_stats=True),
             IterationInfoCallback(
                 log_interval=int(self.kwargs.get("info_log_interval", 10))
-            ),
+            ),RichModelSummary(),
         ]
-        gc_interval = int(self.kwargs.get("gc_collect_interval", 0))
-        if gc_interval > 0:  # opt-in: manual GC instead of automatic pauses
-            callbacks.append(GarbageCollectionCallback(interval=gc_interval))
+        # gc_interval = int(self.kwargs.get("gc_collect_interval", 0))
+        # if gc_interval > 0:  # opt-in: manual GC instead of automatic pauses
+        #     callbacks.append(GarbageCollectionCallback(interval=gc_interval))
         args = {
             "callbacks": callbacks,
             "logger": tensorboard_logger,
