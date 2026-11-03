@@ -17,7 +17,7 @@ import seaborn as sns
 import skimage
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
-from matplotlib.colors import to_hex, Normalize, ListedColormap
+from matplotlib.colors import to_hex, to_rgba_array, Normalize, ListedColormap
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from plotly.graph_objs import Scatter, Scatter3d
@@ -825,6 +825,15 @@ class EmbeddingAnalysis:
         )
         ax.set_xlabel(xaxis_title)
         ax.set_ylabel(yaxis_title)
+        # axes span exactly the data in its true x/y proportions; the figure takes the
+        # same proportions (longest side kept) so the data fills it
+        ax.margins(0)
+        ax.set_xlim(plot_df[xColumn].min(), plot_df[xColumn].max())
+        ax.set_ylim(plot_df[yColumn].min(), plot_df[yColumn].max())
+        ax.set_aspect("equal", adjustable="box")
+        w, h = fig.get_size_inches()
+        ratio = np.ptp(plot_df[yColumn]) / max(np.ptp(plot_df[xColumn]), 1e-12)
+        fig.set_size_inches(*((w, w * ratio) if ratio <= h / w else (h / ratio, h)))
 
         # same faint background grid as the plotly drawer, behind the points
         ax.grid(show_axes, color="black", alpha=0.15)
@@ -841,7 +850,8 @@ class EmbeddingAnalysis:
                        mapping: Optional[dict] = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
                        heatmap: bool = False,
-                       show_axes: bool = True, color_background: bool = False, showlegend=True,
+                       show_axes: bool = True, color_background: bool = False,
+                       background_color: Optional[str] = None, showlegend=True,
                        show: bool = False, mask_background: bool = True, **kwargs):
         """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
 
@@ -850,7 +860,7 @@ class EmbeddingAnalysis:
         - ``heatmap``: float values are normalised over vmin..vmax (``vmin``/``vmax``
           via kwargs, default: min..max of the non-background values) and shown
           with a colour bar titled *classColoumn*, ticked in vmin..vmax. When GT
-          labels exist, background is GT label <= 0 / missing: always grey and
+          labels exist, background is GT label <= 0 / missing: always the background colour and
           excluded from the colour mapping, its range and the colour bar; a value
           of 0 is then an ordinary value. Without labels, value 0 is background.
         - ``xaxis_title`` / ``yaxis_title``: default to *xColumn* / *yColumn*.
@@ -862,7 +872,10 @@ class EmbeddingAnalysis:
           overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
         - ``zColumn`` (via kwargs, plotly only): draw a 3-D scatter with *zColumn* as z;
           ``zaxis_title`` (via kwargs) names that axis (default: *zColumn*).
-        Background and NaN are always grey and never part of a colour scale.
+        - ``background_color``: colour of label 0 / NaN points, any colour the backend
+          accepts (``"black"``, ``"#ff000080"``, ``"rgba(...)"``). Default: grey,
+          half-transparent unless ``color_background``.
+        Background and NaN always take the background colour and are never part of a colour scale.
         """
         df, col, lut = self.results_df.copy(), classColoumn, self.color_space
         is_mpl = self.plot_backend == "matplotlib"
@@ -877,10 +890,12 @@ class EmbeddingAnalysis:
         }
         draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
                       else (self._scatter_plotly, "write_image"))
+        save_kw = dict(bbox_inches="tight", pad_inches=0) if is_mpl else {}  # crop matplotlib's padding
         # matplotlib takes #RRGGBBAA, plotly does not -> rgba() string for plotly.
         to_hex = ("#{:02x}{:02x}{:02x}{:02x}".format if is_mpl
                   else lambda r, g, b, a: f"rgba({r},{g},{b},{a / 255:.3f})")
-        grey = to_hex(128, 128, 128, 255 if color_background else 128)
+        bg = (background_color if background_color is not None
+              else to_hex(128, 128, 128, 255 if color_background else 128))
         palette = None
 
         if heatmap:
@@ -911,10 +926,10 @@ class EmbeddingAnalysis:
             vmax = vmin + ((vmax - vmin) or 1.0)  # equal limits -> range 1
 
             norm = np.clip((values - vmin) / (vmax - vmin), 0, 1)
-            slot = np.nan_to_num(norm * (n - 1), nan=n).astype(int)  # background/NaN -> grey slot n
+            slot = np.nan_to_num(norm * (n - 1), nan=n).astype(int)  # background/NaN -> slot n
 
-            df[col] = np.array([to_hex(*c) for c in rgba.tolist()] + [grey])[slot]
-            df = df.iloc[np.argsort(~background, kind="stable")]  # grey drawn first, underneath
+            df[col] = np.array([to_hex(*c) for c in rgba.tolist()] + [bg])[slot]
+            df = df.iloc[np.argsort(~background, kind="stable")]  # background drawn first, underneath
 
         elif not precomputed_colors:
             labels = pd.Series(df.get(col, 0), index=df.index).fillna(0).astype(int)
@@ -922,9 +937,13 @@ class EmbeddingAnalysis:
             names.update({0: "background"} if color_background else {})
             label_of = {k: names.get(k, str(k)) for k in sorted(labels.unique())}
 
-            palette = {name: to_hex(*lut.rgba_tuple_by_index(k)) if k else grey
+            palette = {name: to_hex(*lut.rgba_tuple_by_index(k)) if k else bg
                        for k, name in label_of.items()}
             df[col] = labels.map(label_of)
+
+        elif not is_mpl:  # precomputed: any matplotlib colour (e.g. #RRGGBBAA) -> plotly rgba()
+            rgba = np.round(to_rgba_array(df[col].tolist()) * 255).astype(int)  # (N, 4)
+            df[col] = [to_hex(*c) for c in rgba.tolist()]
 
         fig = draw(df, xColumn, yColumn, col, palette,
                    xaxis_title=xaxis_title, yaxis_title=yaxis_title,
@@ -965,7 +984,8 @@ class EmbeddingAnalysis:
                                 colorbar=dict(title=col, tickvals=list(ticks), ticktext=ticktext))))
 
         if save_dir is not None:  # a folder, or a full file path ending in .png/.svg/...
-            getattr(fig, save)(CustomMatplotlib.resolve_save_path(save_dir, f"{col}_{legend_title}.svg"))
+            getattr(fig, save)(CustomMatplotlib.resolve_save_path(save_dir, f"{col}_{legend_title}.svg"),
+                               **save_kw)
         # Displaying is independent of saving. Off by default - training/validation
         # logging routes figures to TensorBoard/WandB and must not render anything.
         if show:
@@ -1002,9 +1022,18 @@ class EmbeddingAnalysis:
                     zeroline=False, showticklabels=show_axes,
                     visible=True, showline=show_axes,
                     ticks="outside" if show_axes else "")
+        size = dict(width=1000, height=800)
         if zColumn is None:
-            axes = dict(xaxis=axis, yaxis=axis,
+            # Axes span exactly the data (no autorange padding); 1 data unit on y == 1 on x,
+            # and constrain="domain" shrinks the plot box rather than padding the range.
+            (x0, x1), (y0, y1) = (plot_df[c].agg(["min", "max"]) for c in (xColumn, yColumn))
+            fit = dict(constrain="domain")
+            axes = dict(xaxis={**axis, **fit, "range": [x0, x1]},
+                        yaxis={**axis, **fit, "range": [y0, y1], "scaleanchor": "x", "scaleratio": 1},
                         xaxis_title=xaxis_title, yaxis_title=yaxis_title)
+            # figure in the data's proportions, fitted inside the default 1000x800 box
+            scale = min(1000 / max(x1 - x0, 1e-12), 800 / max(y1 - y0, 1e-12))
+            size = dict(width=round((x1 - x0) * scale), height=round((y1 - y0) * scale))
         else:  # 3-D axes live on the scene; keep the data's true x/y/z proportions
             axes = dict(scene=dict(
                 xaxis={**axis, "title": xaxis_title},
@@ -1021,7 +1050,10 @@ class EmbeddingAnalysis:
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
                         borderwidth=1, x=1, y=0),
-            width=1000, height=800,
+            **size,
+            # no white border; axis automargin still makes room for ticks/titles and
+            # the outside legend widens the right margin itself
+            margin=dict(l=0, r=0, t=0, b=0, pad=0),
             legend_title_text=legend_title,
         )
         fig.update_traces(marker=dict(size=marker_size, opacity=opacity))
@@ -1039,7 +1071,8 @@ class EmbeddingAnalysis:
         ``backend="seaborn"`` draws with ``CustomMatplotlib.simpleScatter`` and returns a
         matplotlib Figure. ``backend="plotly"`` routes through :meth:`specialScatter` and
         returns a plotly Figure; *subplots_kwargs* then go to ``specialScatter``
-        (e.g. ``heatmap=True`` for continuous values, ``plotly_kwargs``).
+        (e.g. ``heatmap=True`` for continuous values, ``plotly_kwargs``,
+        ``background_color="black"`` for label-0 points).
         """
         labels = points.get("hue") if labels is None else labels
         if backend == "seaborn":
@@ -1070,7 +1103,8 @@ class EmbeddingAnalysis:
             "x", "y", classColoumn=label_col, save_dir=save_dir,
             **({"zColumn": "z"} if "z" in coords else {}), **subplots_kwargs,
         )
-        return fig.update_layout(title_text=title) if title else fig
+        # automargin: the zero top margin grows to fit the title instead of clipping it
+        return fig.update_layout(title_text=title, title_automargin=True) if title else fig
 
     # ------------------------------------------------------------------ #
     # Results & mask                                                       #
