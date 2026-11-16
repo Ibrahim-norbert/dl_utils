@@ -162,8 +162,6 @@ class CustomMatplotlib:
 
         ax.set_title(title)
 
-        fig.tight_layout()
-
         cls.saveFig(fig, save_dir=save_dir,
                     title=title, func=cls.simpleScatter)
 
