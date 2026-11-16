@@ -1027,9 +1027,12 @@ class EmbeddingAnalysis:
             # Axes span exactly the data (no autorange padding); 1 data unit on y == 1 on x,
             # and constrain="domain" shrinks the plot box rather than padding the range.
             (x0, x1), (y0, y1) = (plot_df[c].agg(["min", "max"]) for c in (xColumn, yColumn))
+            # A shrunk domain is pinned bottom-right (default: centred), so the plot box
+            # always ends at paper x=1, y=0, where the legend is anchored.
             fit = dict(constrain="domain")
-            axes = dict(xaxis={**axis, **fit, "range": [x0, x1]},
-                        yaxis={**axis, **fit, "range": [y0, y1], "scaleanchor": "x", "scaleratio": 1},
+            axes = dict(xaxis={**axis, **fit, "constraintoward": "right", "range": [x0, x1]},
+                        yaxis={**axis, **fit, "constraintoward": "bottom",
+                               "range": [y0, y1], "scaleanchor": "x", "scaleratio": 1},
                         xaxis_title=xaxis_title, yaxis_title=yaxis_title)
             # figure in the data's proportions, fitted inside the default 1000x800 box
             scale = min(1000 / max(x1 - x0, 1e-12), 800 / max(y1 - y0, 1e-12))
@@ -1047,6 +1050,8 @@ class EmbeddingAnalysis:
             plot_bgcolor="rgba(0,0,0,0)",
             template="plotly+scatter_axes",
             showlegend=True,
+            # touching the plot's right edge, bottoms aligned (same placement as
+            # CustomMatplotlib.simpleScatter); the axes' constraintoward keeps the plot there
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
                         borderwidth=1, x=1, y=0),

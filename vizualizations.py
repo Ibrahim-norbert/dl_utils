@@ -158,7 +158,8 @@ class CustomMatplotlib:
                         ax=ax, points=points, c=[palette[k] for k in codes], **kwargs)
 
         if ax.get_legend() is not None:
-            sns.move_legend(ax, "center left", bbox_to_anchor=(1.02, 0.5))
+            # touching the axes' right edge, bottoms aligned
+            sns.move_legend(ax, "lower left", bbox_to_anchor=(1, 0), borderaxespad=0)
 
         ax.set_title(title)
 
