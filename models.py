@@ -14,8 +14,20 @@ from torch.utils.data.dataloader import default_collate
 
 from constants import LOSS_KEY
 from util import save_model as _save_model, load_model as _load_model, OneCycleLR, CosineScheduler
+import re
+import torch
+from torch.optim.lr_scheduler import OneCycleLR
 
 logger = logging.getLogger(__name__)
+
+# Module-path pieces that mark a "layer" in common architectures:
+#   PTv3/Sonata: enc.enc2.block1   ViT: blocks.3   Swin/ConvNeXt: stages.0.blocks.2
+#   ResNet: layer3   HF BERT: encoder.layer.5   GPT-2: h.7   CLIP: resblocks.4
+# Numbered submodules *inside* a block (fc1, norm1, conv1) are not matched.
+_BLOCK_RE = re.compile(
+    r"(?:^|\.)(?:enc|dec|stages?|blocks?|layers?|levels?|resblocks|h)\.?\d+(?=\.)"
+)
+
 
 class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     """Masked Autoencoder with VisionTransformer backbone"""
@@ -295,22 +307,84 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             for b in range(depths[e])
         ]
 
-    def _layer_decay_param_dicts(self) -> list[dict]:
-        """Layer-decay entries for the backbone, plus the decoder when enabled.
 
-        The decoder entries only exist when ``decoder_layer_decay`` is set. Without
-        them — and with the default ``freeze_encoder=True``, which empties every backbone
-        group — ``configure_optimizers`` ends up with a single group and layer-wise decay
-        is a no-op for the whole model.
+
+
+
+
+    def layer_decay_param_groups(self,
+                                 model : torch.nn.Module,
+                                 base_lr,
+                                 weight_decay,              # = min weight decay
+                                 layer_decay,
+                                 max_weight_decay=None,     # new
+                                 block_regex=_BLOCK_RE,
+                                 no_weight_decay_keys=(),
+                                 verbose=True,
+
+    ):
+        """Model-agnostic layer-wise LR decay (MAE/BEiT style).
+
+        - Each unique deepest block prefix (e.g. 'enc.enc2.block1') becomes one
+          layer, numbered in module registration order (normally the forward order).
+        - Unmatched params seen before the first block (embeddings/stem) -> layer 0.
+        - Unmatched params seen after it (final norm, heads)            -> top layer.
+        - lr = base_lr * layer_decay ** (num_layers - layer_id)
+        - Biases and 1-D params (norms) get no weight decay.
         """
-        entries = self._block_decay_entries(
-            self._LAYER_DECAY_SCOPE,
-            self.backbone.enc_depths,
-            self.lr,
-            self.layer_decay,
-        )
+        named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
 
-        return entries
+        skip = set(no_weight_decay_keys)
+        if hasattr(model, "no_weight_decay"):  # timm convention
+            skip |= set(model.no_weight_decay())
+
+        # 1) deepest block-like prefix per param, ordered by first appearance
+        prefix_of, layer_of_prefix = {}, {}
+        for n, _ in named:
+            matches = list(block_regex.finditer(n))
+            if matches:
+                pre = n[: matches[-1].end()]
+                prefix_of[n] = pre
+                layer_of_prefix.setdefault(pre, len(layer_of_prefix) + 1)
+        num_layers = len(layer_of_prefix) + 1  # +1 = head bucket
+
+        # 2) bucket params by (layer_id, apply_wd)
+        groups, seen_block = {}, False
+        for n, p in named:
+            if n in prefix_of:
+                lid, seen_block = layer_of_prefix[prefix_of[n]], True
+            else:
+                lid = num_layers if seen_block else 0
+            no_wd = p.ndim <= 1 or n.endswith(".bias") or any(k in n for k in skip)
+            key = (lid, no_wd)
+            if key not in groups:
+                scale = layer_decay ** (num_layers - lid)
+                wd_min = 0.0 if no_wd else weight_decay
+                wd_max = 0.0 if no_wd else (
+                    weight_decay if max_weight_decay is None else max_weight_decay
+                )
+                groups[key] = {
+                    "params": [],
+                    "lr": base_lr * scale,
+                    "lr_scale": scale,
+                    "weight_decay": wd_min,
+                    "minweight_decay": wd_min,
+                    "maxweight_decay": wd_max,
+                    "layer_id": lid,
+                }
+
+            groups[key]["params"].append(p)
+
+        out = [groups[k] for k in sorted(groups)]
+        if verbose:
+            inv = {v: k for k, v in layer_of_prefix.items()}
+            for g in out:
+                name = {0: "<embed/stem>", num_layers: "<head/norm>"}.get(
+                    g["layer_id"], inv.get(g["layer_id"])
+                )
+                print(f"layer {g['layer_id']:>3} {name:<28} lr_scale={g['lr_scale']:.4f} "
+                      f"wd={g['weight_decay']:<6} n={len(g['params'])}")
+        return out
 
     def _is_no_decay(self, name: str, param: torch.Tensor) -> bool:
         """Whether ``param`` should be exempt from weight decay.
@@ -324,85 +398,27 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         )
 
     def configure_optimizers(self):
-
         self._total_steps = int(self.trainer.estimated_stepping_batches)
 
-        param_dicts = self._layer_decay_param_dicts()
-
-        # Each LR level owns TWO groups: one that weight-decays and one that does not.
-        # `apply_wd_schedule` is a private marker read back by on_before_optimizer_step,
-        # which would otherwise re-apply the ramped WD to the exempt group every step and
-        # undo the split. torch.optim keeps unknown param_group keys untouched.
-        def _pair(lr: float) -> tuple[dict, dict]:
-            return (
-                {
-                    "params": [],
-                    "lr": lr,
-                    "minweight_decay": self.minweight_decay,
-                    "apply_wd_schedule": True,
-                },
-                {
-                    "params": [],
-                    "lr": lr,
-                    "minweight_decay": 0.0,
-                    "apply_wd_schedule": False,
-                },
-            )
-
-        # Level 0 = default (unmatched): the freshly-initialised SAM stack (feat_proj,
-        # prompt_encoder, mask_decoder) plus any non-block params, all at full lr.
-        # Levels 1..N = one per param_dict entry.
-        levels: list[tuple[dict, dict]] = [_pair(self.lr)]
-        levels += [_pair(d["lr"]) for d in param_dicts]
-
-        for n, p in self.named_parameters():
-            # freeze_encoder sets requires_grad=False on the whole backbone, so this is
-            # also what keeps the frozen encoder out of the optimizer entirely.
-            if not p.requires_grad:
-                continue
-            level = 0
-            for i, d in enumerate(param_dicts):
-                if n.startswith(str(d["scope"])) and str(d["keyword"]) in n:
-                    level = i + 1
-                    break
-            levels[level][1 if self._is_no_decay(n, p) else 0]["params"].append(p)
-
-        # Flatten and drop empty groups so max_lr length stays consistent (every block
-        # group is empty when freeze_encoder is on, as is any no-decay group when
-        # no_weight_decay_keywords is empty and the level holds only weight matrices).
-        layer_groups = [g for pair in levels for g in pair if g["params"]]
-        assert (
-            layer_groups
-        ), "no trainable parameters — freeze_encoder froze everything?"
-        lrs = [g["lr"] for g in layer_groups]
-        n_no_decay = sum(
-            len(g["params"]) for g in layer_groups if not g["apply_wd_schedule"]
-        )
-        print(
-            f"{type(self).__name__}: {len(layer_groups)} param group(s), "
-            f"lr {min(lrs):.3g}..{max(lrs):.3g} (base {self.lr}, "
-            f"layer decay {self.layer_decay}, decoder layer decay "
-            f"{self.decoder_layer_decay}), {n_no_decay} param(s) exempt from weight "
-            f"decay, freeze_encoder={self.freeze_encoder}"
+        layer_groups = self.layer_decay_param_groups(
+            self.student,
+            base_lr=self.lr,
+            weight_decay=self.minweight_decay,
+            max_weight_decay=self.maxweight_decay,
+            layer_decay=self.layer_decay,
         )
 
-        optimizer = torch.optim.AdamW(
-            layer_groups, lr=self.lr, weight_decay=self.minweight_decay
-        )
+        optimizer = torch.optim.AdamW(layer_groups, lr=self.lr)
 
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=lrs,
+            max_lr=[g["lr"] for g in layer_groups],
             pct_start=self.warmup_ratio,
             anneal_strategy="cos",
             div_factor=self.lr_div_factor,
             final_div_factor=self.lr_final_div_factor,
             total_steps=self._total_steps,
         )
-
-        # interval="step": OneCycleLR is sized in optimizer steps
-        # (estimated_stepping_batches); Lightning's default "epoch" interval would
-        # advance it once per epoch and pin the LR near the warmup value.
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
     def on_train_start(self) -> None:
