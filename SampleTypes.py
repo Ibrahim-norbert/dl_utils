@@ -119,6 +119,24 @@ class EmbeddingsNumpy:
     pred_labels: Optional[np.ndarray] = None
     misc: Optional[dict] = None
 
+    def tokens_to_points(self, tokens: Optional[np.ndarray] = None) -> np.ndarray:
+        """Token features back at point resolution: every point gets its token's feature.
+
+        Needs ``misc['group_rows']`` ``(M, K)``, the point rows of every token (as
+        ``BioimagePoint.group_by_kmeans`` gives). ``tokens`` is ``(M, *S)``, one row per
+        token (``self.data`` if not given). Returns ``(N, *S)`` in point order, row
+        ``group_rows[m, j]`` holding ``tokens[m]``; every group is whole, so ``N = M * K``.
+        """
+        rows = (self.misc or {}).get("group_rows")
+        if rows is None:
+            raise RuntimeError("tokens_to_points: misc has no 'group_rows' (embeddings are not tokens)")
+        tokens = self.data if tokens is None else tokens
+        if len(tokens) != len(rows):
+            raise ValueError(f"tokens_to_points: {len(tokens)} token rows, misc has {len(rows)} tokens")
+        token_of_point = np.empty(rows.size, dtype=np.int64)
+        token_of_point[rows.reshape(-1)] = np.repeat(np.arange(len(rows)), rows.shape[1])
+        return tokens[token_of_point]
+
 @dataclass(frozen=False, eq=False)
 class Embeddings:
     data: torch.Tensor
