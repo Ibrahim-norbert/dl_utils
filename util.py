@@ -741,9 +741,61 @@ class CosineAnnealingLR(lr_scheduler.CosineAnnealingLR):
 
 
 class OneCycleLR(lr_scheduler.OneCycleLR):
-    r"""
-    torch.optim.lr_scheduler.OneCycleLR, Block total_steps
+    r"""``torch.optim.lr_scheduler.OneCycleLR`` driven by ``total_steps`` only.
+
+    Same 1cycle policy as PyTorch's scheduler (Smith & Topin, "Super-Convergence",
+    2017). The learning rate warms up from ``initial_lr = max_lr / div_factor`` to
+    ``max_lr``, then anneals down to ``min_lr = initial_lr / final_div_factor``.
+    Momentum, if enabled, moves the opposite way. Call :meth:`step` after every
+    optimizer step (per batch, not per epoch).
+
+    The cycle length can only be given as ``total_steps``: PyTorch's alternative
+    ``epochs`` / ``steps_per_epoch`` arguments are blocked (not exposed), so the cycle
+    length is always stated explicitly, e.g. from the trainer's estimated stepping
+    batches.
+
+    Args:
+        optimizer (Optimizer): Wrapped optimizer.
+        max_lr (float or list[float]): Peak learning rate, per parameter group if a list.
+        total_steps (int): Number of scheduler steps in the cycle. Required in practice:
+            stepping past it raises ``ValueError``.
+        pct_start (float): Fraction of ``total_steps`` spent increasing the learning
+            rate. Default: 0.3.
+        anneal_strategy (str): ``"cos"`` for cosine or ``"linear"`` for linear
+            annealing. Default: ``"cos"``.
+        cycle_momentum (bool): Cycle momentum (or Adam's ``beta1``) inversely to the
+            learning rate, between ``base_momentum`` and ``max_momentum``. Default: True.
+        base_momentum (float or list[float]): Momentum at the learning-rate peak.
+            Default: 0.85.
+        max_momentum (float or list[float]): Momentum at the start and end of the cycle.
+            Default: 0.95.
+        div_factor (float): Sets the starting learning rate,
+            ``initial_lr = max_lr / div_factor``. The cycle starts here and warms up to
+            ``max_lr`` over the first ``pct_start * total_steps`` steps. With
+            ``three_phase=True``, the second phase also anneals back down to
+            ``initial_lr``. E.g. ``max_lr=4e-3, div_factor=25`` gives
+            ``initial_lr=1.6e-4``. Default: 25.
+        final_div_factor (float): Sets the learning rate reached at the last step,
+            ``min_lr = initial_lr / final_div_factor
+            = max_lr / (div_factor * final_div_factor)``. It divides ``initial_lr``,
+            not ``max_lr``. The final annealing phase ends here: the decrease after the
+            peak (two-phase), or the third phase (three-phase). E.g.
+            ``max_lr=4e-3, div_factor=25, final_div_factor=1e4`` gives
+            ``min_lr=1.6e-8``. Default: 1e4.
+        three_phase (bool): If True, add a third phase that anneals from the initial
+            learning rate to the final one; the decrease phase then mirrors the warm-up
+            (fast.ai style). If False, a two-phase cycle. Default: False.
+        last_epoch (int): Index of the last step taken, for resuming; -1 starts a new
+            cycle. Default: -1.
+
+    Example:
+        >>> scheduler = OneCycleLR(optimizer, max_lr=4e-3, total_steps=trainer.estimated_stepping_batches)
+        >>> for batch in loader:
+        ...     train_step(batch)
+        ...     optimizer.step()
+        ...     scheduler.step()
     """
+
 
     def __init__(
         self,
