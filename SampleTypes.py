@@ -133,8 +133,9 @@ class EmbeddingsNumpy:
         tokens = self.data if tokens is None else tokens
         if len(tokens) != len(rows):
             raise ValueError(f"tokens_to_points: {len(tokens)} token rows, misc has {len(rows)} tokens")
-        token_of_point = np.empty(rows.size, dtype=np.int64)
-        token_of_point[rows.reshape(-1)] = np.repeat(np.arange(len(rows)), rows.shape[1])
+        token, slot = np.nonzero(rows >= 0)  # every point, by token; -1: empty slot
+        token_of_point = np.empty_like(token)
+        token_of_point[rows[token, slot]] = token
         return tokens[token_of_point]
 
 @dataclass(frozen=False, eq=False)
