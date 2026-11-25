@@ -228,7 +228,14 @@ def collate_localizations(
             frame = frame / max(float(np.nanmax(frame, initial=0.0)), 1.0)
             point["frame"] = np.nan_to_num(frame, nan=0.0)  # a NaN frame must not poison the cloud
 
-        point = forward_transform(point)  # per-sample; all tensors now
+        try:
+            point = forward_transform(point)  # per-sample; all tensors now
+        except ValueError:
+            print(
+                f"[collate] forward transform failed on {localizations.filePath}, scene bounding "
+                f"box {coord.min(0).round(1).tolist()} - {coord.max(0).round(1).tolist()}"
+            )
+            raise
         point["filePath"] = localizations.filePath
         points.append(point)
 
