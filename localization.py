@@ -196,46 +196,62 @@ def collate_localizations(
     assert grid_size is not None, "grid_size must always be float between 0 - 1"
 
     points: list = []
-    for localizations in batch:  # type: Vertices
-        xy = localizations.data.vertices  # (N, 3) float32
-        label = localizations.data.label
-
-        coord = pad_to_3d(xy)
-
-        extras = {k: getattr(localizations, k) for k in getattr(localizations, "EXTRA", ())}
-
-        # Label goes through the transform so SphereCrop crops it with coord; the
-        # forward transform's Collect must list LABEL_KEY in its keys to keep it.
-        # Store it as a tensor (not raw numpy) to preserve the "all tensors now"
-        # invariant: the vendored sonata.data.collate_fn cats tensors per-key (variable
-        # length OK) but routes numpy arrays through default_collate -> torch.stack,
-        # which fails for K>1 objects with different point counts. Mirrors upstream
-        # sonata, where ToTensor converts every per-point field before collation.
-        point = {
-            "coord": coord,
-            "grid_size": grid_size,
-            MOBIE_LABEL_KEY: (
-                label if torch.is_tensor(label) else torch.as_tensor(np.asarray(label))
-            ),
-            **extras,
-        }
-        # Frame index as an optional (N, 1) feature channel, per-sample scaled to [0, 1]
-        # like NormalizeCoord scales coord; raw frame numbers (up to ~1e5) would swamp the
-        # unit-sphere coords. Absent from the file -> no "frame" key (Collect names it).
-        if localizations.frame is not None:
-            frame = np.asarray(localizations.frame, dtype=np.float32).reshape(-1, 1)  # (N, 1)
-            frame = frame - np.nanmin(frame, initial=np.inf)                          # NaN-safe min
-            frame = frame / max(float(np.nanmax(frame, initial=0.0)), 1.0)
-            point["frame"] = np.nan_to_num(frame, nan=0.0)  # a NaN frame must not poison the cloud
-
-        point = forward_transform(point)  # per-sample; all tensors now
-        point["filePath"] = localizations.filePath
+    for i in range(len(batch)):
+        point = None
+        # A scene the transform cannot cut (ValueError, e.g. too few groups in any window) is
+        # replaced by the next scene of the batch that it can, so the batch keeps its size.
+        for localizations in batch[i:] + batch[:i]:  # type: Vertices
+            try:
+                point = _transformed_point(localizations, grid_size, forward_transform)
+                break
+            except ValueError as error:
+                print(f"[collate] skipped {localizations.filePath}: {error}")
+        if point is None:
+            raise ValueError("no scene of the batch fits the forward transform")
         points.append(point)
 
     collate = batch_collate_fn if batch_collate_fn is not None else default_collate
     collated = collate(points)
 
     return collated
+
+
+def _transformed_point(localizations: Vertices, grid_size: float, forward_transform) -> dict:
+    """One scene as the per-sample dict of ``forward_transform``."""
+    xy = localizations.data.vertices  # (N, 3) float32
+    label = localizations.data.label
+
+    coord = pad_to_3d(xy)
+
+    extras = {k: getattr(localizations, k) for k in getattr(localizations, "EXTRA", ())}
+
+    # Label goes through the transform so SphereCrop crops it with coord; the
+    # forward transform's Collect must list LABEL_KEY in its keys to keep it.
+    # Store it as a tensor (not raw numpy) to preserve the "all tensors now"
+    # invariant: the vendored sonata.data.collate_fn cats tensors per-key (variable
+    # length OK) but routes numpy arrays through default_collate -> torch.stack,
+    # which fails for K>1 objects with different point counts. Mirrors upstream
+    # sonata, where ToTensor converts every per-point field before collation.
+    point = {
+        "coord": coord,
+        "grid_size": grid_size,
+        MOBIE_LABEL_KEY: (
+            label if torch.is_tensor(label) else torch.as_tensor(np.asarray(label))
+        ),
+        **extras,
+    }
+    # Frame index as an optional (N, 1) feature channel, per-sample scaled to [0, 1]
+    # like NormalizeCoord scales coord; raw frame numbers (up to ~1e5) would swamp the
+    # unit-sphere coords. Absent from the file -> no "frame" key (Collect names it).
+    if localizations.frame is not None:
+        frame = np.asarray(localizations.frame, dtype=np.float32).reshape(-1, 1)  # (N, 1)
+        frame = frame - np.nanmin(frame, initial=np.inf)                          # NaN-safe min
+        frame = frame / max(float(np.nanmax(frame, initial=0.0)), 1.0)
+        point["frame"] = np.nan_to_num(frame, nan=0.0)  # a NaN frame must not poison the cloud
+
+    point = forward_transform(point)  # per-sample; all tensors now
+    point["filePath"] = localizations.filePath
+    return point
 
 
 @dataclass
