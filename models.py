@@ -242,21 +242,42 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         total_size_gb = total_size_bytes / (1024**3)
         logger.info("Model memory size: %.4f GB", total_size_gb)
 
-    def compute_batch_memory_usage(self, sample):
-        """
-        Compute the approximate memory usage of a single batch during training.
+    def compute_batch_memory_usage(self, batch_shape: tuple[int, ...]) -> float:
+        """GB of one training pass on a dummy batch of shape ``batch_shape``.
 
-        Parameters:
-        - sample: Input batch tensors.
-
-        Returns:
-        - Total memory usage in gigabytes (GB).
+        Lightning's ``ModelSummary`` runs ``forward`` on ``example_input_array`` (a zero
+        batch of that shape) and records the output size of every layer. A training pass
+        holds the parameters (``model_size``), their gradients (one per trainable
+        parameter) and the output of every leaf module, kept for backward. Optimizer state
+        and allocator overhead are not counted, so it is a lower bound. ``forward`` must
+        take one tensor.
         """
-        input_memory = sum(x.element_size() * x.nelement() for x in sample)
-        param_memory = sum(p.element_size() * p.nelement() for p in self.parameters())
-        activation_memory = input_memory * 2
-        total_memory = input_memory + param_memory + activation_memory
-        logger.info("Batch in memory during training: %.4f GB", total_memory / (1024 ** 3))
+        from pytorch_lightning.utilities.model_summary import ModelSummary
+
+        previous = self.example_input_array
+        self.example_input_array = torch.zeros(batch_shape, device=self.device)
+        try:
+            summary = ModelSummary(self, max_depth=-1)
+        finally:
+            self.example_input_array = previous
+
+        # leaf outputs only (parents re-report their children's); "?" = size unknown
+        leaves = {name for name, module in self.named_modules() if next(module.children(), None) is None}
+        outputs = [
+            size for name, size in zip(summary.layer_names, summary.out_sizes)
+            if name in leaves and size != "?"
+        ]
+        n_activations = sum(
+            sum(map(np.prod, size)) if size and isinstance(size[0], list) else np.prod(size)
+            for size in outputs
+        )
+        bytes_per_value = next(self.parameters()).element_size()
+        total_gb = (
+            summary.model_size * 1e6  # MB of parameters
+            + (summary.trainable_parameters + n_activations) * bytes_per_value
+        ) / 1e9
+        logger.info("One training pass on a %s batch: %.4f GB", tuple(batch_shape), total_gb)
+        return total_gb
 
     @staticmethod
     def add_model_specific_args(parent_parser):
