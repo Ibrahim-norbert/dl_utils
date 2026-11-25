@@ -723,7 +723,7 @@ class EmbeddingAnalysis:
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
             classColoumn=col,
             legend_title=f"{legend_title} - {self.gtclassColumn if self._has_gt else self.classColumn}",
-            save_dir=self.save_dir, **kwargs
+            save_dir=self.save_dir, **{"equal_aspect": False, **kwargs}
         )
 
     def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True, **kwargs):
@@ -742,7 +742,7 @@ class EmbeddingAnalysis:
             legend_title=f"PC - {self.gtclassColumn if self._has_gt else col}",
             save_dir=self.save_dir,
             precomputed_colors=precomputed_colors,
-            **kwargs
+            **{"equal_aspect": False, **kwargs}
         )
 
     # ------------------------------------------------------------------ #
@@ -802,7 +802,7 @@ class EmbeddingAnalysis:
     @staticmethod
     def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
                             xaxis_title, yaxis_title, legend_title, show_axes,
-                            marker_size, opacity) -> Figure:
+                            marker_size, opacity, equal_aspect=True) -> Figure:
         """Matplotlib twin of :meth:`_scatter_plotly` (same arguments), drawn by
         ``CustomMatplotlib.simpleScatter``."""
         labels = plot_df[classColoumn].to_numpy()  # (N,) class names, or precomputed colours
@@ -825,11 +825,14 @@ class EmbeddingAnalysis:
         )
         ax.set_xlabel(xaxis_title)
         ax.set_ylabel(yaxis_title)
-        # axes span exactly the data; figure size and axes box never change, only the
-        # x and y scales do (independently)
+        # axes span exactly the data; the figure size never changes. equal_aspect keeps
+        # 1 x unit == 1 y unit by shrinking the axes box inside the figure; otherwise
+        # the box fills the figure and x and y scale independently
         ax.margins(0)
         ax.set_xlim(plot_df[xColumn].min(), plot_df[xColumn].max())
         ax.set_ylim(plot_df[yColumn].min(), plot_df[yColumn].max())
+        if equal_aspect:
+            ax.set_aspect("equal", adjustable="box")
 
         # same faint background grid as the plotly drawer, behind the points
         ax.grid(show_axes, color="black", alpha=0.15)
@@ -866,6 +869,9 @@ class EmbeddingAnalysis:
           of greying them (e.g. logit maps).
         - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
           overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
+        - ``equal_aspect`` (via kwargs, default True): 1 data unit on x == 1 on y, the
+          plot box shrinking inside the fixed-size figure; False fills the figure and
+          scales x and y independently (PCA / UMAP).
         - ``zColumn`` (via kwargs, plotly only): draw a 3-D scatter with *zColumn* as z;
           ``zaxis_title`` (via kwargs) names that axis (default: *zColumn*).
         - ``background_color``: colour of label 0 / NaN points, any colour the backend
@@ -946,7 +952,8 @@ class EmbeddingAnalysis:
                    legend_title=None if heatmap else legend_title,
                    show_axes=show_axes,
                    marker_size=kwargs.get("markerSize", self.marker_size),
-                   opacity=kwargs.get("markerOpacity", 0.8), **z_kw)
+                   opacity=kwargs.get("markerOpacity", 0.8),
+                   equal_aspect=kwargs.get("equal_aspect", True), **z_kw)
         if not is_mpl:  # layout overrides: instance-wide first, then per call (may share keys)
             fig.update_layout(                   plot_bgcolor="black",
                                                  xaxis_gridcolor="rgba(255, 255, 255, 0.1)",   # white grid, 30% opacity
@@ -994,7 +1001,7 @@ class EmbeddingAnalysis:
     def _scatter_plotly(plot_df, xColumn, yColumn, classColoumn, palette, *,
                         xaxis_title, yaxis_title, legend_title, show_axes,
                         marker_size, opacity, zColumn=None,
-                        zaxis_title=None) -> plotly.graph_objs.Figure:
+                        zaxis_title=None, equal_aspect=True) -> plotly.graph_objs.Figure:
         """2-D scatter, or a 3-D one (``px.scatter_3d``) when *zColumn* is given."""
         import plotly.express as px
 
@@ -1020,18 +1027,25 @@ class EmbeddingAnalysis:
                     ticks="outside" if show_axes else "")
         size = dict(width=1000, height=800)
         if zColumn is None:
-            # Axes span exactly the data (no autorange padding). Figure and plot box are
-            # fixed (1000x800); only the axis scales change, x and y independently.
+            # Axes span exactly the data (no autorange padding); the figure stays 1000x800.
+            # equal_aspect: 1 data unit on y == 1 on x, and constrain="domain" shrinks the
+            # plot box rather than padding the range. Otherwise the plot box fills the
+            # figure and x and y scale independently.
             (x0, x1), (y0, y1) = (plot_df[c].agg(["min", "max"]) for c in (xColumn, yColumn))
-            axes = dict(xaxis={**axis, "range": [x0, x1]},
-                        yaxis={**axis, "range": [y0, y1]},
+            # A shrunk domain is pinned bottom-right (default: centred), so the plot box
+            # always ends at paper x=1, y=0, where the legend is anchored.
+            fit = dict(constrain="domain")
+            lock = dict(scaleanchor="x", scaleratio=1) if equal_aspect else {}
+            axes = dict(xaxis={**axis, **fit, "constraintoward": "right", "range": [x0, x1]},
+                        yaxis={**axis, **fit, "constraintoward": "bottom",
+                               "range": [y0, y1], **lock},
                         xaxis_title=xaxis_title, yaxis_title=yaxis_title)
-        else:  # 3-D axes live on the scene; a fixed cube, each axis scaled to its data
+        else:  # 3-D axes live on the scene; true x/y/z proportions, or a cube
             axes = dict(scene=dict(
                 xaxis={**axis, "title": xaxis_title},
                 yaxis={**axis, "title": yaxis_title},
                 zaxis={**axis, "title": zaxis_title},
-                aspectmode="cube",
+                aspectmode="data" if equal_aspect else "cube",
             ))
         fig.update_layout(
             **axes,
