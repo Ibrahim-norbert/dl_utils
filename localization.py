@@ -230,12 +230,11 @@ def collate_localizations(
 
         try:
             point = forward_transform(point)  # per-sample; all tensors now
-        except ValueError:
-            print(
-                f"[collate] forward transform failed on {localizations.filePath}, scene bounding "
-                f"box {coord.min(0).round(1).tolist()} - {coord.max(0).round(1).tolist()}"
-            )
-            raise
+        except ValueError as error:
+            raise ValueError(
+                f"forward transform failed on scene {localizations.filePath} (bounding box "
+                f"{coord.min(0).round(1).tolist()} - {coord.max(0).round(1).tolist()}): {error}"
+            ) from error
         point["filePath"] = localizations.filePath
         points.append(point)
 
