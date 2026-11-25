@@ -825,15 +825,11 @@ class EmbeddingAnalysis:
         )
         ax.set_xlabel(xaxis_title)
         ax.set_ylabel(yaxis_title)
-        # axes span exactly the data in its true x/y proportions; the figure takes the
-        # same proportions (longest side kept) so the data fills it
+        # axes span exactly the data; figure size and axes box never change, only the
+        # x and y scales do (independently)
         ax.margins(0)
         ax.set_xlim(plot_df[xColumn].min(), plot_df[xColumn].max())
         ax.set_ylim(plot_df[yColumn].min(), plot_df[yColumn].max())
-        ax.set_aspect("equal", adjustable="box")
-        w, h = fig.get_size_inches()
-        ratio = np.ptp(plot_df[yColumn]) / max(np.ptp(plot_df[xColumn]), 1e-12)
-        fig.set_size_inches(*((w, w * ratio) if ratio <= h / w else (h / ratio, h)))
 
         # same faint background grid as the plotly drawer, behind the points
         ax.grid(show_axes, color="black", alpha=0.15)
@@ -1024,25 +1020,18 @@ class EmbeddingAnalysis:
                     ticks="outside" if show_axes else "")
         size = dict(width=1000, height=800)
         if zColumn is None:
-            # Axes span exactly the data (no autorange padding); 1 data unit on y == 1 on x,
-            # and constrain="domain" shrinks the plot box rather than padding the range.
+            # Axes span exactly the data (no autorange padding). Figure and plot box are
+            # fixed (1000x800); only the axis scales change, x and y independently.
             (x0, x1), (y0, y1) = (plot_df[c].agg(["min", "max"]) for c in (xColumn, yColumn))
-            # A shrunk domain is pinned bottom-right (default: centred), so the plot box
-            # always ends at paper x=1, y=0, where the legend is anchored.
-            fit = dict(constrain="domain")
-            axes = dict(xaxis={**axis, **fit, "constraintoward": "right", "range": [x0, x1]},
-                        yaxis={**axis, **fit, "constraintoward": "bottom",
-                               "range": [y0, y1], "scaleanchor": "x", "scaleratio": 1},
+            axes = dict(xaxis={**axis, "range": [x0, x1]},
+                        yaxis={**axis, "range": [y0, y1]},
                         xaxis_title=xaxis_title, yaxis_title=yaxis_title)
-            # figure in the data's proportions, fitted inside the default 1000x800 box
-            scale = min(1000 / max(x1 - x0, 1e-12), 800 / max(y1 - y0, 1e-12))
-            size = dict(width=round((x1 - x0) * scale), height=round((y1 - y0) * scale))
-        else:  # 3-D axes live on the scene; keep the data's true x/y/z proportions
+        else:  # 3-D axes live on the scene; a fixed cube, each axis scaled to its data
             axes = dict(scene=dict(
                 xaxis={**axis, "title": xaxis_title},
                 yaxis={**axis, "title": yaxis_title},
                 zaxis={**axis, "title": zaxis_title},
-                aspectmode="data",
+                aspectmode="cube",
             ))
         fig.update_layout(
             **axes,
@@ -1051,7 +1040,7 @@ class EmbeddingAnalysis:
             template="plotly+scatter_axes",
             showlegend=True,
             # touching the plot's right edge, bottoms aligned (same placement as
-            # CustomMatplotlib.simpleScatter); the axes' constraintoward keeps the plot there
+            # CustomMatplotlib.simpleScatter)
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
                         borderwidth=1, x=1, y=0),
