@@ -19,7 +19,6 @@ import psutil
 import torch
 import torch.distributed as dist
 import yaml
-from model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
 from torch import inf
 from torch.backends import cudnn as cudnn
 from torch.optim import lr_scheduler as lr_scheduler
@@ -410,8 +409,10 @@ def get_model(LightMicroscope: bool = False, mask_ratio=0.8, embed_dim=80, encod
               loss_mask_zero=False, mae_encoder=False, final_activation="None", mask_only=False, norm_pix_loss=False,
               pretrained=None, memory_efficiency=False, num_patch_per_nucl=200, **kwargs) -> torch.nn.Module:
 
-    #from  model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
-    
+    # imported here, not at module level: model_dataset_utils imports dl_utils.analysis, which
+    # imports this module, so a module-level import is circular
+    from model_dataset_utils.nuclei_models import LMAutoencoderViT, RawMaskedAutoencoderViT
+
     if LightMicroscope is True:
 
         model = LMAutoencoderViT(texture_patch_dim=texture_patch_dim, embed_dim=embed_dim, encoder_embed_dim=encoder_embed_dim,
