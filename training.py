@@ -299,7 +299,12 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                  num_nodes: int = 1, precision=None, enable_progress_bar=True, fsdpConfig: typing.Union[None, dict] = None,
                  persistent_workers=False, pin_memory: bool = False, args={}) -> types.NoneType:
 
-        self.save_hyperparameters()
+        # Capture once. A subclass (BaseClassTrainer) has already called this and then
+        # resolved values in self.hparams (e.g. save_dir -> the run's version_N dir); a
+        # second capture re-reads the leaf __init__'s original arguments and would
+        # overwrite them, through merged/self.__dict__.update.
+        if "hparams" not in self.__dict__:
+            self.save_hyperparameters()
 
 
         # Saving twice as attribute -> overcome Pylance typing error "Attribute < > is unknown"
