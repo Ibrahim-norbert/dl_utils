@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-from constants import LABEL_KEY, MOBIE_LABEL_KEY
-from SampleLoader import SampleLoaderBioImage
-from SampleTypes import Data, Vertices
+from .constants import LABEL_KEY, MOBIE_LABEL_KEY
+from .SampleLoader import SampleLoaderBioImage
+from .SampleTypes import Data, Vertices
 
 logger = logging.getLogger(__name__)
 class BaseDataset:

@@ -7,8 +7,7 @@ import numpy as np
 import pandas as pd
 import torch
 from huggingface_hub import dataclasses
-from constants import EMBED_DICT_EMBED, GT_LABEL_KEY, LOSS_KEY, PREDICTED_LABEL_KEY
-from dl_utils import MOBIE_LABEL_KEY
+from .constants import EMBED_DICT_EMBED, GT_LABEL_KEY, LOSS_KEY, PREDICTED_LABEL_KEY, MOBIE_LABEL_KEY
 
 
 class TrainingSampleLM(NamedTuple):
@@ -90,14 +89,14 @@ class Vertices:
 
 
     EXTRA = ()
-
-@dataclass(frozen=True)
-class SonataVertices(Vertices):
-    centroid: np.ndarray
-    num_pixels: np.ndarray
-    dataIndex: int
-
-    EXTRA = ("centroid", "num_pixels", "dataIndex")
+#
+# @dataclass(frozen=True)
+# class SonataVertices(Vertices):
+#     centroid: np.ndarray
+#     num_pixels: np.ndarray
+#     dataIndex: int
+#
+#     EXTRA = ("centroid", "num_pixels", "dataIndex")
 
 
 class PromptData(Data):

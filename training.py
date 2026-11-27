@@ -11,27 +11,24 @@ import time
 import os
 import re
 import sys
-import torch
-from pytorch_lightning.utilities import parsing
-import pytorch_lightning as pl
 from typing import Any
-import yaml
-from pytorch_lightning import seed_everything
-from torch.utils.data import random_split
-from pytorch_lightning.callbacks import ModelCheckpoint, RichModelSummary
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-import typing
 
-from pytorch_lightning.callbacks import DeviceStatsMonitor
+import torch
+import yaml
+import typing
 import gc
 import logging
 import shutil
 from datetime import timedelta
 
-from datasets import BaseDataset
+from lightning_fabric import seed_everything
+from pytorch_lightning import Callback, Trainer, LightningModule, loggers
+from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, DeviceStatsMonitor, RichModelSummary
+from pytorch_lightning.loggers import TensorBoardLogger
+from pytorch_lightning.utilities import parsing
+from torch.utils.data import random_split
 
-#from dl_utils.util import _tolerant_pickle_module
+from .datasets import BaseDataset, logger
 
 _console_logger = logging.getLogger(__name__)
 
@@ -81,7 +78,7 @@ def _get_init_args(
     return self_arg, local_args
 
 
-class PeakGPUMemoryCallback(pl.Callback):
+class PeakGPUMemoryCallback(Callback):
     def on_train_epoch_start(self, trainer, pl_module):
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
@@ -167,7 +164,7 @@ def _loggable(d: typing.Optional[dict]) -> dict:
     }
 
 
-class IterationInfoCallback(pl.Callback):
+class IterationInfoCallback(Callback):
     """Periodic one-line training status: loss, LR, data/batch time, ETA.
 
     Port of Pointcept's ``InformationWriter`` + ``IterationTimer`` hooks (no
@@ -273,7 +270,7 @@ class IterationInfoCallback(pl.Callback):
         )
 
 
-class GarbageCollectionCallback(pl.Callback):
+class GarbageCollectionCallback(Callback):
     """Deterministic garbage collection (port of Pointcept's ``GarbageHandler``).
 
     Automatic GC triggers at unpredictable points and pauses every process
@@ -321,7 +318,7 @@ class GarbageCollectionCallback(pl.Callback):
             self._disabled_here = False
 
 
-class BaseClassTrainerAndPredictor(pl.Trainer):
+class BaseClassTrainerAndPredictor(Trainer):
     def __init__(self, max_epochs=4, ckptPath=None, modelName="SMLMSegmentation", reproducibility_seed=43,
                  num_workers=1, fast_dev_run=False, dataset: str = "SMLM", batch_size=1, shuffle=True,
                  modelConfig: typing.Optional[Namespace] = None, datasetConfig: typing.Union[None, dict] = None,
@@ -505,7 +502,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                   f"'{exc.name}'; remap the module path in the checkpoint.")
             raise
 
-    def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
+    def loadWeights(self, ckptPath: str, module: LightningModule) -> LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
         state_dict = checkpoint.get("checkpoint", checkpoint)
         state_dict = state_dict.get("state_dict", state_dict)
@@ -533,7 +530,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
                 print(f"Unexpected weights: {m}")
         return module
     
-    def _load_weights_if_specified(self, module: pl.LightningModule) -> pl.LightningModule:
+    def _load_weights_if_specified(self, module: LightningModule) -> LightningModule:
         """Load weights-only from weightsCkptPath if set, leaving optimizer/scheduler state untouched.
 
         Handles both raw state dicts and Lightning checkpoints (nested under "checkpoint").
@@ -717,7 +714,7 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return peak_gb
 
 
-class DummyWandbLogger(pl.loggers.Logger):
+class DummyWandbLogger(loggers.Logger):
     """Drop-in replacement for WandbLogger that requires no W&B account or connection.
 
     Implements the full pytorch_lightning Logger interface but silently discards
@@ -1098,20 +1095,21 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         constructed. ``build_fsdp_strategy`` asserts that more than one CUDA
         device is visible before building.
         """
-        if not use_fsdp:
-            return super()._resolve_strategy(use_fsdp, fsdpConfig)  # -> "auto"
-
-        import yaml
-
-        if isinstance(fsdpConfig, str):
-            fsdpConfig = yaml.safe_load(fsdpConfig) or {}
-        model_cls = models.get_model_class(self.modelName)
-        if not hasattr(model_cls, "build_fsdp_strategy"):
-            raise TypeError(
-                f"Model '{self.modelName}' does not expose build_fsdp_strategy(); "
-                "FSDP is only wired for the SMLMTransformer family."
-            )
-        return model_cls.build_fsdp_strategy(fsdpConfig)
+        # if not use_fsdp:
+        #     return super()._resolve_strategy(use_fsdp, fsdpConfig)  # -> "auto"
+        #
+        # import yaml
+        #
+        # if isinstance(fsdpConfig, str):
+        #     fsdpConfig = yaml.safe_load(fsdpConfig) or {}
+        # model_cls = models.get_model_class(self.modelName)
+        # if not hasattr(model_cls, "build_fsdp_strategy"):
+        #     raise TypeError(
+        #         f"Model '{self.modelName}' does not expose build_fsdp_strategy(); "
+        #         "FSDP is only wired for the SMLMTransformer family."
+        #     )
+        # return model_cls.build_fsdp_strategy(fsdpConfig)
+        pass
 
 
     def _compute_save_dir(self) -> str:

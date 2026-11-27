@@ -32,10 +32,11 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
-from constants import LABEL_KEY, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
-import MoBie_coloring as MoBie_coloring
-from vizualizations import CustomMatplotlib
-from util import getArrayFromDF
+
+from . import MoBie_coloring
+from .constants import LABEL_KEY, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
+from .vizualizations import CustomMatplotlib
+from .util import getArrayFromDF
 
 sns.set_context("poster")
 

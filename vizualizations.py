@@ -9,7 +9,7 @@ from matplotlib.figure import Figure
 from matplotlib.pyplot import cm
 from sklearn.preprocessing import MinMaxScaler
 
-from MoBie_coloring import GlasbeyARGBLut
+from .MoBie_coloring import GlasbeyARGBLut
 
 
 class CustomMatplotlib:
