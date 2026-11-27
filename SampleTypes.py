@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass, replace, fields, field
 from pathlib import Path
 from typing import NamedTuple, Any, Optional, ClassVar

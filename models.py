@@ -681,38 +681,6 @@ class PretrainedBackbone(nn.Module, metaclass=ABCMeta):
 
         self.feat_dim = self._model.feat_dim
 
-    @staticmethod
-    def _validate_rope_head_dims(enc_channels, enc_num_head) -> None:
-        """Fail at construction, not at the first forward, on a rope-incompatible ladder.
-
-        PointROPE splits each head_dim into three axis sub-spaces and rotates halves
-        of each, so head_dim must be divisible by 6 -- otherwise the first forward
-        dies on "number of dimensions should be a multiple of three".
-        """
-        for stage, (channels, heads) in enumerate(zip(enc_channels, enc_num_head)):
-            if channels % heads:
-                raise ValueError(
-                    f"[SONATACustom] stage {stage}: enc_channels={channels} is not "
-                    f"divisible by enc_num_head={heads}."
-                )
-            head_dim = channels // heads
-            if head_dim % 6:
-                valid = [
-                    h
-                    for h in range(1, channels + 1)
-                    if channels % h == 0 and (channels // h) % 6 == 0
-                ]
-                hint = (
-                    f" valid enc_num_head for {channels}: {valid}"
-                    if valid
-                    else f" no head count works for enc_channels={channels}"
-                    " (it needs a factor of 3); pick another width."
-                )
-                raise ValueError(
-                    f"[SONATACustom] stage {stage}: head_dim={head_dim} "
-                    f"(enc_channels={channels} / enc_num_head={heads}) must be a "
-                    f"multiple of 6 for block='BlockRoPE'.{hint}"
-                )
 
     def _load_pretrained(self, state_dict: dict) -> None:
         """Load the pretrained tensors that still fit, and report what was dropped.
