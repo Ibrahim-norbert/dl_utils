@@ -113,7 +113,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         returned dict carries whatever the model's ``on_validation_epoch_end``
         needs (e.g. ``EMBED_DICT_EMBED`` / ``coord`` / ``LABEL_KEY``).
         """
-        output: dict = self.shared_step(batch, batch_idx)
+        output: dict = self.shared_step(batch)
 
         if output.get(LOSS_KEY) is not None:
             self.log(
@@ -418,18 +418,23 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             kw in name for kw in self.no_weight_decay_keywords
         )
 
-    def configure_optimizers(self):
+    def configure_optimizers(self, layer_decay_kwargs={},
+                             optimizer_kwargs={},
+                             OneCyclerLR_kwargs={},
+                             model_str_temp="student"):
         self._total_steps = int(self.trainer.estimated_stepping_batches)
 
+        # TODO: This class should not contain the "student" attribute but instead backbone
         layer_groups = self.layer_decay_param_groups(
-            self.student,
+            getattr(self, model_str_temp),
             base_lr=self.lr,
             weight_decay=self.minweight_decay,
             max_weight_decay=self.maxweight_decay,
             layer_decay=self.layer_decay,
+            **layer_decay_kwargs
         )
 
-        optimizer = torch.optim.AdamW(layer_groups, lr=self.lr)
+        optimizer = torch.optim.AdamW(layer_groups, lr=self.lr, **optimizer_kwargs)
 
         scheduler = OneCycleLR(
             optimizer,
@@ -439,6 +444,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             div_factor=self.lr_div_factor,
             final_div_factor=self.lr_final_div_factor,
             total_steps=self._total_steps,
+            **OneCyclerLR_kwargs
         )
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
@@ -522,30 +528,13 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def shared_step(self, point_dict, kwargs):
+    def shared_step(self, sample, **kwargs):
         """Override so that :meth:`forward` receives a ``point_dict`` directly.
 
         The parent :meth:`shared_step` expects a :class:`Vertices` object and
         calls ``self.preprocess`` / ``self.transformer``.  Here the collate_fn
         already produces a ready-to-use dict of CPU tensors, so we just move
         them to the model device and call :meth:`forward`.
-        """
-        pass
-
-    @abstractmethod
-    def embed_step(self, point_dict):
-        """Run the *eval* forward and return per-point embeddings + GT.
-
-        Unlike :meth:`shared_step`, this calls :meth:`embed_forward` — the overridable
-        embedding seam — so the per-point embedding path is used even for subclasses
-        (e.g. ``SMLMSonata``) whose ``self.forward`` is the SSL forward returning a loss
-        dict, while still letting a subclass customise embedding extraction. This
-        replaces the previous class-bound ``SMLMTransformer.forward(self, ...)`` call and
-        the older ``self.forward`` monkey-patch.
-
-        Returns a per-batch dict (the validation contract type) with
-        ``EMBED_DICT_EMBED`` (inverse-expanded to the input point count),
-        ``"coord"`` and ``LABEL_KEY`` (the input coords / labels), all CPU numpy.
         """
         pass
 
@@ -564,14 +553,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     def _F1_Accuracy(self, pred_labels: torch.Tensor, gt_labels_bin: np.ndarray,
                      tag : str ="Validation"):
         """Phase 5 — compute metrics, log F1, and run the full visual analysis."""
-        pass
-
-    @abstractmethod
-    def _VAL_PROBE2Localization(self):
-        pass
-
-    @abstractmethod
-    def _VAL_PROBE2embdding(self):
         pass
 
     @abstractmethod
@@ -595,7 +576,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
 
 
     @abstractmethod
-    def predict_step(self, point_dict, batch_idx):
+    def predict_step(self, sample, batch_idx):
         """Save each batch element's voxel-level embeddings to a separate JSON.
 
         Overrides :meth:`SMLMSegmentation.predict_step`. When the predict
@@ -615,7 +596,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def embed_forward(self, point):
+    def embed_forward(self, sample):
         """Run the backbone and return per-point embeddings (the embedding path).
 
         This is the overridable seam for the embedding forward used by validation /
@@ -634,7 +615,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def forward(self, point):
+    def forward(self, sample):
         """Eval/embedding forward. Delegates to the overridable :meth:`embed_forward`.
 
         Kept as ``forward`` so ``SMLMSegmentation``/``shared_step`` callers are
