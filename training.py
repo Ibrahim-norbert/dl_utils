@@ -126,6 +126,36 @@ def _log_scalar(experiment: Any, tag: str, value: float, step: int) -> None:
     elif hasattr(experiment, "log"):
         experiment.log({tag: value}, step=step)
 
+
+# _log_figure / _plotly_to_tensor: verbatim from SuperRes PreliminaryGNN/dataset/utils.py.
+def _log_figure(experiment, tag: str, fig, global_step: int) -> None:
+    """Log a Plotly or Matplotlib figure to WandB or TensorBoard."""
+    if fig is None:
+        return
+    if hasattr(experiment, "log"):  # WandB
+        import wandb
+
+        # comprehensivePCA / UMAPResults return plotly figures, which wandb.Image
+        # cannot consume ('Figure' object has no attribute 'ndim'); log those via
+        # wandb.Plotly and keep wandb.Image for matplotlib figures.
+        media = wandb.Plotly(fig) if hasattr(fig, "to_image") else wandb.Image(fig)
+        experiment.log({tag: media}, step=global_step)
+    elif hasattr(experiment, "add_image"):  # TensorBoard
+        if hasattr(fig, "to_image"):  # plotly
+            experiment.add_image(tag, _plotly_to_tensor(fig), global_step=global_step)
+        else:  # matplotlib
+            experiment.add_figure(tag, fig, global_step=global_step)
+
+
+def _plotly_to_tensor(fig):
+    import io
+
+    from PIL import Image
+    from torchvision.transforms import functional as TF
+
+    img = Image.open(io.BytesIO(fig.to_image(format="png")))
+    return TF.to_tensor(img)  # (3, H, W) float [0, 1]
+
 def _loggable(d: typing.Optional[dict]) -> dict:
     """Subset of ``d`` that ``self.log`` accepts: int/float/str/bool or a
     one-element tensor. Everything else (arrays, coords, nested dicts) is dropped."""
