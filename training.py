@@ -747,7 +747,8 @@ class SafeEarlyStopping(EarlyStopping):
 
 
 class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
-
+    validation_tag = "Validation"
+    training_tag = "Train"
     def __init__(
         self,
         modelName="SMLMSegmentation",
@@ -777,7 +778,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         EarlyStopping_patience=50,
         datasetConfig: typing.Union[dict, None] = None,
         modelConfig=None,
-        wandbProjectName="",
         limit_val_batches=1.0,
         config_file: typing.Union[str, None] = None,
         accumulate_grad_batches=10,
@@ -899,6 +899,10 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
                          enable_progress_bar=enable_progress_bar,
                          config_file=config_file,
                          args=args)
+
+
+        self._warn_on_unlogged_monitors()
+
 
     def _warn_on_unlogged_monitors(self) -> None:
         """Flag a ModelCheckpoint/EarlyStopping monitor the chosen model never logs.
@@ -1042,9 +1046,73 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         # >0 enables GarbageCollectionCallback with that collect interval.
         parser.add_argument("--gc_collect_interval", type=int, default=0)
         parser.add_argument("--enable_progress_bar", action="store_false")
+
+        parser.add_argument("--persistent_workers", action="store_true", default=False)
+        # Runtime metadata passed by launchers; ignored during training
+        parser.add_argument("--time_string", default=None)
         # --- logging ---
         # parser.add_argument("--wandbProjectName", default="")
         return parser
+
+    def _resolve_strategy(
+            self, use_fsdp: bool = False, fsdpConfig: typing.Union[dict, str, None] = None
+    ):
+        """Build the model family's FSDPStrategy when ``use_fsdp`` is flagged.
+
+        Overrides the generic :meth:`BaseClassTrainerAndPredictor._resolve_strategy`
+        (which only knows ``"auto"``). The wrap policy is owned by the model class
+        (``SMLMTransformer.fsdp_wrap_module_classes``), resolved from the registry
+        by name — the model *instance* does not exist yet when the pl.Trainer is
+        constructed. ``build_fsdp_strategy`` asserts that more than one CUDA
+        device is visible before building.
+        """
+        if not use_fsdp:
+            return super()._resolve_strategy(use_fsdp, fsdpConfig)  # -> "auto"
+
+        import yaml
+
+        if isinstance(fsdpConfig, str):
+            fsdpConfig = yaml.safe_load(fsdpConfig) or {}
+        model_cls = models.get_model_class(self.modelName)
+        if not hasattr(model_cls, "build_fsdp_strategy"):
+            raise TypeError(
+                f"Model '{self.modelName}' does not expose build_fsdp_strategy(); "
+                "FSDP is only wired for the SMLMTransformer family."
+            )
+        return model_cls.build_fsdp_strategy(fsdpConfig)
+
+
+    def _compute_save_dir(self) -> str:
+        base = super()._compute_save_dir()
+        suffix = os.path.join(
+            self.get_class_name(),
+            self.modelName,
+            self.modelConfig.version_name,
+        )
+        # hparams.save_dir is overwritten with the resolved run dir and written to
+        # the saved YAML; re-building from that config (resume / re-run with the
+        # saved YAML, possibly with a new version_name) must not nest run dirs.
+        # Cut back to the checkpoint root at the first <ClassName> segment.
+        marker = os.sep + self.get_class_name() + os.sep
+        padded = os.path.normpath(base) + os.sep
+        if marker in padded:
+            base = padded[: padded.index(marker)]
+        return os.path.join(base, suffix)
+
+
+    def getTrainValDataloader(self, dataset, segmentor):
+        # SSL models (e.g. SMLMSonata) bind their multi-view pipeline via
+        # traincollate_fn; supervised models return the same eval collate for both.
+        train_ds, val_ds = self.splitDataset(dataset=dataset)
+
+        collate_fn = getattr(segmentor, "collate_fn", None)
+        traincollate_fn = getattr(segmentor, "traincollate_fn", None)
+
+        train_ds = self.getTrainDataloader(train_ds, collate_fn=traincollate_fn)
+        val_ds = self.getValDataloader(val_ds=val_ds, collate_fn=collate_fn)
+
+        return train_ds, val_ds
+
 
     @classmethod
     def _model_config_defaults(cls) -> dict:
@@ -1115,15 +1183,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
         return args_dict
 
-    def _compute_save_dir(self) -> str:
-        """Hook for subclasses to define the root save directory.
-
-        Called inside __init__ after save_hyperparameters(). The trainer's top-level
-        ``save_dir`` is the only source: models and datasets do not take one, and
-        ``getModel`` hands the resolved directory to the model through modelConfig.
-        Subclasses extend this (e.g. append run sub-directories) via ``super()``.
-        """
-        return os.path.expanduser(getattr(self.hparams, "save_dir", "") or "")
 
     def splitDataset(self, dataset: BaseDataset, **kwargs):
         n_total: int = len(dataset)
@@ -1134,16 +1193,6 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
         return train_ds, val_ds
 
-    def getTrainValDataloader(
-            self, dataset: BaseDataset, segmentor
-    ):
-        train_ds, val_ds = self.splitDataset(dataset=dataset)
-
-        train_ds = self.getTrainDataloader(train_ds, collate_fn=segmentor.collate_fn)
-
-        val_ds = self.getValDataloader(val_ds=val_ds, collate_fn=segmentor.collate_fn)
-
-        return train_ds, val_ds
 
     def fit(self, **kwargs):
    
@@ -1182,3 +1231,4 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
         finally:
             self.saveConfig()
+

@@ -482,50 +482,14 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             if group.get("apply_wd_schedule", True):
                 group["minweight_decay"] = self.minweight_decay
 
-    @abstractmethod
     def _is_global_zero(self):
-        """True on rank 0 or when detached from any Trainer (manual/offline use).
+        return self._trainer is None or self._trainer.is_global_zero
 
-        Guards output-only work (figures, file writes) in multi-rank runs. Reads
-        ``_trainer`` directly because the ``LightningModule.trainer`` property
-        raises ``RuntimeError`` on a detached module.
-        """
-        pass
+    def build_collate_fn(self, train=False):
+        return BaseModelClass.collate_fn  # default_collate, picklable
 
-    @abstractmethod
-    def build_collate_fn(self, train):
-        """Build a **picklable** collate callable for a ``DataLoader``.
-
-        This is the collate override seam. Override *this* (not the ``collate_fn`` /
-        ``traincollate_fn`` properties): it runs in the *parent* process, so it may
-        read any instance state, but it MUST return a picklable callable that does
-        **not** capture ``self`` — DataLoader workers (``num_workers > 0``; spawn on
-        Windows) pickle the returned object, and capturing ``self`` would drag the
-        whole model (backbones, CUDA storages) into every worker. Returning a
-        :class:`~smlm_sonata.data.collate.LocalizationCollator` satisfies that.
-
-        ``SMLMTransformer`` has no train-time augmentation, so ``train`` is ignored
-        here; :class:`~smlm_sonata.models.sonata.SMLMSonata` overrides this to select
-        its multi-view SSL pipeline when ``train=True``.
-
-        Uses the vendored sonata batch collate (not ``default_collate``): it
-        concatenates the per-sample point dicts and builds a 1-D ``offset`` by cumsum
-        of each sample's point count (per-object boundaries), which is what
-        Point/BioimagePoint's ``offset2batch`` expects.
-        """
-        pass
-
-    @abstractmethod
-    def _collate_fn(self, batch, grid_size, forward_transform, batch_collate_fn):
-        """Single-process collate convenience — instance method, overridable.
-
-        Not used by DataLoader workers (those get the picklable callable from
-        :meth:`build_collate_fn`); it exists for manual, in-process collation such as
-        the epoch-end linear probe and :class:`EmbeddingPredictor`. Kept as an
-        instance method so a subclass can wrap it via ``super()._collate_fn(...)``.
-        Defaults to the instance's ``grid_size`` / ``forwardtransform`` when not given.
-        """
-        pass
+    def _collate_fn(self, batch, *args, **kwargs):
+        return BaseModelClass.collate_fn(batch)
 
     @abstractmethod
     def shared_step(self, sample, **kwargs):
