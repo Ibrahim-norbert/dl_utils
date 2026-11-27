@@ -1232,3 +1232,19 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         finally:
             self.saveConfig()
 
+
+    @classmethod
+    def main(cls) -> types.NoneType:
+
+        try:
+            kwargs = cls.parse_args()
+
+            t = cls(**kwargs)
+
+            t.fit()
+        except Exception:
+            # Log the full traceback, then re-raise so the process exits non-zero.
+            # (Previously this swallowed the error and a crashed run looked successful.)
+            logger.exception("Training crashed")
+            raise
+
