@@ -559,21 +559,11 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
         return checkpoint_info
 
     @classmethod
-    def fromConfig(cls, configPath, **kwargs):
-        import yaml
-
-        with open(configPath, encoding="utf-8") as _f:
-            _cfg = yaml.safe_load(_f)
-        # Extract top-level scalar overrides so they are passed as explicit
-        # kwargs rather than relying on config_file parsing (which only works
-        # when the trainer is launched via the CLI argument parser).
-        _scalar_keys = {
-            k: v
-            for k, v in _cfg.items()
-            if not isinstance(v, (dict, list)) and k != "config_file"
-        }
-        _scalar_keys.update(kwargs)
-        return cls(config_file=configPath, **_scalar_keys)
+    def fromConfig(cls, config_path: str):
+        with open(config_path, "r") as f:
+            hparams = yaml.safe_load(f)
+        hparams.setdefault("modelName", Path(config_path).stem)
+        return cls(**hparams)
 
     def getConfig(self):
 
