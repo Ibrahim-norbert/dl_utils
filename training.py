@@ -465,13 +465,15 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
             return self.hparams
 
     def load_checkpoint(self, ckptPath, map_location="cpu"):
-        """torch.load, retrying with placeholders when the pickle names a dead module."""
+        """torch.load of a full checkpoint; names the dead module when the pickle references one."""
         try:
             return torch.load(ckptPath, map_location=map_location, weights_only=False)
         except ModuleNotFoundError as exc:
-            print(f"[loadWeights] Checkpoint references missing module "
-                  f"'{exc.name}'; retrying tolerantly.")
-            return torch.load(ckptPath, map_location=map_location, weights_only=False)
+            # No tolerant unpickler exists (dl_utils.util._tolerant_pickle_module is not
+            # implemented), so re-raise rather than retry the identical call.
+            print(f"[loadWeights] Checkpoint {ckptPath} references missing module "
+                  f"'{exc.name}'; remap the module path in the checkpoint.")
+            raise
 
     def loadWeights(self, ckptPath: str, module: pl.LightningModule) -> pl.LightningModule:
         checkpoint = self.load_checkpoint(ckptPath, map_location="cpu")
@@ -551,7 +553,9 @@ class BaseClassTrainerAndPredictor(pl.Trainer):
     @staticmethod
     def getcheckpointinfoandargs(pnt: typing.Union[str, Path]):
         print("Predicting features for", pnt)
-        checkpoint_info = torch.load(pnt, map_location="cpu")
+        # weights_only=False, as dl_utils.util.getcheckpointinfoandargs: torch>=2.6 defaults to
+        # True, which rejects the hparams Namespace a Lightning checkpoint pickles.
+        checkpoint_info = torch.load(pnt, map_location="cpu", weights_only=False)
         return checkpoint_info
 
     @classmethod
@@ -1091,7 +1095,9 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
 
 
     def _compute_save_dir(self) -> str:
-        base = super()._compute_save_dir()
+        # Root = the trainer's top-level save_dir (as SuperRes BaseClassTrainer._compute_save_dir);
+        # BaseClassTrainerAndPredictor has no such hook to call through super().
+        base = os.path.expanduser(getattr(self.hparams, "save_dir", "") or "")
         suffix = os.path.join(
             self.get_class_name(),
             self.modelName,
