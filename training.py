@@ -1018,11 +1018,13 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         # workers alive across epochs instead of re-spawning them every epoch.
         parser.add_argument("--pin_memory", action="store_true", default=False)
         parser.add_argument("--trainFrac", type=float, default=0.9)
-        parser.add_argument("--shuffle", action="store_true", default=True)
+        # --shuffle / --no-shuffle; configargparse maps `shuffle: false` to --no-shuffle.
+        parser.add_argument("--shuffle", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--fast_dev_run", type=int, default=0)
         parser.add_argument("--reproducibility_seed", type=int, default=43)
         parser.add_argument("--dataset", default="SMLMDataset")
-        parser.add_argument("--limit_val_batches", type=float, default=1.0)
+        # int = number of batches, float = fraction (Lightning's convention): "10" -> 10, "0.5" -> 0.5.
+        parser.add_argument("--limit_val_batches", type=yaml.safe_load, default=1.0)
         parser.add_argument("--accumulate_grad_batches", type=int, default=1)
         # --- distributed training ---
         # Boolean switch: `use_fsdp: true` in a YAML config (or --use_fsdp on the
@@ -1045,7 +1047,8 @@ class BaseClassTrainer(BaseClassTrainerAndPredictor, metaclass=ABCMeta):
         parser.add_argument("--info_log_interval", type=int, default=10)
         # >0 enables GarbageCollectionCallback with that collect interval.
         parser.add_argument("--gc_collect_interval", type=int, default=0)
-        parser.add_argument("--enable_progress_bar", action="store_false")
+        # --enable_progress_bar / --no-enable_progress_bar; `enable_progress_bar: false` disables it.
+        parser.add_argument("--enable_progress_bar", action=argparse.BooleanOptionalAction, default=True)
 
         parser.add_argument("--persistent_workers", action="store_true", default=False)
         # Runtime metadata passed by launchers; ignored during training
