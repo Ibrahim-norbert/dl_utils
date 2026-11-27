@@ -643,3 +643,164 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         ``self.embed_forward`` (used by :meth:`embed_step`).
         """
         pass
+
+
+class PretrainedBackbone(nn.Module, metaclass=ABCMeta):
+    """Backbone wrapper: optional HuggingFace checkpoint config + ``backboneConfig`` overrides.
+
+    Subclasses provide the checkpoint loader (:meth:`load_checkpoint`) and the model class
+    (:meth:`build_model`); every extra keyword is forwarded verbatim to that model, so an
+    unknown key still fails loudly at construction. ``init_model`` is called by the concrete
+    subclass once its own attributes are set.
+    """
+
+    def __init__(
+        self,
+        block="Block",
+        patchSize=1024,
+        repo_id: str = "facebook/sonata",
+        name: str = "sonata",
+        **kwargs,
+    ):
+        super().__init__()
+        print(f"Init with PatchSize: {patchSize}")
+        repo_id, name = (None if v == "None" else v for v in (repo_id, name))
+
+        if (repo_id is None) != (name is None):
+            raise ValueError(
+                f"[{type(self).__name__}] repo_id={repo_id!r}, name={name!r}: set both to load a "
+                "checkpoint, or both to None to train from scratch."
+            )
+
+        # Not self.name: __getattr__ falls back to the wrapped model.
+        self.repo_id = repo_id
+        self.ckpt_name = name
+        self.pretrained = repo_id is not None
+
+        self.block = block
+        self.kwargs: dict = kwargs
+        self.patchSize = patchSize
+
+    @abstractmethod
+    def load_checkpoint(self, custom_config: dict) -> dict:
+        """``{"config": ..., "state_dict": ...}`` of ``self.ckpt_name`` in ``self.repo_id``."""
+
+    @abstractmethod
+    def build_model(self, config: dict) -> nn.Module:
+        """The wrapped model, built from the merged config."""
+
+    def custom_config(self) -> dict:
+        """Overrides applied on top of the checkpoint config."""
+        return dict(
+            enable_flash=False,  # reduce patch size if necessary
+            block=self.block,
+            **self.kwargs,
+        )
+
+    def init_model(self):
+
+        if self.repo_id is not None and "Utonia" in self.repo_id:
+            self.block = "BlockRoPE"
+        else:
+            print(f"I hope the {self.block} you chose is appropriate for the model")
+
+        custom_config = self.custom_config()
+
+        # NOTE: Must always have cuda: assert indices.is_cuda, "implicit gemm only support cuda"
+        #
+        # Serialize the HuggingFace hub download across processes: under a
+        # distributed launcher every rank constructs the model *before* any
+        # process group exists (no dist.barrier available), so concurrent
+        # hf_hub_download calls into the shared ~/.cache/sonata/ckpt would race.
+        # filelock ships as a hard dependency of huggingface_hub. Rank 0 (per
+        # node) downloads; the rest block, then hit the cache. Single-process:
+        # the lock is uncontended and free.
+        if self.pretrained:
+            from filelock import FileLock
+
+            cache_root = os.path.expanduser("~/.cache")
+            os.makedirs(cache_root, exist_ok=True)
+            with FileLock(os.path.join(cache_root, "ckpt.download.lock")):
+                config = self.load_checkpoint(custom_config)
+        else:
+            # No checkpoint: the model class fills every other argument with its defaults.
+            config = {"config": custom_config}
+        print(f"{type(self).__name__}: ")
+        for k, v in config["config"].items():
+            print(f"k: {k}; v: {v}")
+
+        self._model = self.build_model(config["config"])
+
+        if config.get("state_dict"):
+            self._load_pretrained(config["state_dict"])
+
+        self.feat_dim = self._model.feat_dim
+
+    @staticmethod
+    def _validate_rope_head_dims(enc_channels, enc_num_head) -> None:
+        """Fail at construction, not at the first forward, on a rope-incompatible ladder.
+
+        PointROPE splits each head_dim into three axis sub-spaces and rotates halves
+        of each, so head_dim must be divisible by 6 -- otherwise the first forward
+        dies on "number of dimensions should be a multiple of three".
+        """
+        for stage, (channels, heads) in enumerate(zip(enc_channels, enc_num_head)):
+            if channels % heads:
+                raise ValueError(
+                    f"[SONATACustom] stage {stage}: enc_channels={channels} is not "
+                    f"divisible by enc_num_head={heads}."
+                )
+            head_dim = channels // heads
+            if head_dim % 6:
+                valid = [
+                    h
+                    for h in range(1, channels + 1)
+                    if channels % h == 0 and (channels // h) % 6 == 0
+                ]
+                hint = (
+                    f" valid enc_num_head for {channels}: {valid}"
+                    if valid
+                    else f" no head count works for enc_channels={channels}"
+                    " (it needs a factor of 3); pick another width."
+                )
+                raise ValueError(
+                    f"[SONATACustom] stage {stage}: head_dim={head_dim} "
+                    f"(enc_channels={channels} / enc_num_head={heads}) must be a "
+                    f"multiple of 6 for block='BlockRoPE'.{hint}"
+                )
+
+    def _load_pretrained(self, state_dict: dict) -> None:
+        """Load the pretrained tensors that still fit, and report what was dropped.
+
+        Overriding an architecture key (enc_channels, enc_depths, ...) changes tensor
+        shapes, so a strict load raises. Filter by shape and say plainly how much of
+        the checkpoint survived -- a scratch run must not look like a fine-tune.
+        """
+        own = self._model.state_dict()
+        keep = {
+            k: v for k, v in state_dict.items() if k in own and own[k].shape == v.shape
+        }
+        missing, _ = self._model.load_state_dict(keep, strict=False)
+        message = (
+            f"[SONATACustom] pretrained tensors loaded: {len(keep)}/{len(state_dict)}"
+            f" (dropped: {len(state_dict) - len(keep)},"
+            f" randomly initialised: {len(missing)})"
+        )
+        if keep:
+            logger.info(message)
+        else:
+            message += " -- training from scratch"
+            logger.warning(message)
+        print(message)
+
+    def __getattr__(self, name: str):
+        # nn.Module.__getattr__ already checks _parameters/_buffers/_modules.
+        # Fall back to the wrapped model for everything else.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self._model, name)
+
+    def forward(self, *args, **kwargs):
+
+        return self._model(*args, **kwargs)
