@@ -30,26 +30,55 @@ SHAPE_COLS: tuple[str, str, str] = ("shape_x", "shape_y", "shape_z")
 
 def mask_to_surface_points(
     mask: np.ndarray,
-    spacing: tuple = (1.0, 1.0, 1.0)
+    spacing: tuple = (1.0, 1.0, 1.0),
+    sigma: float = 1.0,
+    pad: int = 2,
 ) -> np.ndarray:
-    """Surface points for one isolated instance, cropped to its bbox + padding.
+    """``(P, 3)`` float32 ``[x, y, z]`` surface points for one isolated instance.
 
-    Returns an empty array if the instance is too small or thin to produce a
-    meaningful mesh:
-      - any axis extent below `min_extent` voxels
-      - smoothed mask never crosses the 0.5 iso-surface
-      - resulting mesh has fewer than `min_faces` triangles
+    The instance is cropped to its bounding box, surrounded by at least *pad* voxels
+    of zeros, blurred with a gaussian of width *sigma*, and the iso-surface is taken
+    from that continuous field rather than from the binary mask.  Both steps matter:
+
+    * The zero padding closes the mesh.  Callers hand this a bbox-tight crop
+      (:meth:`PointCloudObjects.get_hr_mask`), so without it the instance touches
+      every face of the array and marching cubes leaves the surface open there.
+    * Marching cubes on a binary array can only place vertices at voxel-edge
+      midpoints, which reproduces the voxel staircase.  On a blurred field they
+      interpolate instead: for a sphere of radius 12 the radial spread of the
+      surface falls from 0.21 voxels to 0.07.
+
+    The mask is deliberately *not* passed as ``marching_cubes(mask=...)``: that keeps
+    only the cubes whose corner voxel is already inside the instance, which drops
+    roughly half the surface and biases what survives inward.
+
+    The level is ``0.5`` except for instances thin enough that the blur never reaches
+    it -- a 3-voxel-wide structure peaks at 0.479 for ``sigma=1.5`` -- where it falls
+    back to half the field's maximum, so a thin instance still yields a surface
+    instead of dropping out of the dataset.
 
     *spacing* defaults to isotropic because callers feed this from an N5 that
     :meth:`BaseVolumeDataset.prepareSampleVolume` already resampled to isotropic voxels;
     an anisotropic default would apply the correction a second time.
     """
+    from scipy.ndimage import find_objects, gaussian_filter
 
-    assert mask.any(), f"The mask is empty: {mask.any().sum()}"
+    assert mask.any(), "The mask is empty"
 
-    verts, faces, normals, _ = marching_cubes(mask, level=0.5, spacing=spacing, mask=mask.bool())
+    # Padded with np.pad rather than by widening the crop: the instance may already
+    # touch the array border (callers crop to its bbox), and clipping the widened
+    # slice back to the array would silently leave that side unpadded.  The padding
+    # must also outlast the kernel, or the blur reads the boundary instead of zeros.
+    sl = find_objects(mask.astype(np.uint8))[0]
+    pad = max(pad, int(np.ceil(3 * sigma)))
+    field = gaussian_filter(np.pad(mask[sl].astype(np.float32), pad),
+                            sigma=sigma, mode="constant")
 
-    return verts
+    verts, *_ = marching_cubes(field, level=min(0.5, 0.5 * float(field.max())),
+                               spacing=spacing)
+
+    verts += np.multiply([s.start - pad for s in sl], spacing)   # back into the crop's frame
+    return verts[:, ::-1].astype(np.float32)                     # zyx -> POINTCLOUD_COLUMNS' xyz
 
 
 def compute_volume_coms(

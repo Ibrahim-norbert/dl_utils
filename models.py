@@ -113,7 +113,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         returned dict carries whatever the model's ``on_validation_epoch_end``
         needs (e.g. ``EMBED_DICT_EMBED`` / ``coord`` / ``LABEL_KEY``).
         """
-        output: dict = self.shared_step(batch)
+        output: dict = self.shared_step(batch, batch_idx)
 
         if output.get(LOSS_KEY) is not None:
             self.log(

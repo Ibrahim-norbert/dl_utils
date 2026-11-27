@@ -2,6 +2,8 @@
 # Import third-party libraries
 import pandas as pd
 import skimage.io
+from patsy.state import Standardize
+from sklearn.preprocessing import StandardScaler
 
 from constants import MOBIE_LABEL_KEY
 
@@ -13,7 +15,7 @@ BBOX_X_MIN, BBOX_X_MAX = 5, 6
 import numpy as np
 from numpy import ndarray
 from pathlib import Path
-from typing import Union, Tuple
+from typing import Union, Tuple, Optional
 from skimage import io, transform, exposure
 from skimage.measure import regionprops_table
 
@@ -66,10 +68,7 @@ class BBoxes:
 
     # TODO: Implement a class method to create a BBoxes object from a mask array. (outside file loading)
     @classmethod
-    def from_mask(cls,
-                  mask: np.ndarray,
-                  image: object = None,
-                  others: tuple = ()) -> "BBoxes":
+    def from_mask(cls, mask: np.ndarray, image: Optional[np.ndarray] = None, features: tuple[str] = ()) -> "BBoxes":
         """
         Calculates the bounding boxes from the mask file.
         :param mask: A numpy array with the mask.
@@ -85,8 +84,9 @@ class BBoxes:
         if not np.issubdtype(mask.dtype, np.integer):
             raise TypeError(f"mask must be integer-labeled; got dtype={mask.dtype}")
 
+
         # Get indexes of nonzero elements
-        props = regionprops_table(mask, image, properties=('label', 'bbox', "area", 'centroid', *others))
+        props = regionprops_table(mask, image, properties=('label', 'bbox', "area", 'centroid', *features))
 
         if not props['label'].tolist():
             print("No coordinates for non zero elements could be deduced with 'np.nonzero'")

@@ -197,6 +197,16 @@ class ViridisARGBLut(SeismicARGBLut):
         self.num_colors = len(self.indices)
         self.name = "Viridis".upper()
 
+
+    def rgba_plt_by_index(self, i: int):
+        r, g, b, a = self.rgba_tuple_by_index(i)
+        # Normalize the components to [0, 1]
+        return (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+
+    def rgba_tuple_by_index(self, index : int):
+        return self.rgba_tuple_by_normalized(index / (self.num_colors - 1))
+
+
     def get_argb(self, x):
         """
         Get the ARGB color corresponding to a normalized value (0 to 1).

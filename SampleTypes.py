@@ -44,15 +44,41 @@ class Volume(NamedTuple):
     ``label`` must be a real int — ``default_collate`` cannot batch ``None`` — and
     ``data`` must be shape-stable across the batch, which the fixed
     ``CNNVolumeDatasetObject.TARGET_SHAPE`` window guarantees.
+    ``CNNVolumeDatasetObject.TARGET_SHAPE`` window guarantees.
     """
 
-    data: np.ndarray[Any, np.dtype[np.float32]]
-    label: int
+    data: torch.Tensor
+
+    label: torch.Tensor
+
+class VolumeSIMCLR(NamedTuple):
+    """Two augmented views of one object — the sample the SimCLR training step contrasts.
+
+    The two-view counterpart of :class:`Volume`: ``data1`` and ``data2`` are independent
+    augmentations of the *same* object's window, drawn per sample by
+    ``SimCLR3DModel.traincollate_fn``, so a collated instance carries two
+    ``(B, C, Z, Y, X)`` tensors and one ``(B,)`` label.
+
+    One ``label``, not one per view, because both views are the same object: it is that
+    object's row position in ``objectMapperDF``, and a copy per view would only invite the
+    two to disagree. Validation and prediction never see this type — they consume a plain
+    :class:`Volume`, which is what stops the un-augmented path from reaching the
+    contrastive loss by accident.
+
+    ``default_collate`` rebuilds a NamedTuple field-wise, so no custom collate is needed
+    beyond the per-sample augmentation itself, and the same shape-stability rule as
+    :class:`Volume` applies to both view tensors.
+    """
+
+    data1: torch.Tensor
+
+    data2: torch.Tensor
+
+    label: torch.Tensor
 
 
-class Vertices(NamedTuple):
-    """Container for localization data with vertices, labels, and file paths."""
-
+@dataclass(frozen=True)   # frozen=True keeps it immutable like a NamedTuple
+class Vertices:
     data: Data
     filePath: str | Path
     # (N,) frame index per localisation, or None when the file has no frame column.
@@ -60,6 +86,16 @@ class Vertices(NamedTuple):
     frame: Optional[np.ndarray | torch.Tensor] = None
 
 
+
+    EXTRA = ()
+
+@dataclass(frozen=True)
+class SonataVertices(Vertices):
+    centroid: np.ndarray
+    num_pixels: np.ndarray
+    dataIndex: int
+
+    EXTRA = ("centroid", "num_pixels", "dataIndex")
 
 
 class PromptData(Data):
