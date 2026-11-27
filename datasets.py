@@ -1,26 +1,15 @@
-import glob
 import logging
-import numbers
 import os
 from builtins import str
-
-from numpy import ndarray, dtype
-from skimage.transform import resize
-import shutil
-
 import numpy as np
 import pandas as pd
-import yaml
-from functools import cached_property
 from pathlib import Path
 from typing import Any, List, Optional, Tuple, Union
-
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-from dl_utils import LABEL_KEY, MOBIE_LABEL_KEY
-from dl_utils.SampleLoader import SampleLoaderBioImage
-from dl_utils.SampleTypes import Data, Vertices
-from dl_utils import util_base as util
+from constants import LABEL_KEY, MOBIE_LABEL_KEY
+from SampleLoader import SampleLoaderBioImage
+from SampleTypes import Data, Vertices
 
 logger = logging.getLogger(__name__)
 class BaseDataset:
@@ -36,9 +25,7 @@ class BaseDataset:
     SAMPLE_PATH_COLUMN: str = "sample_path"
     SAMPLE_LABEL_COLUMN: str = f"sample_{MOBIE_LABEL_KEY}"
 
-    def __init__(self, sampleMapperDFPath: str, save_dir: str, **kwargs) -> None:
-
-
+    def __init__(self, sampleMapperDFPath: str, **kwargs) -> None:
 
         self.sampleMapperDFPath = sampleMapperDFPath
 
@@ -47,16 +34,12 @@ class BaseDataset:
         # NOTE: Dataset dataframe must be a sample mapper, where each sample a path is
         self.sampleMapperDF: pd.DataFrame = self.loadDataFrame(sampleMapperDFPath)
 
-        assert self.SAMPLE_PATH_COLUMN in self.sampleMapperDF.columns, f"The {self.SAMPLE_PATH_COLUMN} column is not in the sampleMapper dataframe."
-
         if self.SAMPLE_LABEL_COLUMN not in self.sampleMapperDF.columns:
             self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] = np.arange(len(self.sampleMapperDF))
         assert not self.sampleMapperDF.duplicated(subset=self.SAMPLE_LABEL_COLUMN).any(), (
             "Ensure sample mapper does not have duplicates"
         )
         self.samples: np.ndarray = self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN].to_numpy()
-        assert save_dir is not None and isinstance(save_dir, str) or isinstance(save_dir, Path), f"The save directory must be a string, not {save_dir}"
-        self.save_dir: str = os.path.abspath(save_dir)
 
         pl.seed_everything(42, workers=True)
 
@@ -293,7 +276,6 @@ class VerticesDataset(BaseDataset):
         Args:
             datasetDir: Root directory containing CSV files (searched recursively).
             sampleCol: Column name identifying the sample/file path.
-            dataPointCol: Column name used as the unique data-point identifier.
             **kwargs: Forwarded to VerticesDataset.__init__ (verticesCol, labels, etc.).
         """
         assert os.path.exists(datasetDir), f"Directory does not exist: {datasetDir}"

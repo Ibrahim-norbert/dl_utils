@@ -23,23 +23,14 @@ from torch import inf
 from torch.backends import cudnn as cudnn
 from torch.optim import lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader, Dataset
-
-from dl_utils import MOBIE_LABEL_KEY
-# Shared helpers live in util_base; re-export the ones historically exposed via
-# `dl_utils.util` so existing callers (e.g. `util.save2DFcolumn`) keep working
-# without maintaining duplicate copies.
-from .util_base import (
-    save2DFcolumn,
-    savedataframe,
-    get_savedf_path,
-    readdataframe,
-    merge_with_nucl_table,
-    patchify,
-)
+from constants import MOBIE_LABEL_KEY
 
 
 
 
+def getArrayFromDF(df, column):
+    """Extracts and converts a column from a DataFrame to a NumPy array."""
+    return np.array(df[column].tolist())
 
 def adjust_learning_rate(optimizer, epoch, args, start_epoch):
     """Decay the learning rate with half-cycle cosine after warmup"""
@@ -750,9 +741,61 @@ class CosineAnnealingLR(lr_scheduler.CosineAnnealingLR):
 
 
 class OneCycleLR(lr_scheduler.OneCycleLR):
-    r"""
-    torch.optim.lr_scheduler.OneCycleLR, Block total_steps
+    r"""``torch.optim.lr_scheduler.OneCycleLR`` driven by ``total_steps`` only.
+
+    Same 1cycle policy as PyTorch's scheduler (Smith & Topin, "Super-Convergence",
+    2017). The learning rate warms up from ``initial_lr = max_lr / div_factor`` to
+    ``max_lr``, then anneals down to ``min_lr = initial_lr / final_div_factor``.
+    Momentum, if enabled, moves the opposite way. Call :meth:`step` after every
+    optimizer step (per batch, not per epoch).
+
+    The cycle length can only be given as ``total_steps``: PyTorch's alternative
+    ``epochs`` / ``steps_per_epoch`` arguments are blocked (not exposed), so the cycle
+    length is always stated explicitly, e.g. from the trainer's estimated stepping
+    batches.
+
+    Args:
+        optimizer (Optimizer): Wrapped optimizer.
+        max_lr (float or list[float]): Peak learning rate, per parameter group if a list.
+        total_steps (int): Number of scheduler steps in the cycle. Required in practice:
+            stepping past it raises ``ValueError``.
+        pct_start (float): Fraction of ``total_steps`` spent increasing the learning
+            rate. Default: 0.3.
+        anneal_strategy (str): ``"cos"`` for cosine or ``"linear"`` for linear
+            annealing. Default: ``"cos"``.
+        cycle_momentum (bool): Cycle momentum (or Adam's ``beta1``) inversely to the
+            learning rate, between ``base_momentum`` and ``max_momentum``. Default: True.
+        base_momentum (float or list[float]): Momentum at the learning-rate peak.
+            Default: 0.85.
+        max_momentum (float or list[float]): Momentum at the start and end of the cycle.
+            Default: 0.95.
+        div_factor (float): Sets the starting learning rate,
+            ``initial_lr = max_lr / div_factor``. The cycle starts here and warms up to
+            ``max_lr`` over the first ``pct_start * total_steps`` steps. With
+            ``three_phase=True``, the second phase also anneals back down to
+            ``initial_lr``. E.g. ``max_lr=4e-3, div_factor=25`` gives
+            ``initial_lr=1.6e-4``. Default: 25.
+        final_div_factor (float): Sets the learning rate reached at the last step,
+            ``min_lr = initial_lr / final_div_factor
+            = max_lr / (div_factor * final_div_factor)``. It divides ``initial_lr``,
+            not ``max_lr``. The final annealing phase ends here: the decrease after the
+            peak (two-phase), or the third phase (three-phase). E.g.
+            ``max_lr=4e-3, div_factor=25, final_div_factor=1e4`` gives
+            ``min_lr=1.6e-8``. Default: 1e4.
+        three_phase (bool): If True, add a third phase that anneals from the initial
+            learning rate to the final one; the decrease phase then mirrors the warm-up
+            (fast.ai style). If False, a two-phase cycle. Default: False.
+        last_epoch (int): Index of the last step taken, for resuming; -1 starts a new
+            cycle. Default: -1.
+
+    Example:
+        >>> scheduler = OneCycleLR(optimizer, max_lr=4e-3, total_steps=trainer.estimated_stepping_batches)
+        >>> for batch in loader:
+        ...     train_step(batch)
+        ...     optimizer.step()
+        ...     scheduler.step()
     """
+
 
     def __init__(
         self,
@@ -813,11 +856,14 @@ class CosineScheduler(object):
         self.schedule = np.concatenate((warmup_schedule, schedule, freeze_schedule))
         self.iter = 0
 
-    def get(self, it):
+    def get(self, it) -> float:
+        # Python float, never a numpy scalar: callers write these values into optimizer
+        # param_groups and attributes that end up in checkpoints, and a numpy scalar
+        # there makes torch.load(weights_only=True) — PyTorch >= 2.6's default, used on
+        # resume — reject the checkpoint ("Unsupported global: numpy...scalar").
         if it >= self.total_iters:
-            return self.final_value
-        else:
-            return self.schedule[it]
+            return float(self.final_value)
+        return float(self.schedule[it])
 
     def step(self):
         value = self.get(self.iter)
@@ -829,41 +875,3 @@ class CosineScheduler(object):
 
     def __getitem__(self, it):
         return self.get(it)
-
-
-def getArrayFromDF(df, column):
-    """Extracts and converts a column from a DataFrame to a NumPy array."""
-    return np.array(df[column].tolist())
-
-
-import pickle
-import types
-
-
-class _MissingCheckpointClass:
-    """Placeholder for a class whose defining module is no longer importable."""
-
-
-def _tolerant_pickle_module():
-    """A pickle-module shim whose Unpickler substitutes placeholders for dead globals.
-
-    torch's UnpicklerWrapper subclasses `pickle_module.Unpickler` and delegates to
-    `super().find_class(...)`, so this is the exact interception point for the
-    ModuleNotFoundError raised by torch/serialization.py.
-    """
-
-    class _Unpickler(pickle.Unpickler):
-        def find_class(self, mod_name, name):
-            try:
-                return super().find_class(mod_name, name)
-            except (ModuleNotFoundError, AttributeError):
-
-                return type(name, (_MissingCheckpointClass,),
-                            {"__module__": mod_name})
-
-    shim = types.ModuleType("dl_utils._tolerant_pickle")
-    shim.Unpickler = _Unpickler
-    shim.load = pickle.load
-    shim.Pickler = pickle.Pickler
-    shim.dump = pickle.dump
-    return shim

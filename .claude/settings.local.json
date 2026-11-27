@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(del \"c:\\\\Users\\\\ibrah\\\\.repo\\\\dl_utils\\\\helperfunctions.py\")"
-    ]
-  }
-}

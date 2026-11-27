@@ -2,9 +2,12 @@ from dataclasses import dataclass, replace, fields, field
 from pathlib import Path
 from typing import NamedTuple, Any, Optional, ClassVar
 import numpy as np
+import pandas as pd
 import torch
 from huggingface_hub import dataclasses
-from .constants import LOSS_KEY
+from constants import EMBED_DICT_EMBED, GT_LABEL_KEY, LOSS_KEY, PREDICTED_LABEL_KEY
+from dl_utils import MOBIE_LABEL_KEY
+
 
 class TrainingSampleLM(NamedTuple):
     features: np.ndarray
@@ -27,8 +30,8 @@ class TrainingSampleLMTensor(NamedTuple):
 
 
 class Data(NamedTuple):
-    vertices: np.ndarray[Any, np.dtype[np.float32]]
-    label: np.ndarray[Any, np.dtype[np.int32]]
+    vertices:  torch.Tensor | np.ndarray[Any, np.dtype[np.float32]]
+    label: torch.Tensor | np.ndarray[Any, np.dtype[np.int32]]
 
 
 class Volume(NamedTuple):
@@ -40,6 +43,7 @@ class Volume(NamedTuple):
 
     ``label`` must be a real int — ``default_collate`` cannot batch ``None`` — and
     ``data`` must be shape-stable across the batch, which the fixed
+    ``CNNVolumeDatasetObject.TARGET_SHAPE`` window guarantees.
     ``CNNVolumeDatasetObject.TARGET_SHAPE`` window guarantees.
     """
 
@@ -76,7 +80,12 @@ class VolumeSIMCLR(NamedTuple):
 @dataclass(frozen=True)   # frozen=True keeps it immutable like a NamedTuple
 class Vertices:
     data: Data
-    filePath: str
+    filePath: str | Path
+    # (N,) frame index per localisation, or None when the file has no frame column.
+    # Last and defaulted, so two-field constructions stay valid.
+    frame: Optional[np.ndarray | torch.Tensor] = None
+
+
 
     EXTRA = ()
 
@@ -104,7 +113,7 @@ class CellGeometry(NamedTuple):
     Mirrors :class:`Vertices` (``data`` + ``BaseDataset.SAMPLE_PATH_COLUMN``) and adds ``feat`` — the
     ``(6,)`` normalized sin/cos centre-of-mass embedding built by
     :func:`dl_utils.cell_geometry.cell_geometry_from_row`. When present, the
-    SONATA-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
+    SSL-family collate maps ``feat`` into ``point.feat[:, 3:9]`` (replacing the
     color+normal supplements while keeping ``coord``); when ``None`` the collate
     falls back to the computed ``[coord, color, normal]`` features.
     """
@@ -139,12 +148,6 @@ def _map_misc(misc, fn):
     return None if misc is None else {k: fn(v) for k, v in misc.items()}
 
 
-# One entry per SCENE, not per row — indexed, never split. Mirrors
-# BioimagePoint._PER_SCENE (PreliminaryGNN/module/pointTV3/structure.py:280) and
-# sidesteps the shape-sniff ambiguity when B == n_total.
-_PER_SCENE = ("filePath", "dataIndex")
-
-
 @dataclass(frozen=True, eq=False)
 class EmbeddingsNumpy:
     data: np.ndarray
@@ -152,48 +155,24 @@ class EmbeddingsNumpy:
     pred_labels: Optional[np.ndarray] = None
     misc: Optional[dict] = None
 
-    def batch_split_points(self, offset) -> list["EmbeddingsNumpy"]:
-        """Split the batched rows into one bundle per scene, by ``offset``.
+    def tokens_to_points(self, tokens: Optional[np.ndarray] = None) -> np.ndarray:
+        """Token features back at point resolution: every point gets its token's feature.
 
-        ``offset`` is the cumulative per-scene row count (the collate's ``offset``).
-        Per-row arrays (``data``, ``labels``, ``misc["coord"]``, …) are sliced;
-        ``_PER_SCENE`` keys are indexed one entry per scene; everything else is
-        shared by reference.
+        Needs ``misc['group_rows']`` ``(M, K)``, the point rows of every token (as
+        ``BioimagePoint.group_by_kmeans`` gives). ``tokens`` is ``(M, *S)``, one row per
+        token (``self.data`` if not given). Returns ``(N, *S)`` in point order, row
+        ``group_rows[m, j]`` holding ``tokens[m]``; every group is whole, so ``N = M * K``.
         """
-        counts = np.diff(np.asarray(offset, dtype=np.int64).ravel(), prepend=0)
-        n_total = self.data.shape[0]
-        assert counts.sum() == n_total, (
-            f"offset totals {counts.sum()} rows but data has {n_total}"
-        )
-        bounds = np.cumsum(counts)[:-1]
-
-        def parts(v):
-            if isinstance(v, np.ndarray) and v.ndim and v.shape[0] == n_total:
-                return np.split(v, bounds)
-            return [v] * len(counts)
-
-        misc = self.misc or {}
-        per_scene = {k: misc[k] for k in _PER_SCENE if k in misc}
-        split = {f.name: parts(getattr(self, f.name))
-                 for f in dataclasses.fields(self) if f.name != "misc"}
-        split_misc = {k: parts(v) for k, v in misc.items() if k not in per_scene}
-
-        return [
-            replace(self,
-                    **{k: p[i] for k, p in split.items()},
-                    misc={**{k: p[i] for k, p in split_misc.items()},
-                          **{k: v[i] for k, v in per_scene.items()}})
-            for i in range(len(counts))
-        ]
-
-
-
-
-
-
-
-
-
+        rows = (self.misc or {}).get("group_rows")
+        if rows is None:
+            raise RuntimeError("tokens_to_points: misc has no 'group_rows' (embeddings are not tokens)")
+        tokens = self.data if tokens is None else tokens
+        if len(tokens) != len(rows):
+            raise ValueError(f"tokens_to_points: {len(tokens)} token rows, misc has {len(rows)} tokens")
+        token, slot = np.nonzero(rows >= 0)  # every point, by token; -1: empty slot
+        token_of_point = np.empty_like(token)
+        token_of_point[rows[token, slot]] = token
+        return tokens[token_of_point]
 
 @dataclass(frozen=False, eq=False)
 class Embeddings:
@@ -227,14 +206,45 @@ class Embeddings:
     def detach_cpu(self) -> "Embeddings":
         return self._apply(_t_detach_cpu)
 
+    def dataframe(self) -> pd.DataFrame:
+        """One row per point: the embedding vector, x/y(/z) from ``misc['coord']`` when
+        present, and the GT / predicted labels when set. A leading batch dim of 1 is dropped."""
+        features = _to_numpy(self.data)
+        df = pd.DataFrame({EMBED_DICT_EMBED: list(features.reshape(-1, features.shape[-1]))})
+
+        coord = (self.misc or {}).get("coord")
+        if coord is not None:
+            coord = _to_numpy(coord)
+            df[list("xyz"[: coord.shape[-1]])] = coord.reshape(-1, coord.shape[-1])
+        if self.labels is not None:
+            df[MOBIE_LABEL_KEY] = _to_numpy(self.labels).reshape(-1).astype(int)
+        if self.pred_labels is not None:
+            df[PREDICTED_LABEL_KEY] = _to_numpy(self.pred_labels).reshape(-1)
+        return df
+
 
 @dataclass(frozen=False, eq=False)
-class EmbeddingsPrompts(Embeddings):
+class EmbeddingsTraining(Embeddings):
+    """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
+
+    ``loss`` is ``None`` when ``shared_step`` runs a loss-free forward (e.g. the
+    embedding path used by prediction).
     """
-    Must contain prompt_target and prompt_indices
-    """
-    prompt_target : Optional[torch.Tensor] = None
-    prompt_indices : Optional[torch.Tensor] = None
+
+    loss: Optional[torch.Tensor] = None
+
+
+    def _mapped(self, fn, skip_fields: tuple = ()) -> dict:
+        """Field->value dict with ``fn`` mapped over every tensor (recursing
+        into nested bundles/lists), leaving the named fields untouched."""
+        out = {}
+        for f in dataclasses.fields(self):
+            v = getattr(self, f.name)
+            out[f.name] = v if f.name in skip_fields else _apply_recursive(v, fn)
+        return out
+
+    def _apply(self, fn, skip_fields: tuple = ()) -> "EmbeddingsTraining":
+        return replace(self, **self._mapped(fn, skip_fields))
 
     def detach(self) -> "EmbeddingsPrompts":
         """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
@@ -245,7 +255,18 @@ class EmbeddingsPrompts(Embeddings):
         """New bundle with every tensor detached and moved to CPU EXCEPT
         ``misc['loss']``, kept attached and on-device for ``backward()``.
         ``prev_iters`` are recursed, so their GPU tensors are freed."""
-        return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
+        return self._apply(_t_detach_cpu, skip_fields=(LOSS_KEY,))
+
+
+
+@dataclass(frozen=False, eq=False)
+class EmbeddingsPrompts(EmbeddingsTraining):
+    """
+    Must contain prompt_target and prompt_indices
+    """
+    prompt_target : Optional[torch.Tensor] = None
+    prompt_indices : Optional[torch.Tensor] = None
+
 
 @dataclass(frozen=False, eq=False)
 class EmbeddingsPromptsFeat(EmbeddingsPrompts):
@@ -282,40 +303,12 @@ class EmbeddingsPromptsFeat(EmbeddingsPrompts):
 
 
 @dataclass(frozen=False, eq=False)
-class EmbeddingsSAM(Embeddings):
+class EmbeddingsSAM(EmbeddingsTraining):
     """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
 
     ``misc['loss']`` is ``None`` when ``shared_step`` runs a loss-free forward
     (e.g. the embedding path used by prediction).
     """
     prev_iters: Optional[list["Embeddings"]] = None
-
-    def detach(self) -> "EmbeddingsSAM":
-        """Detach every tensor from the graph EXCEPT ``misc['loss']``, which stays
-        attached so ``backward()`` can still run on it."""
-        return self._apply(_t_detach, skip_misc_keys=(LOSS_KEY,))
-
-    def detach_cpu(self) -> "EmbeddingsSAM":
-        """New bundle with every tensor detached and moved to CPU EXCEPT
-        ``misc['loss']``, kept attached and on-device for ``backward()``.
-        ``prev_iters`` are recursed, so their GPU tensors are freed."""
-        return self._apply(_t_detach_cpu, skip_misc_keys=(LOSS_KEY,))
-
-
-class EmbeddingsTraining(NamedTuple):
-    """Loss + embeddings bundle returned by SSL ``shared_step`` implementations.
-
-    ``loss`` is ``None`` when ``shared_step`` runs a loss-free forward (e.g. the
-    embedding path used by prediction).
-    """
-
-    loss: Optional[torch.Tensor]
-    data: Embeddings
-
-@dataclass(frozen=True, eq=True)
-class EmbeddingOrganoidObjectsPC(EmbeddingsNumpy):
-
-    coord : np.ndarray = field(kw_only=True)
-    sample_path : Path = field(kw_only=True)
 
 

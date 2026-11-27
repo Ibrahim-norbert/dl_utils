@@ -154,3 +154,4 @@ cython_debug/
 *scene*.txt
 *.ply
 *config*.yaml
+*.slurm.out

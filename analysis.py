@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import base64
 import itertools
 import logging
@@ -7,16 +5,24 @@ import os
 import pathlib
 import warnings
 from dataclasses import dataclass
+from functools import reduce
 from io import BytesIO
-from typing import Callable, Optional
+from typing import Literal, Optional, Union, List
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly
 import seaborn as sns
+import skimage
+from matplotlib.axes import Axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import to_hex, to_rgba_array, Normalize, ListedColormap
 from matplotlib.figure import Figure
-from PIL import Image
+from matplotlib.lines import Line2D
+from plotly.graph_objs import Scatter, Scatter3d
+from plotly.graph_objs.layout import Template
+import plotly.io as pio
 from sklearn.cluster import DBSCAN
 from sklearn.covariance import LedoitWolf
 from sklearn.decomposition import PCA
@@ -26,21 +32,12 @@ from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
+from constants import LABEL_KEY, MOBIE_LABEL_KEY, MASKED_FEATURES_KEY, EMBED_DICT_EMBED
+import MoBie_coloring as MoBie_coloring
+from vizualizations import CustomMatplotlib
+from util import getArrayFromDF
 
-from dl_utils import (EMBED_DICT_EMBED, LABEL_KEY, MASKED_FEATURES_KEY,
-                      MOBIE_LABEL_KEY, MoBie_coloring)
-from dl_utils.util import getArrayFromDF
-from dl_utils.vizualizations import CustomMatplotlib
-
-# NOTE: no sns.set_context() at import.  Setting a context here mutated global
-# matplotlib state for every importer of dl_utils.analysis, which EmbeddingAnalysis
-# then had to undo per figure via `_plottingContext`.  Figures now take their
-# context from that manager alone; the one figure that wants "poster" asks for it.
-#
-# skimage.io is likewise imported lazily at its two call sites: the top-level
-# `import skimage` never bound the `.io` submodule, so `skimage.io.imread` only
-# worked when some other module had imported it first -- and that submodule import
-# is what trips the MKL/Intel-OpenMP crash in this environment.
+sns.set_context("poster")
 
 # kaleido (Plotly static-image export) drives a headless Chromium via the
 # choreographer package; both loggers have no explicit level of their own, so
@@ -51,58 +48,8 @@ from dl_utils.vizualizations import CustomMatplotlib
 logging.getLogger("kaleido").setLevel(logging.WARNING)
 logging.getLogger("choreographer").setLevel(logging.WARNING)
 
-
-def _scalarColumns(df: pd.DataFrame) -> list[str]:
-    """Columns holding plain scalars -- the ones that belong in ``results_df``.
-
-    Tests the first valid value per column rather than every cell.  These frames
-    are homogeneous per column and carry embedding vectors as lists, so the old
-    ``.apply(isinstance, ...)`` over every cell of every column dominated
-    construction time on large tables.
-    """
-    def isScalar(col: pd.Series) -> bool:
-        idx = col.first_valid_index()
-        return idx is None or not isinstance(col[idx], (list, dict, np.ndarray))
-
-    return [c for c in df.columns
-            if df[c].dtype.kind in "fiuUSO" and isScalar(df[c])]
-
-
-def _isBinaryColumn(col: pd.Series) -> bool:
-    """True when every non-null value in *col* is 0 or 1."""
-    try:
-        return pd.to_numeric(col.dropna()).isin([0, 1]).all()
-    except (ValueError, TypeError):
-        return False
-
-
-def _oneHotLabel(row, columns: list):
-    """The name of the single active column in a one-hot *row*, else NaN."""
-    active = [c for c in columns if float(row[c]) == 1.0]
-    return active[0] if len(active) == 1 else np.nan
-
-
-def _formatLabelValue(v) -> str:
-    """Render one cell of a composite label, collapsing ``1.0`` to ``"1"``."""
-    if pd.isna(v):
-        return "NA"
-    if isinstance(v, float) and v.is_integer():
-        return str(int(v))
-    return str(v)
-
-
-def _klDivergence(mu_p, sigma_p, mu_q, sigma_q) -> float:
-    """KL(P || Q) between two multivariate Gaussians."""
-    sigma_q_inv = np.linalg.inv(sigma_q)
-    diff = mu_q - mu_p
-    _, logdet_p = np.linalg.slogdet(sigma_p)
-    _, logdet_q = np.linalg.slogdet(sigma_q)
-    return 0.5 * (
-        np.trace(sigma_q_inv @ sigma_p)
-        + diff @ sigma_q_inv @ diff
-        - len(mu_p)
-        + logdet_q - logdet_p
-    )
+# Metadata table readers, keyed by file suffix.
+_TABLE_READERS = {".csv": pd.read_csv, ".xlsx": pd.read_excel, ".json": pd.read_json}
 
 
 def _png_buffer_to_data_url(buf: BytesIO) -> str:
@@ -112,79 +59,144 @@ def _png_buffer_to_data_url(buf: BytesIO) -> str:
     return f"data:image/png;base64,{encoded_image}"
 
 
-def convert_array_to_data_url(path) -> str:
-    import skimage.io
+# Plotly's analogue of sns.set_context: a named template with the scatter axis styling.
+# Used as "plotly+scatter_axes", so it only adds to plotly's default template, and any
+# explicit layout (plotly_kwargs) still overrides it.
+_AXIS_STYLE = dict(tickfont=dict(size=16, color="black"), title_font=dict(size=20),
+                   linecolor="black")
+pio.templates["scatter_axes"] = Template(layout=dict(
+    xaxis=_AXIS_STYLE, yaxis=_AXIS_STYLE,
+    scene=dict(xaxis=_AXIS_STYLE, yaxis=_AXIS_STYLE, zaxis=_AXIS_STYLE),
+))
 
+
+def _glasbey_rgb_palette(keys, offset: int = 0) -> dict:
+    """Map each key to a plotly ``rgb(r, g, b)`` string from the MoBIE Glasbey LUT.
+
+    Integer-like keys use their own code (+ *offset*), so a label gets the same colour
+    as in MoBIE and ``specialScatter``; codes <= 0 (background) are grey. Other keys
+    take LUT entries 1, 2, ... in order.
+    """
+    lut = MoBie_coloring.GlasbeyARGBLut()
+
+    def code(i, key):
+        try:
+            return int(float(key)) + offset
+        except (TypeError, ValueError):
+            return i + 1
+
+    return {k: f"rgb{lut.rgba_tuple_by_index(code(i, k))[:3]}" for i, k in enumerate(keys)}
+
+
+def convert_array_to_data_url(path) -> str:
     array = skimage.io.imread(path)
     fig, ax = plt.subplots(figsize=(3, 3))
     ax.imshow(array, cmap="gray")
     ax.axis("off")
     buf = BytesIO()
-    plt.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
+    fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     return _png_buffer_to_data_url(buf)
 
 
-class Classification:
+class _LabelColumn:
+    """Ground-truth spec: one label column, or several condition columns merged into one.
 
-    # Factories rather than instances: the old dict constructed all four estimators
-    # on every call just to select one.  LinearRegression is a *regressor* kept for
-    # backwards compatibility -- it has no `classes_`/`predict_proba`, and
-    # `EmbeddingAnalysis.classify` guards the paths that need them.
-    _FACTORIES: dict[str, Callable] = {
-        "KNN": lambda metric: KNeighborsClassifier(n_neighbors=5, metric=metric),
-        "LogisticRegression": lambda metric: LogisticRegression(max_iter=1000, random_state=42),
-        "RandomForest": lambda metric: RandomForestClassifier(n_estimators=100, random_state=42),
-        "LinearRegression": lambda metric: LinearRegression(),
-    }
+    Standardises it to 1-based float class ids (NaN = missing/unknown) using pandas
+    primitives: ``idxmax`` for one-hot columns, ``pd.factorize`` for first-appearance
+    order and ``pd.Categorical`` for the encoding.
+    """
+
+    def __init__(self, gtclassColumn):
+        self.sources: list = list(gtclassColumn) if isinstance(gtclassColumn, list) else []
+        self.name: str = "_".join(self.sources) or gtclassColumn
+
+    def standardise(self, data_df: pd.DataFrame, classMapping: dict) -> tuple[pd.DataFrame, str, dict]:
+        df = data_df.assign(**{self.name: self._merge(data_df[self.sources])}) if self.sources else data_df.copy()
+        # Only string-valued label columns are mapped to integer ids.
+        if self.name not in df.columns or (values := getArrayFromDF(df, self.name)).dtype.kind not in "USO":
+            return df, self.name, classMapping
+        classMapping = classMapping or self._class_mapping(values)
+        df[self.name] = self._encode(values, classMapping)
+        return df, self.name, classMapping
+
+    @classmethod
+    def _merge(cls, subset: pd.DataFrame) -> pd.Series:
+        """One-hot (0/1/NaN) -> name of the single active column, NaN if none or several; else "_"-joined values."""
+        numeric = subset.apply(pd.to_numeric, errors="coerce")
+        if numeric.isin([0, 1]).where(subset.notna(), True).all(axis=None):
+            active = numeric.eq(1)
+            return active.idxmax(axis=1).where(active.sum(axis=1) == 1)
+        return reduce(lambda a, b: a + "_" + b, (subset[c].map(cls._format) for c in subset.columns))
+
+    @staticmethod
+    def _format(v) -> str:
+        """NaN -> "NA", 2.0 -> "2", anything else -> str(v)."""
+        if pd.isna(v):
+            return "NA"
+        return str(int(v)) if isinstance(v, float) and v.is_integer() else str(v)
+
+    def _class_mapping(self, values: np.ndarray) -> dict:
+        """{1: class, ...}: classes named in ``sources`` first, then the rest by first appearance."""
+        present = list(pd.factorize(values)[1])   # NaN excluded
+        seen = set(present)
+        return dict(enumerate(dict.fromkeys([v for v in self.sources if v in seen] + present), start=1))
+
+    @staticmethod
+    def _encode(values: np.ndarray, classMapping: dict) -> np.ndarray:
+        """Class id per value; NaN for missing values or values absent from the mapping."""
+        codes = pd.Categorical(values, categories=list(classMapping.values())).codes
+        # code -1 (missing/unknown) indexes the trailing NaN
+        return np.append(np.fromiter(classMapping, dtype=float), np.nan)[codes]
+
+
+class Classification:
 
     @staticmethod
     def train_classifier(embeddings, labels, method="KNN", metric="cosine"):
-        if method not in Classification._FACTORIES:
+        # Factories, so only the requested model is ever constructed.
+        factories = {
+            "KNN": lambda: KNeighborsClassifier(n_neighbors=5, metric=metric),
+            "LogisticRegression": lambda: LogisticRegression(max_iter=1000, random_state=42),
+            "RandomForest": lambda: RandomForestClassifier(n_estimators=100, random_state=42),
+            "LinearRegression": LinearRegression,
+        }
+        if method not in factories:
             raise ValueError(
                 f"Unsupported classifier method: {method}. "
-                f"Available: {list(Classification._FACTORIES)}"
+                f"Available: {list(factories)}"
             )
-        return Classification._FACTORIES[method](metric).fit(embeddings, labels)
+        return factories[method]().fit(embeddings, labels)
 
     @staticmethod
-    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = None, gtColumn="",
-                                    colours=None) -> Figure:
-
-
-        mapping = mapping or {}
-        ks: list[int] = classifier.classes_
-        cm = confusion_matrix(gt, classifier.predict(x), normalize="true")
-        ticks = [mapping.get(k, k) for k in ks]
+    def createConfusionMatrixFigure(x, gt, classifier, save_dir=None, mapping: dict = {}, gtColumn="") -> Figure:
+        ks = classifier.classes_
+        # labels=ks keeps matrix rows/cols aligned with the tick labels below.
+        cm = confusion_matrix(gt, classifier.predict(x), labels=ks, normalize="true")
+        ticks = [mapping.get(k, k) for k in ks] if mapping is not None else ks
 
         n = len(ks)
-        fig_size = max(4, n * max(0.6, min(1.2, 12 / n)))
+        cell_size = max(0.6, min(1.2, 12 / n))
+        fig_size = max(4, n * cell_size)
         annot = n <= 20
         fontsize = max(6, min(12, int(120 / n)))
 
-        # This is the one figure that wanted the module-level "poster" context, so it
-        # now asks for it explicitly instead of every importer paying for it.
-        with sns.plotting_context("notebook"):
-            fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
-            sns.heatmap(
-                cm, ax=ax, annot=annot, cmap="Blues",
-                xticklabels=ticks, yticklabels=ticks, cbar=True,
-                fmt=".2f" if annot else "",
-                annot_kws={"size": fontsize} if annot else {},
-            )
-            ax.set_xlabel("Predicted Labels")
-            ax.set_ylabel("Ground Truth Labels")
-            # OO API: the old plt.xticks/plt.tight_layout/plt.savefig acted on the
-            # *current* figure and worked here only because it happened to be this one.
-            plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize)
-            plt.setp(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
-            for t in ax.get_xticklabels() + ax.get_yticklabels():
-                t.set_color((colours or {}).get(t.get_text(), "black"))
-
-            fig.tight_layout()
-
-        CustomMatplotlib.saveFig(fig, save_dir=save_dir,
-                                 filename=f"{gtColumn}_confusion_matrix.png")
+        fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+        sns.heatmap(
+            cm, ax=ax, annot=annot, cmap="Blues",
+            xticklabels=ticks, yticklabels=ticks, cbar=True,
+            fmt=".2f" if annot else "",
+            annot_kws={"size": fontsize} if annot else {},
+        )
+        ax.set_xlabel("Predicted Labels")
+        ax.set_ylabel("Ground Truth Labels")
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right", fontsize=fontsize)
+        plt.setp(ax.get_yticklabels(), rotation=0, fontsize=fontsize)
+        fig.tight_layout()
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f"{gtColumn}_confusion_matrix.png"), dpi=300)
+        plt.close(fig)
         return fig
 
     @staticmethod
@@ -208,1022 +220,910 @@ class ClusteringConfig:
     distance_metric: str = "euclidean"
 
 
+PlotBackend = Literal["plotly", "matplotlib"]
+
+
 class EmbeddingAnalysis:
-
-    # Figures this class draws get their own seaborn context.  "notebook" is right
-    # for anything carrying one label per row plus a legend; the single-panel
-    # confusion matrix asks for "poster" itself.  Override per subclass
-    # (`plotContext = "talk"`) or per instance (`a.plotContext = "poster"`).
-    plotContext: str = "notebook"
-    fontScale: float = 1.0
-
-
-
-    def _plottingContext(self):
-        """seaborn context manager for figures this class draws."""
-        return sns.plotting_context(self.plotContext, font_scale=self.fontScale)
-
-    # ------------------------------------------------------------------ #
-    # ClusteringConfig aliases                                             #
-    # ------------------------------------------------------------------ #
-
-    def _configProperty(field: str) -> property:  # noqa: N805 - class-body helper
-        """Read/write alias onto ``self.clustering``.
-
-        These six names used to be *copies* of the ClusteringConfig fields, assigned
-        once at construction, so ``ea.leiden`` and ``ea.clustering.leiden`` could
-        silently drift apart.  As properties there is exactly one value.
-        """
-        return property(lambda self: getattr(self.clustering, field),
-                        lambda self, value: setattr(self.clustering, field, value))
-
-    dbscan                 = _configProperty("dbscan")
-    leiden                 = _configProperty("leiden")
-    leiden_resolution      = _configProperty("resolution")
-    leiden_n_iterations    = _configProperty("n_iterations")
-    leiden_n_neighbors     = _configProperty("n_neighbors")
-    leiden_distance_metric = _configProperty("distance_metric")
-    del _configProperty
+    # matplotlib for raster sinks (TensorBoard): plotly's static export needs a
+    # headless browser.
+    plot_backend: PlotBackend = "plotly"
+    # MoBIE Glasbey LUT. Class-level (read-only after construction) so callers
+    # without an instance can colour labels consistently: Analysis.color_space.
+    color_space = MoBie_coloring.GlasbeyARGBLut()
 
     # ------------------------------------------------------------------ #
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
-    def __init__(self, df_path: str | None = None, type: str = EMBED_DICT_EMBED,
-                 instancelabelColumn: str = MOBIE_LABEL_KEY, gtColumn: str | list[str] | None = None,
-                 classMapping: dict | None = None, label_order: list | None = None, save_dir: str | None = None,
-                 dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
+    def __init__(self, df_path: Optional[str] = None, type: str = EMBED_DICT_EMBED,
+                 instancelabelColumn: str = MOBIE_LABEL_KEY, gtclassColumn: str = None, classMapping: dict = None,
+                 save_dir: str = None, dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
                  leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15, leiden_distance_metric: str = "euclidean",
-                 metadDataFramePath: Optional[str] = None, classifier_method: str | None = "LogisticRegression",
-                 greyBackground: bool = False, data_df: pd.DataFrame | None = None,
-                 embeddings: np.ndarray | None = None, default_class_column: str = "Class",
-                 color_space: MoBie_coloring.GlasbeyARGBLut = MoBie_coloring.GlasbeyARGBLut,
-                 **kwargs
-                 ) -> None:
-        """Analyse a set of embeddings.
+                 metadDataFramePath: Optional[str] = None, classifier_method: str = "LogisticRegression",
+                 greyBackground: bool = False, plot_backend: PlotBackend = "plotly",
+                 data_df: Optional[pd.DataFrame] = None, embeddings: Optional[np.ndarray] = None,
+                 subplots_kwargs: Optional[dict] = None, plotly_kwargs: Optional[dict] = None, marker_size: float = 6,
+                 **kwargs) -> None:
+        """Load, validate and prepare the data. Runs no analysis.
 
-        Give exactly one source: *df_path* (a JSON table), *data_df* (an in-memory
-        table whose *type* column holds the vectors), or *embeddings* together with
-        *data_df* as metadata -- see :meth:`_resolveSource`.  The two classmethod
-        constructors are named shortcuts for the latter two forms; they are ordinary
-        calls to this constructor, not instances forged with ``__new__``.
-
-        *classifier_method* of ``None`` trains no classifier and colours plots by the
-        ground-truth column instead.
-
-        There is deliberately no ``**kwargs``: it only ever fed an
-        ``assert not kwargs``, which replaced Python's own precise TypeError for an
-        unexpected keyword with a weaker assertion that vanishes under ``python -O``.
+        Every constructor ends up here; call :meth:`analyse` afterwards to train
+        the classifier (or run DBSCAN without ground truth) and draw the
+        default figures.
         """
+        if kwargs:
+            raise TypeError(f"Unexpected keyword argument(s): {sorted(kwargs)}")
 
-        self.color_space = color_space()   # override on the class (before init) or per instance
-        # -- inputs --------------------------------------------------------
-        self.df_path: str | None = df_path
-        self.type: str | None = type
-        self.data_df, vectors = self._resolveSource(df_path, data_df, embeddings, type)
-        self.embeddings: np.ndarray = self._standardiseEmbeddings(vectors)
+        data_df = self._read_dataframe(df_path, data_df)
+        embeddings = self._validated_embeddings(data_df, type, embeddings)
+        if save_dir is None and df_path is not None:
+            save_dir = os.path.dirname(df_path)
 
-        # -- configuration -------------------------------------------------
-        self.instancelabelColumn = instancelabelColumn
-        self.classifier_method = classifier_method
-        self.greyBackground = greyBackground
-        self.classColumn = default_class_column
-        self.classMappedColumn = "Mapped"
-        self.subplots_kwargs = {"s": 6}
-        self.classification = Classification   # kept: part of the public surface
+
+
+        if metadDataFramePath is not None:
+            data_df = self._merge_metadata(data_df, metadDataFramePath, instancelabelColumn)
+        classMapping = classMapping or {}
+        if gtclassColumn is not None:
+            # Standardise label column(s) into a single integer column before getLabels runs.
+            data_df, gtclassColumn, classMapping = self._standardise_label_column(
+                data_df, gtclassColumn, classMapping
+            )
+
+        # Data
+        self.df_path = df_path
+        self.type = type
+        self.data_df = data_df
+        self.embeddings = StandardScaler().fit_transform(embeddings)
         self.metadDataFramePath = metadDataFramePath
+        self.save_dir = os.path.join(save_dir, "EmbeddingAnalysis") if save_dir is not None else None
+        if self.save_dir is not None:
+            os.makedirs(self.save_dir, exist_ok=True)
+
+        # Labels
+        self.gtclassColumn = gtclassColumn
+        self.instancelabelColumn = instancelabelColumn
+        self.classMapping = classMapping or {}
+        self.greyBackground = greyBackground
+
+        # Grouped config is the source of truth; the flat attributes below are
+        # kept for backwards compatibility (e.g. ``cluster()`` reads ``self.leiden``).
         self.clustering = ClusteringConfig(
             dbscan=dbscan, leiden=leiden, resolution=leiden_resolution,
             n_iterations=leiden_n_iterations, n_neighbors=leiden_n_neighbors,
             distance_metric=leiden_distance_metric,
         )
-        self.save_dir = self._prepareSaveDir(save_dir, df_path)
+        self.dbscan = self.clustering.dbscan
+        self.leiden = self.clustering.leiden
+        self.leiden_resolution = self.clustering.resolution
+        self.leiden_n_iterations = self.clustering.n_iterations
+        self.leiden_n_neighbors = self.clustering.n_neighbors
+        self.leiden_distance_metric = self.clustering.distance_metric
 
-        # -- table preparation ---------------------------------------------
-        if metadDataFramePath is not None:
-            self._mergeMetadata(metadDataFramePath)
-        self.data_df, self.gtColumn, self.classMapping = self._standardise_label_column(
-            self.data_df, gtColumn, classMapping or {}, label_order)
-        self.results_df = self.data_df[_scalarColumns(self.data_df)].copy()
+        # Classification & plotting
+        self.classifier_method = classifier_method
+        self.classification = Classification
+        self.classMappedColumn = "Mapped"
+        self.classColumn = "Class"
+        self.plot_backend = plot_backend
+        self.subplots_kwargs = subplots_kwargs if subplots_kwargs is not None else {"s": 6}
+        # Forwarded to fig.update_layout() of every plotly figure, overriding the defaults.
+        self.plotly_kwargs = plotly_kwargs if plotly_kwargs is not None else {}
+        self.marker_size = marker_size  # scatter point size; per call: specialScatter(markerSize=...)
+
+        self.results_df = self._scalar_columns(data_df)
         self.getLabels()
-        print(f"Embeddings shape: {self.embeddings.shape}")
 
-        # -- labels ---------------------------------------------------------
-        # classify() assigns predLabels itself.  The old code assigned its
-        # (labels, figure) tuple here, leaving predLabels a *tuple* for the whole
-        # lifetime of the object.
-        if self._has_gt and classifier_method is not None:
-            self.classify(mapping=classMapping)
-        else:
-            self.classifier = None
-            self.predLabels = (self.gtlabels if self._has_gt
-                               else np.zeros(len(self.data_df), dtype=int))
+    def analyse(self, **kwargs) -> np.ndarray:
+        """Default analysis, formerly run automatically at the end of ``__init__``.
+
+        Trains the classifier when ground truth is available (DBSCAN otherwise),
+        adds the ground-truth columns to ``results_df`` and, when a class mapping
+        exists, plots the Gromov-Wasserstein and KL class-distance heatmaps.
+        """
+        # TODO: DBSCAN
+        self.predLabels = self.classify(**kwargs) if self._has_gt else self._dbscan(self.embeddings, **kwargs)
 
         # Add ground truth column as mapping
-        self.results_df["Mapping_gtColumns"] = [self.classMapping.get(label, label) for label in self.gtlabels]
-        self.results_df["gtColumns"] = self.gtlabels
+        if self._has_gt:
+            self.results_df["Mapping_gtColumns"] = self._mapped_labels(self.gtlabels)
+            self.results_df["gtColumns"] = self.gtlabels
 
         print("We have the following columns in the results DataFrame:", self.results_df.columns.tolist())
 
         if self.classMapping and self._has_gt:
-            self._plotClassDiagnostics()
+            self.plot_gromov_wasserstein_heatmap()
+            self.plot_kl_divergence_heatmap()
+        return self.predLabels
 
-    # ------------------------------------------------------------------ #
-    # Construction steps                                                   #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _resolveSource(df_path, data_df, embeddings, type) -> tuple[pd.DataFrame, np.ndarray]:
-        """Resolve the three accepted input forms to ``(data_df, embeddings)``.
-
-        Exactly one form applies, checked in order of specificity:
-
-        * *embeddings* + *data_df* -- a pre-computed array with a metadata table;
-        * *data_df*                -- an in-memory table, vectors in its *type* column;
-        * *df_path*                -- the same table on disk as JSON.
-
-        Making the input form a parameter is what lets every entry point reach the
-        real ``__init__``; the alternate constructors previously had no way in and
-        forged instances with ``cls.__new__(cls)``.
-        """
-        if embeddings is not None:
-            if data_df is None:
-                raise ValueError("`embeddings` must be accompanied by `data_df` as metadata.")
-            return data_df.reset_index(drop=True).copy(), np.asarray(embeddings)
-        if data_df is not None:
-            return data_df.copy(), getArrayFromDF(data_df, type)
-        if not (isinstance(df_path, str) and df_path.endswith(".json")):
-            raise ValueError(
-                f"Dataframe path must be a path to a JSON file, got {df_path!r}. "
-                "Pass `data_df=` or `embeddings=` for the in-memory forms."
-            )
-        frame = pd.read_json(df_path)
-        print(f"Available coloumns: {frame.columns.tolist()}")
-        return frame, getArrayFromDF(frame, type)
-
-    @staticmethod
-    def _standardiseEmbeddings(vectors: np.ndarray) -> np.ndarray:
-        """Validate and z-score the embedding matrix.
-
-        These checks were ``assert``s, which are stripped under ``python -O`` -- the
-        wrong tool for validating what a caller handed in.
-        """
-        if np.isnan(vectors).any():
-            raise ValueError(f"Embeddings contain {int(np.isnan(vectors).sum())} NaN value(s).")
-        if len(np.unique(vectors)) <= 1:
-            raise ValueError(
-                f"Embeddings are uninformative: constant value {np.unique(vectors)}."
-            )
-        return StandardScaler().fit_transform(vectors)
-
-    @staticmethod
-    def _prepareSaveDir(save_dir: str | None, df_path: str | None) -> str | None:
-        """Resolve and create the output directory, defaulting beside *df_path*.
-
-        The old code created the *parent* and left ``self.save_dir`` itself
-        uncreated, which is why most writers re-ran makedirs defensively -- and why
-        ``plot_dendrogram``, which did not, failed on its first call.
-        """
-        if save_dir is None and df_path is None:
-            return None
-        base = save_dir if save_dir is not None else os.path.dirname(df_path)
-        resolved = os.path.join(base, "EmbeddingAnalysis")
-        os.makedirs(resolved, exist_ok=True)
-        return resolved
-
-    def _mergeMetadata(self, path: str) -> None:
-        """Left-join a metadata table onto ``data_df`` on the instance-label column."""
-        readers = {".csv": pd.read_csv, ".xlsx": pd.read_excel, ".json": pd.read_json}
-        suffix = pathlib.Path(path).suffix.lower()
-        if suffix not in readers or not os.path.exists(path):
-            raise ValueError(f"Metadata path must be an existing "
-                             f"{'/'.join(readers)} file, got {path!r}")
-        # .json was accepted by the old guard and then handed to read_excel.
-        meta = readers[suffix](path)
-        if self.instancelabelColumn not in meta.columns:
-            raise ValueError(f"Instance label column {self.instancelabelColumn!r} "
-                             f"not found in metadata DataFrame {path!r}.")
-        self.data_df = self.data_df.merge(meta, on=self.instancelabelColumn, how="left")
-        print(f"Metadata DataFrame loaded from: {path}")
-
-
-    @property
-    def classOrder(self) -> list:
-        """Class names in label order — ``classMapping`` key order, background (0) excluded.
-
-        ``_standardise_label_column`` assigns codes 1..N in label order, so the
-        sorted keys *are* that order.  This is the single definition of "class
-        order" for plots that group by name rather than by code.
-        """
-        return [self.classMapping[k] for k in sorted(self.classMapping) if k != 0]
 
     @classmethod
-    def from_dataframe(cls, data_df: pd.DataFrame, type: str = MASKED_FEATURES_KEY,
-                       instancelabelColumn: str = MOBIE_LABEL_KEY, gtColumn: str | list[str] | None = None,
-                       save_dir: str | None = None, classMapping: dict | None = None, label_order: list | None = None,
-                       dbscan: bool = False, leiden: bool = True, leiden_resolution: float = 1.0,
-                       leiden_n_iterations: int = 2, leiden_n_neighbors: int = 15,
-                       leiden_distance_metric: str = "euclidean", metadDataFramePath: str | None = None,
-                       classifier_method: str | None = "LogisticRegression",
-                       greyBackground: bool = False, **kwargs) -> "EmbeddingAnalysis":
-        """Construct from an in-memory table; vectors come from its *type* column.
-
-        An ordinary call to ``__init__`` -- this used to forge an instance with
-        ``cls.__new__(cls)`` and hand-seed its attributes, because ``__init__``
-        could only read from a JSON path.  It also trains a classifier when a
-        *gtColumn* is given, as ``__init__`` always has; the *binary* parameter was
-        accepted and silently unused before.
-        """
+    def from_dataframe(
+            cls,
+            data_df: pd.DataFrame,
+            type: str = MASKED_FEATURES_KEY,
+            instancelabelColumn: str = MOBIE_LABEL_KEY,
+            gtclassColumn: str = None,
+            save_dir: str = None,
+            classMapping: dict = None,
+            dbscan: bool = False,
+            leiden: bool = True,
+            leiden_resolution: float = 1.0,
+            leiden_n_iterations: int = 2,
+            leiden_n_neighbors: int = 15,
+            leiden_distance_metric: str = "euclidean",
+            metadDataFramePath: str = None,
+            *args,
+            **kwargs
+    ) -> "EmbeddingAnalysis":
         instance = cls(
-            data_df=data_df, type=type, instancelabelColumn=instancelabelColumn,
-            gtColumn=gtColumn, save_dir=save_dir, classMapping=classMapping,
-            label_order=label_order,  dbscan=dbscan, leiden=leiden,
+            data_df=data_df,
+            type=type,
+            instancelabelColumn=instancelabelColumn,
+            gtclassColumn=gtclassColumn,
+            save_dir=save_dir,
+            classMapping=classMapping,
+            dbscan=dbscan,
+            leiden=leiden,
             leiden_resolution=leiden_resolution,
             leiden_n_iterations=leiden_n_iterations,
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
             metadDataFramePath=metadDataFramePath,
-            classifier_method=classifier_method, greyBackground=greyBackground,
+            *args,
             **kwargs
         )
-        instance.subplots_kwargs = {"s": 1}   # read at plot time; not an init concern
+        instance.classColumn = "cluster"
+        instance.subplots_kwargs = {"s": 1}
         return instance
 
     @classmethod
     def fromEmbeddingArrayAndMetaDataFrame(
-        cls,
-        embeddings: np.ndarray,
-        meta_df: "pd.DataFrame",
-        save_dir: str | None = None,
-        gtColumn: str | list[str] | None = None,
-        instancelabelColumn: str = LABEL_KEY,
-        label_order: list | None = None,
-        leiden: bool = False,
-        leiden_resolution: float = 1.0,
-        leiden_n_iterations: int = 2,
-        leiden_n_neighbors: int = 15,
-        leiden_distance_metric: str = "euclidean",
+            cls,
+            embeddings: np.ndarray,
+            meta_df: "pd.DataFrame",
+            save_dir: str = None,
+            gtclassColumn: str = None,
+            instancelabelColumn: str = LABEL_KEY,
+            leiden: bool = False,
+            leiden_resolution: float = 1.0,
+            leiden_n_iterations: int = 2,
+            leiden_n_neighbors: int = 15,
+            leiden_distance_metric: str = "euclidean",
     ) -> "EmbeddingAnalysis":
         """Construct directly from a raw embedding array and a metadata DataFrame.
 
-        Unlike the other two forms the embeddings are supplied as a pre-computed
-        ``np.ndarray``.  No classifier is trained (``classifier_method=None``);
-        scatter plots are coloured by *gtColumn*, or uniformly when absent.
+        Unlike ``__init__`` and ``from_dataframe``, the embeddings are supplied
+        as a pre-computed ``np.ndarray``.  No classifier is trained; scatter
+        plots are coloured by *gtclassColumn* (or uniformly when absent).
         """
-        columns = [gtColumn] if isinstance(gtColumn, str) else (gtColumn or [])
-        present = bool(columns) and all(c in meta_df.columns for c in columns)
-        return cls(
-            embeddings=embeddings, data_df=meta_df, gtColumn=gtColumn,
-            instancelabelColumn=instancelabelColumn, label_order=label_order,
-            save_dir=save_dir, leiden=leiden, leiden_resolution=leiden_resolution,
+        instance = cls(
+            data_df=meta_df.reset_index(drop=True),
+            embeddings=embeddings,
+            type=None,
+            instancelabelColumn=instancelabelColumn,
+            gtclassColumn=gtclassColumn,
+            save_dir=save_dir,
+            dbscan=False,
+            leiden=leiden,
+            leiden_resolution=leiden_resolution,
             leiden_n_iterations=leiden_n_iterations,
             leiden_n_neighbors=leiden_n_neighbors,
             leiden_distance_metric=leiden_distance_metric,
-            classifier_method=None,
-            default_class_column="_".join(columns) if present else "Class",
         )
+        # Colour by ground-truth label (the combined column for a list of GT columns)
+        if instance._has_gt:
+            instance.classColumn = instance.gtclassColumn
+        # Skip classifier training
+        instance.predLabels = instance.gtlabels
+        return instance
+
+    # ------------------------------------------------------------------ #
+    # Data preparation helpers (pure: inputs in, value out)               #
+    # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _standardise_label_column(
-        data_df: pd.DataFrame,
-        gtColumn: str | list[str] | None,
-        classMapping: dict,
-        label_order: list | None = None,
-    ) -> tuple["pd.DataFrame", str | None, dict]:
-        """Convert *gtColumn* into a single integer label column in *data_df*.
+    def _read_dataframe(df_path: Optional[str], data_df: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """A private copy of *data_df*, or the JSON file at *df_path* when no frame is given."""
+        if data_df is not None:
+            return data_df.copy()
+        if not (isinstance(df_path, str) and df_path.endswith(".json")):
+            raise ValueError("Either data_df or df_path (a path to a JSON file) must be given.")
+        return pd.read_json(df_path)
 
-        *gtColumn* may be a list of condition columns -- collapsed into one combined
-        column, one-hot when every column is binary and joined value-wise otherwise
-        -- or a single column name, in which case only the string->integer mapping
-        applies.  ``None`` passes straight through, so callers need no guard.
-        Returns ``(data_df, new_gtColumn_name, updated_classMapping)``.
+    @classmethod
+    def _validated_embeddings(cls, data_df: pd.DataFrame, type, embeddings) -> np.ndarray:
+        """Embeddings as an array (read from column *type* when not given), checked for use."""
+        embeddings = np.asarray(getArrayFromDF(data_df, type) if embeddings is None else embeddings)
+        if len(embeddings) != len(data_df):
+            raise ValueError(
+                f"embeddings has {len(embeddings)} rows but data_df has {len(data_df)}")
+        cls._check_no_nans(embeddings)
+        if embeddings.size == 0 or np.all(embeddings == embeddings.flat[0]):
+            raise ValueError(
+                f"The embeddings are uninformative with the constant value of {np.unique(embeddings)}")
+        return embeddings
 
-        *label_order* pins the order in which label values are assigned integer
-        codes — and therefore legend order, dendrogram leaves and colours, which
-        are all functions of the code.  Values absent from the data are skipped
-        and values absent from *label_order* are appended after it, so a superset
-        or a partial list are both safe.  It overrides the column order implied by
-        a list *gtColumn*; an explicit *classMapping* overrides both.
-        """
-        if gtColumn is None:
-            return data_df, None, classMapping
+    @staticmethod
+    def _merge_metadata(data_df: pd.DataFrame, path: Optional[str], instancelabelColumn: str) -> pd.DataFrame:
+        """Left-join the metadata table at *path* on *instancelabelColumn*; no-op without one."""
+        reader = _TABLE_READERS.get(pathlib.Path(path).suffix) if path else None
+        if reader is None or not os.path.exists(path):
+            return data_df
+        meta_df = reader(path)
+        if instancelabelColumn not in meta_df.columns:
+            raise ValueError(
+                f"Instance label column '{instancelabelColumn}' not found in metadata DataFrame.")
+        print(f"Metadata DataFrame loaded from: {path}")
+        return data_df.merge(meta_df, on=instancelabelColumn, how="left")
 
-        frame = data_df
-        columnOrder: list | None = None   # the order implied by a list gtColumn
+    @staticmethod
+    def _scalar_columns(data_df: pd.DataFrame) -> pd.DataFrame:
+        """Copy of the columns holding scalars (drops list/array/dict-valued columns)."""
+        def _is_scalar_column(series: pd.Series) -> bool:
+            kind = series.dtype.kind
+            if kind in "fiu":  # numeric dtypes cannot hold containers
+                return True
+            return kind in "USO" and not series.map(
+                lambda x: isinstance(x, (list, dict, np.ndarray))).any()
 
-        if isinstance(gtColumn, list):
-            columnOrder = list(gtColumn)  # preserve caller-specified order
-            combined = "_".join(gtColumn)
-            subset = frame[gtColumn]
-            frame = frame.copy()
-            if all(_isBinaryColumn(subset[c]) for c in gtColumn):
-                frame[combined] = subset.apply(_oneHotLabel, axis=1, columns=gtColumn)
-            else:
-                frame[combined] = (subset.apply(lambda col: col.map(_formatLabelValue))
-                                         .agg("_".join, axis=1))
-            gtColumn = combined
+        return data_df[[c for c, s in data_df.items() if _is_scalar_column(s)]].copy()
 
-        if gtColumn in frame.columns:
-            values = getArrayFromDF(frame, gtColumn)
-            if values.dtype.kind in ("U", "S", "O"):
-                seen = [v for v in pd.unique(values) if not pd.isna(v)]
-                if classMapping:
-                    toInt = {v: k for k, v in classMapping.items()}
-                else:
-                    order = label_order if label_order is not None else columnOrder
-                    if order is None:
-                        ordered = seen   # no order given: first-appearance in the data
-                    else:
-                        # caller-supplied order; append any unseen values after it
-                        ordered = [v for v in order if v in seen]
-                        ordered += [v for v in seen if v not in ordered]
-                    toInt = {v: i + 1 for i, v in enumerate(ordered)}
-                    classMapping = {i: v for v, i in toInt.items()}
-                if frame is data_df:
-                    frame = frame.copy()
-                frame[gtColumn] = np.array(
-                    [toInt.get(v, np.nan) for v in values], dtype=float)
+    @staticmethod
+    def _check_no_nans(array: np.ndarray) -> None:
+        n_nans = int(np.isnan(array).sum())
+        if n_nans:
+            raise ValueError(f"Found {n_nans} NaN(s) in the array")
 
-        return frame, gtColumn, classMapping
-
-    # ------------------------------------------------------------------ #
-    # Properties                                                           #
-    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _standardise_label_column(data_df, gtclassColumn, classMapping) -> tuple["pd.DataFrame", str, dict]:
+        """(docstring unchanged)"""
+        return _LabelColumn(gtclassColumn).standardise(data_df, classMapping)
 
     @property
     def _has_gt(self) -> bool:
-        return self.gtColumn is not None and self.gtColumn in self.data_df.columns
+        return self.gtclassColumn is not None and self.gtclassColumn in self.data_df.columns
+
+    def _class_name(self, label) -> str:
+        return str(self.classMapping.get(int(label), int(label)))
+
+    def _mapped_labels(self, labels) -> list:
+        return [self.classMapping.get(label, label) for label in labels]
 
     # ------------------------------------------------------------------ #
     # Label initialisation                                                 #
     # ------------------------------------------------------------------ #
 
     def getLabels(self) -> None:
-        """Derive training labels from the (already-standardised) gtColumn.
+        """Derive training labels from the (already-standardised) gtclassColumn.
 
         Label *derivation* — list→combined-column joining, one-hot detection,
         and string→int mapping — is performed once upstream in
-        :meth:`_standardise_label_column`, called from ``__init__``.
-        By the time this runs ``self.gtColumn`` is always a single column name
+        :meth:`_standardise_label_column` (called from ``_init_common``).
+        By the time this runs ``self.gtclassColumn`` is always a single column name
         whose values are numeric, so this method only handles the remaining
         bookkeeping: the zero-offset shift, instance labels, and the
         NaN/train-mask split used to fit the classifier.
         """
-        n = len(self.data_df)
 
+        n = len(self.data_df)
         self.gtlabels: np.ndarray = (
-            getArrayFromDF(self.data_df, self.gtColumn)
+            getArrayFromDF(self.data_df, self.gtclassColumn)
             if self._has_gt
             else np.zeros(n, dtype=int)
         )
 
-        if not self.greyBackground:
-            valid_mask = ~pd.isna(self.gtlabels)
-            if 0 in self.gtlabels[valid_mask]:
-                self.gtlabels = np.where(
-                    valid_mask, self.gtlabels + 1, self.gtlabels)
 
-        self.instancelabels: np.ndarray = getArrayFromDF(
-            self.data_df, self.instancelabelColumn)
-        nan_mask = ~pd.isna(self.gtlabels)
-        if nan_mask.sum() < n:
+        self.instancelabels: np.ndarray = getArrayFromDF(self.data_df, self.instancelabelColumn) if (self.instancelabelColumn is not None and self.instancelabelColumn in self.data_df.columns) else np.zeros(n, dtype=int)
+
+        valid = ~pd.isna(self.gtlabels)
+        n_valid = int(valid.sum())
+        if n_valid < n:
             warnings.warn(
-                f"Labels contain {n - nan_mask.sum()} inactive/NaN value(s). "
-                f"Training on {nan_mask.sum()} of {n} samples.",
-                UserWarning, stacklevel=2,
+                f"Labels contain {n - n_valid} inactive/NaN value(s). "
+                f"Training on {n_valid} of {len(self.embeddings)} samples."
             )
-            # Turn nan values to 0 but filter for training classifier
-            self.gtlabels[~nan_mask] = 0
-            self.traingt = self.gtlabels[nan_mask].astype(int)
-            self.trainEmbeddings = self.embeddings[nan_mask]
+            self.traingt = self.gtlabels[valid].astype(int)
+            self.trainEmbeddings = self.embeddings[valid]
         else:
-            self.traingt = self.gtlabels.astype(int) if np.issubdtype(
-                self.gtlabels.dtype, np.floating) else self.gtlabels
+            self.traingt = (self.gtlabels.astype(int)
+                            if np.issubdtype(self.gtlabels.dtype, np.floating)
+                            else self.gtlabels)
             self.trainEmbeddings = self.embeddings
-
-        # Write the labels back unconditionally.  The old code did this only inside
-        # the zero-shift branch above, so data_df and gtlabels could disagree about
-        # which integer codes the NaN rows carry.
-        if self._has_gt:
-            self.data_df[self.gtColumn] = self.gtlabels
-
     # ------------------------------------------------------------------ #
     # Classification                                                       #
     # ------------------------------------------------------------------ #
 
-    def classify(self, train_size: float = 0.6,
-                 mapping: dict = None, classifier_weights=None) -> tuple[np.ndarray, Figure | None]:
-
-        """Fit a classifier (or reuse ``classifier_weights``) on the labelled embeddings,
-        write predictions, mapped names and class probabilities to ``results_df`` and
-        return ``(predLabels, confusionFigure)``.  The held-out split used for the
-        confusion matrix is kept as ``self._X_val`` / ``self._y_val``.
-        """
-        mapping = {**self.classMapping, **(mapping or {})}
+    def classify(self, train_size: float = 0.6, mapping: dict = None, classifier_weights=None) -> np.ndarray:
         if classifier_weights is None:
-            split = lambda strat: train_test_split(self.trainEmbeddings, self.traingt,
-                                                   train_size=train_size, stratify=strat, random_state=42)
-            try:
-                X_train, self._X_val, y_train, self._y_val = split(self.traingt)
-            except ValueError:  # a class too rare to stratify (e.g. sanity-check batches)
-                X_train, self._X_val, y_train, self._y_val = split(None)
-
-            self.classifier = Classification.train_classifier(X_train, y_train, method=self.classifier_method)
+            X_train, X_val, y_train, y_val = train_test_split(
+                self.trainEmbeddings, self.traingt, train_size=train_size,
+                stratify=self.traingt, random_state=42
+            )
+            print(f"Classes — train: {np.unique(y_train)}, val: {np.unique(y_val)}")
+            print(f"Samples — train: {len(X_train)}, val: {len(X_val)}")
+            self.classifier = self.classification.train_classifier(
+                X_train, y_train, method=self.classifier_method
+            )
         else:
-            self.classifier, self._X_val, self._y_val = classifier_weights, self.trainEmbeddings, self.traingt
+            self.classifier = classifier_weights
+            X_val, y_val = self.trainEmbeddings, self.traingt
 
-        self.train_accuracy = Classification.getAccuracy(self._X_val, self._y_val, self.classifier)
-        print(f"Samples — train: {len(self.traingt) - len(self._y_val)}, val: {len(self._y_val)} | "
-              f"validation accuracy: {self.train_accuracy:.4f}")
-
+        self.train_accuracy = self.classification.getAccuracy(X_val, y_val, self.classifier)
+        print(f"Validation accuracy: {self.train_accuracy:.4f}")
         self.predLabels = self.classifier.predict(self.embeddings)
+
+        self.results_df[self.classifier_method] = self.predLabels
         self.classColumn = self.classifier_method
-        self.results_df[self.classColumn] = self.predLabels
-        self.results_df[self.classMappedColumn] = [mapping.get(l, l) for l in self.predLabels]
-        self.results_df[[f"proba_{c}" for c in self.classifier.classes_]] = self.classifier.predict_proba(self.embeddings)
 
-        self.confusionFigure = Classification.createConfusionMatrixFigure(
-            x=self._X_val, gt=self._y_val, classifier=self.classifier, save_dir=self.save_dir,
-            mapping=mapping, gtColumn=self.gtColumn,
-            colours=self.computePLTColours(self.results_df[[self.gtColumn]].copy(), self.gtColumn, mapping=mapping))
-        return self.predLabels, self.confusionFigure
+        proba = self.classifier.predict_proba(self.embeddings)
+        self.results_df = self.results_df.assign(
+            **{f"proba_{cls}": p for cls, p in zip(self.classifier.classes_, proba.T)}
+        )
 
-    # ------------------------------------------------------------------ #
-    # Clustering                                                           #
-    # ------------------------------------------------------------------ #
+        if self.classMapping is not None:
+            self.results_df[self.classMappedColumn] = np.array(self._mapped_labels(self.predLabels))
+        else:
+            self.classMappedColumn = self.classifier_method
 
-    def _rescaled(self, embeddings: np.ndarray) -> np.ndarray:
-        """Z-score *embeddings*, unless they are the already-standardised ones.
+        self.classification.createConfusionMatrixFigure(
+            x=X_val, gt=y_val, classifier=self.classifier,
+            save_dir=self.save_dir, mapping=mapping or self.classMapping, gtColumn=self.gtclassColumn
+        )
+        return self.predLabels
 
-        ``self.embeddings`` is standardised once in ``__init__``; re-fitting a
-        StandardScaler on it is a no-op that costs a full pass over the matrix.
-        """
-        return embeddings if embeddings is self.embeddings else \
-            StandardScaler().fit_transform(embeddings)
-
-    def performDBSCAN(self, embeddings, shape, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
-        clustering: DBSCAN = DBSCAN(
-            eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)
-        ).fit(self._rescaled(embeddings))
+    def _dbscan(self, embeddings: np.ndarray, DBSCAN_eps=0.5, DBSCAN_min_samples=10) -> np.ndarray:
+        embeddings = StandardScaler().fit_transform(embeddings)
+        clustering = DBSCAN(eps=DBSCAN_eps, min_samples=int(DBSCAN_min_samples)).fit(embeddings)
         self.classColumn = "DBSCAN_cluster"
-        labels = clustering.labels_.reshape(*shape).astype(int) + 1
-        self.predLabels = labels.reshape(-1)
-        return labels
+        self.predLabels = clustering.labels_.astype(int) + 1
+        self.results_df[self.classColumn] = self.predLabels
+        return self.predLabels
 
-    def performLeiden(
-        self,
-        embeddings: np.ndarray,
-        shape: tuple,
-        resolution: float = 1.0,
-        n_iterations: int = 2,
-        n_neighbors: int = 15,
-        distance_metric: str = "euclidean",
+    def tune_clustering(
+            self,
+            space: dict,
+            clusterer_fn,
+            max_evals: int = 100,
+    ) -> dict:
+        """Tune any clustering algorithm on ``self.embeddings`` using
+        Tree-structured Parzen Estimator (hyperopt).
+
+        Parameters
+        ----------
+        space:
+            Hyperopt search space dict mapping parameter names to hyperopt
+            distributions, e.g.::
+
+                from hyperopt import hp
+                from hyperopt.pyll import scope
+                space = {
+                    "eps":       hp.uniform("eps", 0.05, 10.0),
+                    "minpoints": scope.int(hp.quniform("minpoints", 3, 125, q=1)),
+                }
+
+        clusterer_fn:
+            Callable ``(params: dict, embeddings: np.ndarray) -> np.ndarray``
+            that receives the sampled parameter dict and the embedding matrix
+            and returns integer cluster labels of shape ``(N,)``, or a string
+            naming a method on this instance (e.g. ``"performDBSCAN"`` or
+            ``"performLeiden"``).  The named method must have the same
+            ``(params, embeddings)`` signature.
+
+        max_evals:
+            Number of hyperopt iterations.
+
+        Returns
+        -------
+        dict
+            Best parameter dict found (same keys as *space*).
+        """
+        from hyperopt import fmin, tpe
+        from scipy.optimize import linear_sum_assignment
+        from sklearn.metrics.cluster import contingency_matrix
+
+        def _mean_iou(gt, pred):
+            cm = contingency_matrix(gt, pred).astype(float)
+            union = cm.sum(axis=1, keepdims=True) + cm.sum(axis=0, keepdims=True) - cm
+            iou_matrix = np.where(union > 0, cm / union, 0.0)
+            row_idx, col_idx = linear_sum_assignment(-iou_matrix)
+            return iou_matrix[row_idx, col_idx].mean()
+
+        embeddings = self.embeddings
+        if isinstance(clusterer_fn, str):
+            method = getattr(self, clusterer_fn)
+            shape = (len(embeddings),)
+            run = lambda params: method(embeddings, shape, **params)  # noqa: E731
+        else:
+            run = lambda params: clusterer_fn(params, embeddings)  # noqa: E731
+
+        return fmin(
+            fn=lambda params: -_mean_iou(self.gtlabels, run(params)),
+            space=space,
+            algo=tpe.suggest,
+            max_evals=max_evals,
+        )
+
+    def _leiden(
+            self,
+            embeddings: np.ndarray,
+            shape: tuple,
+            resolution: float = 1.0,
+            n_iterations: int = 2,
+            n_neighbors: int = 15,
+            distance_metric: str = "euclidean",
     ) -> np.ndarray:
         import anndata as ad
         import scanpy
 
-        embedding = ad.AnnData(X=self._rescaled(embeddings))
+        adata = ad.AnnData(X=StandardScaler().fit_transform(embeddings))
         scanpy.pp.neighbors(
-            embedding, n_neighbors=n_neighbors, n_pcs=None,
-            # type: ignore[arg-type]
-            metric=distance_metric, random_state=111, use_rep="X"
+            adata, n_neighbors=n_neighbors, n_pcs=None,
+            metric=distance_metric, random_state=111, use_rep="X",  # type: ignore[arg-type]
         )
         scanpy.tl.leiden(
-            embedding, resolution=resolution, random_state=111, n_iterations=n_iterations,
+            adata, resolution=resolution, random_state=111, n_iterations=n_iterations,
         )
-        # factorize reproduces the old per-cluster masking loop exactly -- same
-        # first-appearance ordering -- in one vectorised pass.
-        codes, _ = pd.factorize(embedding.obs["leiden"])
-        labels = codes.astype(int).reshape(*shape) + 1
-
-        # Was missing, while performDBSCAN set its own: Leiden labels therefore
-        # landed in whatever classColumn happened to be, overwriting the
-        # classifier's prediction column whenever cluster() followed classify().
-        self.classColumn = "Leiden_cluster"
-        self.predLabels = labels.reshape(-1)
+        # Relabel clusters 1..k in order of first appearance.
+        codes, _ = pd.factorize(adata.obs["leiden"])
+        labels = codes.reshape(shape) + 1
+        self.predLabels = labels.flatten()
         return labels
 
     def cluster(self, embeddings=None, **kwargs):
-        """Cluster the embeddings; labels land in a column named for the backend."""
-        backend = self.performLeiden if self.leiden else self.performDBSCAN
-        labels = backend(
-            embeddings=self.embeddings if embeddings is None else embeddings,
-            shape=self.embeddings.shape[:-1], **kwargs,
-        )
-        self.results_df[self.classColumn] = labels.reshape(-1)
+        if embeddings is None:
+            embeddings = self.embeddings
+        if self.leiden:
+            labels = self._leiden(embeddings=embeddings, shape=embeddings.shape[:-1], **kwargs)
+        else:
+            labels = self._dbscan(embeddings=embeddings, **kwargs)
+
+        self.results_df[self.classColumn] = labels
         return labels
 
     # ------------------------------------------------------------------ #
     # Dimensionality reduction                                             #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _componentFrame(array: np.ndarray, prefix: str, index) -> pd.DataFrame:
-        """Frame of ``"<prefix> x/y/z"`` columns for however many components exist.
-
-        The old code indexed columns 0..2 unconditionally, so a narrow embedding
-        (fewer than three components) raised IndexError.
-        """
-        axes = ["x", "y", "z"][:array.shape[1]]
-        return pd.DataFrame(
-            {f"{prefix} {axis}": array[:, i] for i, axis in enumerate(axes)},
-            index=index,
-        )
-
     def pca(self) -> np.ndarray:
+        self._check_no_nans(self.embeddings)
         pca_model = PCA()
-        if np.isnan(self.embeddings).any():
-            raise ValueError(
-                f"Embeddings contain {int(np.isnan(self.embeddings).sum())} NaN value(s).")
         pcs = pca_model.fit_transform(self.embeddings)
-        if np.isnan(pcs).any():
-            raise ValueError(
-                f"PCA produced {int(np.isnan(pcs).sum())} NaN value(s).")
-        print(
-            f"Explained variance      : {pca_model.explained_variance_ratio_[:5].round(3)}")
-        print(
-            f"Cumulative (first 3)    : {pca_model.explained_variance_ratio_[:3].sum():.3f}")
-        pca_df = self._componentFrame(pcs, "PCA", self.data_df.index)
+        self._check_no_nans(pcs)
 
-        # Keep the fitted model and the loadings; plotPCALoadings reads them.
-        self.pca_model = pca_model
-        self.loadings = pd.DataFrame(
-            pca_model.components_.T * np.sqrt(pca_model.explained_variance_),
-            columns=[f"PC{i+1}" for i in range(pca_model.n_components_)],
-            index=np.arange(self.embeddings.shape[1]),
-        )
-        print("PCA loadings:")
-        print(self.loadings)
-
-        self.explained_variance_ratio = pca_model.explained_variance_ratio_[:3].sum()
-
-        self.concatDF(pca_df)
+        ratio = pca_model.explained_variance_ratio_
+        print(f"Explained variance      : {ratio[:5].round(3)}")
+        print(f"Cumulative (first 3)    : {ratio[:3].sum():.3f}")
+        self.PCA_Variance_Ratio = ratio[:3].sum()
+        self.concatDF(pd.DataFrame(
+            pcs[:, :3], columns=["PCA x", "PCA y", "PCA z"], index=self.data_df.index,
+        ))
         return pcs
 
-    def UMAP(self, n_neighbors=15, min_dist=0.1, n_components=3,
-             random_state=42, metric="euclidean", **kwargs) -> pd.DataFrame:
+    def _umap(self, n_neighbors=15, min_dist=0.1, n_components=3, random_state=42, metric="euclidean", **kwargs) -> pd.DataFrame:
         import umap
 
-        reducer = umap.UMAP(
+        umap_array = umap.UMAP(
             n_neighbors=n_neighbors, min_dist=min_dist, n_components=n_components,
             random_state=random_state, metric=metric, n_jobs=10, **kwargs,
-        ).fit(self.embeddings)
-        # Honours n_components: the old code always built a "UMAP z" column and
-        # raised IndexError when fewer than three were requested.
-        return self._componentFrame(
-            reducer.transform(self.embeddings), "UMAP", self.data_df.index)
+        ).fit_transform(self.embeddings)
+        return pd.DataFrame(
+            umap_array[:, :3], columns=["UMAP x", "UMAP y", "UMAP z"], index=self.data_df.index,
+        )
 
-    def UMAPResults(self, classColoumn: str | None = None,
-                    marker_size: int = 4, background_color: str = "rgba(0,0,0,0)",
-                    umap_kwargs: dict | None = None,
-                    **kwargs):
+    def visualiseUMAP(self, classColoumn: str | None = None, umap_kwargs: dict | None = None,
+                      legend_title="Instance", **kwargs):
         col = classColoumn if classColoumn is not None else self.classColumn
         # umap_kwargs flow to UMAP() (e.g. n_neighbors); remaining kwargs to the
         # scatter plot. UMAP requires n_neighbors < n_samples, so small feature
         # spaces (e.g. one point per pooled sample) must pass a capped value.
-        self.concatDF(self.UMAP(**(umap_kwargs or {})))
+        self.concatDF(self._umap(**(umap_kwargs or {})))
         return EmbeddingAnalysis.specialScatter(
             self,
             xColumn="UMAP x", yColumn="UMAP y",
             xaxis_title="UMAP Dimension 1", yaxis_title="UMAP Dimension 2",
             classColoumn=col,
-            legend_title="UMAP - {}".format(
-                self.gtColumn if self._has_gt else self.classColumn),
-            save_dir=self.save_dir, **kwargs
+            legend_title=f"{legend_title} - {self.gtclassColumn if self._has_gt else self.classColumn}",
+            save_dir=self.save_dir, **{"equal_aspect": False, **kwargs}
+        )
+
+    def visualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = True, **kwargs):
+        col = classColoumn if classColoumn is not None else self.classColumn
+        # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
+        # columns are never temporarily zeroed by subclass overrides, allowing
+        # every sample to be coloured by its predicted class.
+        if "PCA x" not in self.results_df.columns.to_list():
+            self.pca()
+
+        return EmbeddingAnalysis.specialScatter(
+            self,
+            xColumn="PCA x", yColumn="PCA y",
+            xaxis_title="PC 1", yaxis_title="PC 2",
+            classColoumn=col,
+            legend_title=f"PC - {self.gtclassColumn if self._has_gt else col}",
+            save_dir=self.save_dir,
+            precomputed_colors=precomputed_colors,
+            **{"equal_aspect": False, **kwargs}
         )
 
     # ------------------------------------------------------------------ #
     # Visualisation                                                        #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _returnFigure(fig: Figure, show: bool = False) -> Figure:
-        """Hand back a matplotlib figure without Jupyter drawing it twice.
-
-        pyplot keeps every figure built with plt.subplots in its registry, and
-        the inline backend flushes that registry at the end of a cell -- so a
-        figure that is returned *and* displayed renders twice.  Closing drops it
-        from the registry; the object still renders wherever it is displayed
-        explicitly, and savefig keeps working on it.  Matplotlib counterpart of
-        the `show` flag on specialScatter/plot_dendrogram.
-        """
-        if show:
-            from IPython.display import display
-            display(fig)
-        plt.close(fig)
-        return fig
-
-    def _saveFigure(self, fig: Figure, filename: str, save_dir: str = None) -> None:
-        """Write *fig* into *save_dir* (default ``self.save_dir``), creating it.
-
-        Delegates to ``CustomMatplotlib.saveFig`` so the whole package has one
-        makedirs-and-savefig; this replaced six near-identical blocks whose dpi and
-        bbox_inches had drifted apart.  ``close=False`` because ``_returnFigure``
-        owns closing.
-        """
-        CustomMatplotlib.saveFig(
-            fig, save_dir=save_dir if save_dir is not None else self.save_dir,
-            filename=filename, close=False,
-        )
-
-    @staticmethod
-    def _returnPlotlyFigure(fig, save_dir: str, filename: str, show: bool = False):
-        """Plotly counterpart of :meth:`_returnFigure`.
-
-        Saving and showing stay independent: training/validation logging routes
-        figures to TensorBoard/WandB and must never pop one open, so *show*
-        defaults to False everywhere.
-        """
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            out = os.path.join(save_dir, filename)
-            if filename.endswith(".html"):
-                fig.write_html(out)
-            else:
-                fig.write_image(out)
-            print(f"Saved to {out}")
-        if show:
-            fig.show()
-        return fig
-
-    def plot_distance_matrix(self, metric: str = "cosine", show: bool = False,
-                             max_samples: int = 2000) -> Figure:
+    def plot_distance_matrix(self, metric: str = "cosine") -> Figure:
         """Plot a pairwise distance matrix sorted by GT class label.
 
         Uses the labelled training embeddings (``trainEmbeddings`` /
         ``traingt``).  Each row is normalised to sum to 1 so relative
         distances are comparable across rows with different scales.
-
-        *max_samples* caps the N x N distance matrix, which was previously
-        unbounded -- at this project's ~70k objects that is tens of gigabytes.
-        The subsample is seeded, like the one in :meth:`_classSamples`.
         """
         from scipy.spatial.distance import cdist
 
-        rows = np.arange(len(self.traingt))
-        if len(rows) > max_samples:
-            rows = np.random.default_rng(42).choice(rows, max_samples, replace=False)
-        sort = rows[np.argsort(self.traingt[rows])]
+        sort = np.argsort(self.traingt)
         feats = self.trainEmbeddings[sort]
         labels = self.traingt[sort]
-        classes = np.unique(labels)
-        print(f"[plot_distance_matrix] {len(classes)} classes found in traingt: "
-              f"{[self.classMapping.get(int(c), int(c)) for c in classes]}")
+        # labels are sorted, so each class is one contiguous block
+        classes, starts, counts = np.unique(labels, return_index=True, return_counts=True)
+        tick_lbl = [self._class_name(c) for c in classes]
+        print(f"[plot_distance_matrix] {len(classes)} classes found in traingt: {tick_lbl}")
 
         D = cdist(feats, feats, metric=metric)  # type: ignore[call-overload]
-        D = D / (D.sum(axis=1, keepdims=True) + 1e-12)
+        D /= D.sum(axis=1, keepdims=True) + 1e-12
 
-        tick_pos, tick_lbl, boundaries = [], [], []
-        for i, cls in enumerate(classes):
-            positions = np.where(labels == cls)[0]
-            tick_pos.append(positions.mean())
-            tick_lbl.append(str(self.classMapping.get(int(cls), int(cls))))
-            if i < len(classes) - 1:
-                boundaries.append(positions[-1] + 0.5)
+        tick_pos = starts + (counts - 1) / 2
+        boundaries = (starts + counts)[:-1] - 0.5
 
-        # Built inside the context manager so the artists pick up its rc values.
-        with self._plottingContext():
-            fig, ax = plt.subplots(figsize=(10, 8))
-            ax.grid(False)
-            im = ax.imshow(D, aspect="auto", cmap="viridis", interpolation="nearest")
-            plt.colorbar(im, ax=ax, label=f"{metric} distance (row-normalised)")
+        fig, ax = plt.subplots(figsize=(10, 8))
+        ax.grid(False)
+        im = ax.imshow(D, aspect="auto", cmap="viridis", interpolation="nearest")
+        fig.colorbar(im, ax=ax, label=f"{metric} distance (row-normalised)")
 
-            for b in boundaries:
-                ax.axhline(b, color="white", lw=0.8, alpha=0.6)
-                ax.axvline(b, color="white", lw=0.8, alpha=0.6)
+        for b in boundaries:
+            ax.axhline(b, color="white", lw=0.8, alpha=0.6)
+            ax.axvline(b, color="white", lw=0.8, alpha=0.6)
 
-            ax.set_xticks(tick_pos)
-            ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
-            ax.set_yticks(tick_pos)
-            ax.set_yticklabels(tick_lbl, fontsize=8)
-            ax.set_xlabel("Class")
-            ax.set_ylabel("Class")
-            ax.set_title(
-                f"Pairwise {metric} distance matrix (row-normalised)\n"
-                f"({len(feats)} samples, sorted by GT label)"
-            )
-            plt.tight_layout()
+        ax.set_xticks(tick_pos)
+        ax.set_xticklabels(tick_lbl, rotation=45, ha="right", fontsize=8)
+        ax.set_yticks(tick_pos)
+        ax.set_yticklabels(tick_lbl, fontsize=8)
+        ax.set_xlabel("Class")
+        ax.set_ylabel("Class")
+        ax.set_title(
+            f"Pairwise {metric} distance matrix (row-normalised)\n"
+            f"({len(feats)} samples, sorted by GT label)"
+        )
+        fig.tight_layout()
 
-        self._saveFigure(fig, f"distance_matrix_{metric}.png")
-        return self._returnFigure(fig, show)
+        if self.save_dir is not None:
+            os.makedirs(self.save_dir, exist_ok=True)
+            fig.savefig(os.path.join(self.save_dir, f"distance_matrix_{metric}.png"), dpi=300)
 
-    def plotPCALoadings(self, n_components: int = 3, by: str = "feature", columnMapping: dict | list | None = None,
-                        features: slice | list | None = None, sort_by: str | None = "PC1",
-                        residual_label: str | None = None, figsize: tuple | None = None, save_dir: str | None = None,
-                        show: bool = False) -> Figure:
-        """Stacked fractional bar plot of the PCA loadings, in either direction.
-
-        The variancePartition ``plotPercentBars`` idiom: every bar spans 100 %.
-
-        ``by="feature"`` draws one bar per input feature, split into the fraction
-        of *that feature's* variance carried by PC1, PC2, ... with the remaining
-        components pooled into a ``residual_label`` segment.  Because
-        ``self.embeddings`` is standardised, the squared loadings of a feature
-        sum to its total variance, so each bar normalises exactly.
-
-        ``by="component"`` answers the opposite question -- how much each feature
-        contributes to the strongest directions of variance.  One bar per
-        component, split by feature (squared loadings normalised down the column,
-        the standard PCA contribution), with each bar labelled by the component's
-        explained-variance ratio.
-
-        Parameters
-        ----------
-        n_components
-            Number of components: segments per bar (``by="feature"``) or bars
-            (``by="component"``).
-        columnMapping
-            Feature labels, keyed by position in the embedding vector
-            (``{0: "area (Nuclei)", ...}``) or given as a plain list in feature
-            order.  Unmapped features fall back to ``"feature {i}"``.
-        features
-            Optional subset/slice of features, applied by position
-            (``slice(0, 5)`` mirrors ``varPart[1:5, ]``).  Under
-            ``by="component"`` the features left out are pooled into the residual
-            segment -- worth using for wide embeddings, which would otherwise
-            produce one legend entry per dimension.
-        sort_by
-            Component whose values order the features, descending; ``None`` keeps
-            feature order.  Under ``by="feature"`` that orders the bars, under
-            ``by="component"`` the segments within every bar (the bars themselves
-            stay in PC order).
-
-        Type size comes from the class (``plotContext`` / ``fontScale``), not from
-        the module-level "poster" context, which crowds one-label-per-feature bars.
-        """
-        axis, orient, xlabel = {  # KeyError doubles as validation of `by`
-            "feature": (1, lambda d: d, "Variance explained (%)"),  # a feature's variance over PCs
-            "component": (0, lambda d: d.T, "Contribution to component (%)"),  # a PC's variance over features
-        }[by]
-        if not hasattr(self, "loadings"):
-            self.pca()
-
-        sq = self.loadings.pow(2)  # features x PCs
-        share = sq.div(sq.sum(axis=axis), axis=1 - axis).iloc[slice(None) if features is None else features, :n_components]
-        share = share.sort_values(sort_by, ascending=False) if sort_by else share
-        names = pd.Series(columnMapping, dtype=object).rename(int)  # list -> positions, dict -> keys
-        share.index = [names.get(k, f"feature {k}") for k in share.index]
-        share.columns = [f"{pc} ({r:.1%})" for pc, r in
-                         zip(share.columns, self.pca_model.explained_variance_ratio_)]
-        share = orient(share)  # rows = bars, columns = segments
-        share[residual_label] = 1.0 - share.sum(axis=1)  # whatever the shown segments leave
-
-        with self._plottingContext():
-            fig, ax = plt.subplots(figsize=figsize or (10, 0.6 * len(share) + 2))
-            share.mul(100).plot.barh(stacked=True, color=sns.color_palette(n_colors=share.shape[1]),
-                                     width=0.7, ax=ax)
-            ax.invert_yaxis()  # first bar on top
-            ax.set(xlim=(0, 100), xlabel=xlabel, ylabel="")
-            ax.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False)
-            sns.despine(left=True)
-            fig.tight_layout()
-
-        self._saveFigure(fig, f"pca_loadings_bars_by_{by}.png", save_dir)
-
-        return self._returnFigure(fig, show)
-
-    def plotFeatureMeans(self, columnMapping: dict | list, groupBy: str, features: slice | list | None = None,
-                         figsize: tuple | None = None, save_dir: str | None = None, show: bool = False) -> Figure:
-        """Grouped bars of mean feature values, each feature scaled to its own maximum.
-
-        Means come from the *unscaled* vectors in ``data_df[self.type]``:
-        ``self.embeddings`` is standardised, so its per-feature means are 0.
-        Dividing each feature by its largest group mean puts the strongest group at
-        1.0 and reads the rest as a fraction of it, which is what lets features in
-        different units share one axis.
-
-        ``columnMapping`` labels features by position (``{0: "area (Nuclei)", ...}``)
-        or as a list in feature order.  ``groupBy`` resolves against ``results_df``
-        first, so cluster/prediction columns work, then ``data_df``; code-valued
-        label columns map back through ``self.classMapping`` (``_standardise_label_column``
-        stores them as floats).  ``sort_by="spread"``
-        puts the most discriminative features first, a group name sorts by that group.
-        """
-        frame = pd.DataFrame(getArrayFromDF(self.data_df, self.type), index=self.data_df.index)
-        frame = frame.iloc[:, features] if features is not None else frame
-
-        groups = (self.results_df if groupBy in self.results_df else self.data_df)[groupBy]
-        labelled = (groups.notna() & groups.ne(0)).to_numpy()   # unlabelled/background drop out
-        groups = groups[labelled].to_frame()
-        colours = self.computePLTColours(groups, groupBy)       # names groups in place, class order
-
-        means = (frame[labelled]
-                 .groupby(pd.Categorical(groups[groupBy], categories=list(colours)), observed=True)
-                 .mean().T)       # features x groups
-
-        means = means.div(means.max(axis=1), axis=0)  # each feature -> fraction of its largest class mean
-
-        labels = dict(enumerate(columnMapping)) if isinstance(columnMapping, list) else columnMapping
-        means.index = [str(labels.get(k, labels.get(str(k), f"feature {k}"))) for k in means.index]
-
-        with self._plottingContext():
-            fig, ax = plt.subplots(figsize=figsize or (10, .3 * means.size + 1.5))
-            sns.barplot(data=means.rename_axis("feature").reset_index().melt("feature", var_name=groupBy),
-                        x="value", y="feature", hue=groupBy, orient="y",
-                        palette=colours, hue_order=list(colours),errorbar=None, ax=ax)
-            ax.set(xlabel="Mean value (fraction of per-feature maximum)", ylabel="")
-            ax.legend(loc="center left", bbox_to_anchor=(1.02, .5), frameon=False, title=groupBy)
-            sns.despine(left=True)
-            fig.tight_layout()
-
-        self._saveFigure(fig, "feature_means.png", save_dir)
-        return self._returnFigure(fig, show)
+        return fig
 
     @staticmethod
-    def _uniqueLabels(labels: list, keys) -> list:
-        """Suffix duplicate labels with their key so bars/segments stay distinct."""
-        if len(set(labels)) == len(labels):
-            return list(labels)
-        return [f"{l} [{k}]" for l, k in zip(labels, keys)]
+    def _scatter_matplotlib(plot_df, xColumn, yColumn, classColoumn, palette, *,
+                            xaxis_title, yaxis_title, legend_title, show_axes,
+                            marker_size, opacity, equal_aspect=True) -> Figure:
+        """Matplotlib twin of :meth:`_scatter_plotly` (same arguments), drawn by
+        ``CustomMatplotlib.simpleScatter``."""
+        labels = plot_df[classColoumn].to_numpy()  # (N,) class names, or precomputed colours
+        precomputed = palette is None
+        if precomputed:
+            # Each colour maps to itself, otherwise seaborn treats the colours as
+            # category names and recolours them.
+            palette = {c: c for c in pd.unique(labels)}
 
-    def vizualisePCA(self, classColoumn: str | None = None, precomputed_colors: bool = False,
-                     axis_range: tuple | None = (-1, 1), show_axes: bool = True):
-        col = classColoumn if classColoumn is not None else self.classColumn
-        # Call EmbeddingAnalysis.specialScatter directly so that predicted-label
-        # columns are never temporarily zeroed by subclass overrides, allowing
-        # every sample to be coloured by its predicted class.
-        return EmbeddingAnalysis.specialScatter(
-            self,
-            xColumn="PCA x", yColumn="PCA y",
-            xaxis_title="PC 1", yaxis_title="PC 2",
-            classColoumn=col,
-            legend_title="PC - {}".format(self.gtColumn if self._has_gt else col),
-            save_dir=self.save_dir,
-            precomputed_colors=precomputed_colors,
-            axis_range=axis_range, show_axes=show_axes,
-            **self.subplots_kwargs
+        # showlegend=True takes simpleScatter's hue+palette path (its other path ignores
+        # `palette`); the legend is dropped again for precomputed colours.
+        fig, ax = CustomMatplotlib.simpleScatter(
+            {"x": plot_df[xColumn].to_numpy(), "y": plot_df[yColumn].to_numpy()},
+            labels,
+            palette=palette,
+            showlegend=True,
+            s=marker_size ** 2,  # s is an area
+            alpha=opacity,
+            linewidth=0,
         )
+        ax.set_xlabel(xaxis_title)
+        ax.set_ylabel(yaxis_title)
+        # axes span exactly the data; the figure size never changes. equal_aspect keeps
+        # 1 x unit == 1 y unit by shrinking the axes box inside the figure; otherwise
+        # the box fills the figure and x and y scale independently
+        ax.margins(0)
+        ax.set_xlim(plot_df[xColumn].min(), plot_df[xColumn].max())
+        ax.set_ylim(plot_df[yColumn].min(), plot_df[yColumn].max())
+        if equal_aspect:
+            ax.set_aspect("equal", adjustable="box")
 
-    def vizualiseCoord(self, points: dict, title="", labels=None, save_dir=None,
-                       colorColumn: str | None = None, **subplots_kwargs):
-        """Scatter ``points``; ``colorColumn`` (a ``results_df`` column, one row per point)
-        overrides ``labels`` as the per-point colour source."""
-        if colorColumn is not None:
-            labels = pd.factorize(self.results_df[colorColumn], sort=True)[0]
-        return CustomMatplotlib.simpleScatter(
-            points, labels, title=title, save_dir=save_dir, **subplots_kwargs,
-        )[0]
+        # same faint background grid as the plotly drawer, behind the points
+        ax.grid(show_axes, color="black", alpha=0.15)
+        ax.set_axisbelow(True)
 
-    def _classColours(self, plot_df, classColoumn, color_background, mapping, fmt) -> dict:
-        """Replace ``plot_df[classColoumn]`` in place with class names and return
-        ``{name: fmt(r, g, b, alpha)}`` in legend order (8-bit RGB from the Glasbey
-        LUT, alpha in [0, 1]).
-
-        Numeric columns are class codes (0 = unlabelled/background, looked up in
-        ``mapping`` then ``self.classMapping``); any other dtype is factorised into
-        codes 1..n with missing values as 0.  Codes <= 0 are grey, half-transparent
-        unless ``color_background``.
-        """
-        if classColoumn not in plot_df:
-            warnings.warn(f"{classColoumn} is not a column in DataFrame")
-            plot_df[classColoumn] = 0
-        col = plot_df[classColoumn]
-
-        if pd.api.types.is_numeric_dtype(col):
-            codes = col.fillna(0).to_numpy(dtype=int)
-            names = {**self.classMapping, **(mapping or {})}
-        else:
-            codes, cats = pd.factorize(col, sort=True)
-            codes += 1  # factorize marks missing as -1 -> shift so missing is 0
-            names = {0: "unlabelled", **dict(enumerate(cats, 1))}
-        if color_background:
-            names[0] = "background"
-
-        labels = {k: names.get(k, str(k)) for k in np.unique(codes)}
-        plot_df[classColoumn] = pd.Series(codes, index=plot_df.index).map(labels)
-
-        lut = self.color_space
-        return {name: fmt(*lut.rgba_tuple_by_index(k)[:3],
-                          1.0 if k > 0 or color_background else 0.5)
-                for k, name in labels.items()}
-
-    def computePlotlyColours(self, plot_df, classColoumn="color",
-                             color_background=False, mapping=None) -> dict:
-        """``{name: "rgba(r,g,b,a)"}`` for ``px.scatter(color_discrete_map=...)``;
-        pass ``list(result)`` as ``category_orders``."""
-        return self._classColours(plot_df, classColoumn, color_background, mapping,
-                                  lambda r, g, b, a: f"rgba({r},{g},{b},{a})")
-
-    def computePLTColours(self, plot_df, classColoumn="color",
-                          color_background=False, mapping=None) -> dict:
-        """``{name: (r, g, b, a)}`` floats in [0, 1], used as a seaborn ``palette``
-        or a matplotlib ``color``; pass ``list(result)`` as ``hue_order``."""
-        return self._classColours(plot_df, classColoumn, color_background, mapping,
-                                  lambda r, g, b, a: (r / 255, g / 255, b / 255, a))
-
-
-    def specialScatter(self, xColumn, yColumn, xaxis_title="UMAP Dimension 1",
-                       yaxis_title="UMAP Dimension 2", classColoumn: str = "color",
-                       mapping: dict = None, legend_title: str = "Classes",
+        if (legend := ax.get_legend()) is not None:
+            if precomputed:
+                legend.remove()
+            elif legend_title:
+                legend.set_title(legend_title)
+        return fig
+    def specialScatter(self, xColumn, yColumn, xaxis_title: Optional[str] = None,
+                       yaxis_title: Optional[str] = None, classColoumn: str = "color",
+                       mapping: Optional[dict] = None, legend_title: str = "Classes",
                        save_dir: Optional[str] = "./", precomputed_colors: bool = False,
-                       show_axes: bool = False, color_background: bool = False, withLegendTitle=True,
-                       show: bool = False, axis_range: tuple | None = None,
-                       **kwargs) -> plotly.graph_objs.Figure:
+                       heatmap: bool = False,
+                       show_axes: bool = True, color_background: bool = False,
+                       background_color: Optional[str] = None, showlegend=True,
+                       show: bool = False, mask_background: bool = True, **kwargs):
+        """Scatter coloured by *classColoumn*, drawn with ``self.plot_backend``.
+
+        - default: integer class labels -> named classes with a legend
+        - ``precomputed_colors``: the column already holds per-point colours
+        - ``heatmap``: float values are normalised over vmin..vmax (``vmin``/``vmax``
+          via kwargs, default: min..max of the non-background values) and shown
+          with a colour bar titled *classColoumn*, ticked in vmin..vmax. When GT
+          labels exist, background is GT label <= 0 / missing: always the background colour and
+          excluded from the colour mapping, its range and the colour bar; a value
+          of 0 is then an ordinary value. Without labels, value 0 is background.
+        - ``xaxis_title`` / ``yaxis_title``: default to *xColumn* / *yColumn*.
+        - ``show_axes`` (default True): draw axis lines, ticks and tick labels.
+        - ``showlegend``: show the legend (or, for ``heatmap``, the colour bar).
+        - ``mask_background``: heatmap only; False colours label-0 points too instead
+          of greying them (e.g. logit maps).
+        - ``plotly_kwargs`` (via kwargs, plotly only): per-call ``update_layout``
+          overrides, e.g. ``xaxis_tickfont_size=18`` or ``xaxis_tickvals``/``xaxis_ticktext``.
+        - ``equal_aspect`` (via kwargs, default True): 1 data unit on x == 1 on y, the
+          plot box shrinking inside the fixed-size figure; False fills the figure and
+          scales x and y independently (PCA / UMAP).
+        - ``zColumn`` (via kwargs, plotly only): draw a 3-D scatter with *zColumn* as z;
+          ``zaxis_title`` (via kwargs) names that axis (default: *zColumn*).
+        - ``background_color``: colour of label 0 / NaN points, any colour the backend
+          accepts (``"black"``, ``"#ff000080"``, ``"rgba(...)"``). Default: grey,
+          half-transparent unless ``color_background``.
+        Background and NaN always take the background colour and are never part of a colour scale.
+        """
+        df, col, lut = self.results_df.copy(), classColoumn, self.color_space
+        is_mpl = self.plot_backend == "matplotlib"
+        xaxis_title = xColumn if xaxis_title is None else xaxis_title
+        yaxis_title = yColumn if yaxis_title is None else yaxis_title
+        zColumn = kwargs.get("zColumn")
+        if zColumn is not None and is_mpl:
+            raise ValueError("3-D specialScatter (zColumn) needs plot_backend='plotly'.")
+        # Only the plotly drawer takes a z axis; the 2-D call is unchanged.
+        z_kw = {} if zColumn is None else {
+            "zColumn": zColumn, "zaxis_title": kwargs.get("zaxis_title", zColumn)
+        }
+        draw, save = ((self._scatter_matplotlib, "savefig") if is_mpl
+                      else (self._scatter_plotly, "write_image"))
+        save_kw = dict(bbox_inches="tight", pad_inches=0) if is_mpl else {}  # crop matplotlib's padding
+        # matplotlib takes #RRGGBBAA, plotly does not -> rgba() string for plotly.
+        to_hex = ("#{:02x}{:02x}{:02x}{:02x}".format if is_mpl
+                  else lambda r, g, b, a: f"rgba({r},{g},{b},{a / 255:.3f})")
+        bg = (background_color if background_color is not None
+              else to_hex(128, 128, 128, 255 if color_background else 128))
+        palette = None
+
+        if heatmap:
+            # (n, 4) uint8 RGBA, unpacked once from the packed ARGB LUT.
+            # Entry 0 belongs to label 0 (background) -> not part of the colour scale.
+            argb = np.asarray(lut.indices, dtype=np.uint32)[1:, None]
+            rgba = (argb >> np.array([16, 8, 0, 24], dtype=np.uint32)) & 0xFF
+            n = len(rgba)
+
+            values = pd.to_numeric(df[col], errors="coerce").to_numpy(dtype=float)
+            # Background is defined by label 0 in the label column, not by the plotted value.
+            bg_col = self.gtclassColumn if (self._has_gt and self.gtclassColumn in df.columns) else None
+            if bg_col is None:
+                values[values == 0] = np.nan  # no labels: fall back to value 0 as background
+            elif mask_background:
+                # Labels exist -> background is label <= 0 (or missing), whatever its value:
+                # always grey, and excluded from the colour scale, its range and the colour bar.
+                bg_labels = pd.to_numeric(df[bg_col], errors="coerce").to_numpy(dtype=float)
+                values[~(bg_labels > 0)] = np.nan
+            # With labels, a value of 0 is a real value (e.g. the middle of a -1..1 scale).
+            background = np.isnan(values)
+
+            valid = values[~background]
+            lo, hi = (valid.min(), valid.max()) if valid.size else (0.0, 1.0)  # range over foreground only
+            vmin, vmax = kwargs.get("vmin"), kwargs.get("vmax")
+            vmin = lo if vmin is None else float(vmin)
+            vmax = hi if vmax is None else float(vmax)
+            vmax = vmin + ((vmax - vmin) or 1.0)  # equal limits -> range 1
+
+            norm = np.clip((values - vmin) / (vmax - vmin), 0, 1)
+            slot = np.nan_to_num(norm * (n - 1), nan=n).astype(int)  # background/NaN -> slot n
+
+            df[col] = np.array([to_hex(*c) for c in rgba.tolist()] + [bg])[slot]
+            df = df.iloc[np.argsort(~background, kind="stable")]  # background drawn first, underneath
+
+        elif not precomputed_colors:
+            labels = pd.Series(df.get(col, 0), index=df.index).fillna(0).astype(int)
+            names = {**self.classMapping, **(mapping or {})}
+            names.update({0: "background"} if color_background else {})
+            label_of = {k: names.get(k, str(k)) for k in sorted(labels.unique())}
+
+            palette = {name: to_hex(*lut.rgba_tuple_by_index(k)) if k else bg
+                       for k, name in label_of.items()}
+            df[col] = labels.map(label_of)
+
+        elif not is_mpl:  # precomputed: any matplotlib colour (e.g. #RRGGBBAA) -> plotly rgba()
+            rgba = np.round(to_rgba_array(df[col].tolist()) * 255).astype(int)  # (N, 4)
+            df[col] = [to_hex(*c) for c in rgba.tolist()]
+
+        fig = draw(df, xColumn, yColumn, col, palette,
+                   xaxis_title=xaxis_title, yaxis_title=yaxis_title,
+                   legend_title=None if heatmap else legend_title,
+                   show_axes=show_axes,
+                   marker_size=kwargs.get("markerSize", self.marker_size),
+                   opacity=kwargs.get("markerOpacity", 0.8),
+                   equal_aspect=kwargs.get("equal_aspect", True), **z_kw)
+        if not is_mpl:  # layout overrides: instance-wide first, then per call (may share keys)
+            fig.update_layout(                   plot_bgcolor="black",
+                                                 xaxis_gridcolor="rgba(255, 255, 255, 0.1)",   # white grid, 30% opacity
+                                                 yaxis_gridcolor="rgba(255, 255, 255, 0.1)",)
+            fig.update_layout(**self.plotly_kwargs)
+            fig.update_layout(**kwargs.get("plotly_kwargs", {}))
+
+        if heatmap or not showlegend:  # heatmaps get a colour bar instead of a legend
+            if is_mpl:
+                for legend in filter(None, [fig.axes[0].get_legend(), *fig.legends]):
+                    legend.remove()
+                fig.tight_layout()
+            else:
+                fig.update_layout(showlegend=False)
+
+        if heatmap and showlegend:  # colour bar from the same LUT, labelled in vmin..vmax (foreground only)
+            ticks = np.linspace(0, 1, 5)
+            ticktext = [f"{vmin + t * (vmax - vmin):.2g}" for t in ticks]
+            if is_mpl:
+                sm = ScalarMappable(Normalize(0, 1), ListedColormap(rgba / 255.0))
+                fig.colorbar(sm, ax=fig.axes[0], ticks=ticks, label=col).set_ticklabels(ticktext)
+            else:
+                scale = [[i / (n - 1), f"rgba({r},{g},{b},{a / 255:.3f})"]
+                         for i, (r, g, b, a) in enumerate(rgba.tolist())]
+                # invisible trace that only carries the colour bar; a 3-D figure needs
+                # a 3-D trace, or plotly overlays a 2-D axis on the scene.
+                fig.add_trace((Scatter if zColumn is None else Scatter3d)(
+                    x=[None], y=[None], **({} if zColumn is None else {"z": [None]}),
+                    mode="markers", hoverinfo="skip", showlegend=False,
+                    marker=dict(colorscale=scale, cmin=0, cmax=1, color=[0], showscale=True,
+                                colorbar=dict(title=col, tickvals=list(ticks), ticktext=ticktext))))
+
+        if save_dir is not None:  # a folder, or a full file path ending in .png/.svg/...
+            getattr(fig, save)(CustomMatplotlib.resolve_save_path(save_dir, f"{col}_{legend_title}.svg"),
+                               **save_kw)
+        # Displaying is independent of saving. Off by default - training/validation
+        # logging routes figures to TensorBoard/WandB and must not render anything.
+        if show:
+            fig.show()
+        return fig
+
+
+
+    @staticmethod
+    def _scatter_plotly(plot_df, xColumn, yColumn, classColoumn, palette, *,
+                        xaxis_title, yaxis_title, legend_title, show_axes,
+                        marker_size, opacity, zColumn=None,
+                        zaxis_title=None, equal_aspect=True) -> plotly.graph_objs.Figure:
+        """2-D scatter, or a 3-D one (``px.scatter_3d``) when *zColumn* is given."""
         import plotly.express as px
 
-        plot_df = self.results_df.copy()
-
-        if axis_range is not None:
-            # Rescale the cloud into `axis_range` ... (keep existing comment)
-            lo, hi = axis_range
-            span = float(np.nanmax(np.abs(plot_df[[xColumn, yColumn]].to_numpy())))
-            if span > 0:
-                plot_df[[xColumn, yColumn]] = (
-                    plot_df[[xColumn, yColumn]] * ((hi - lo) / 2 / span) + (hi + lo) / 2
-                )
-
-        if precomputed_colors:
-            # Color column already contains plotly-compatible rgba strings — use directly
-            fig = px.scatter(plot_df, x=xColumn, y=yColumn)
-            fig.update_traces(marker_color=plot_df[classColoumn].tolist())
-
+        # render_mode="svg" (2-D only): the "auto" default switches to WebGL above 1000
+        # points, which write_image can only embed as a bitmap inside the SVG.
+        scatter, xyz = ((px.scatter, {"x": xColumn, "y": yColumn, "render_mode": "svg"})
+                        if zColumn is None
+                        else (px.scatter_3d, {"x": xColumn, "y": yColumn, "z": zColumn}))
+        if palette is None:
+            fig = scatter(plot_df, **xyz)
+            fig.update_traces(marker=dict(color=plot_df[classColoumn].tolist()))
         else:
-            color_map = self.computePlotlyColours(plot_df, classColoumn, color_background, mapping)
-            fig = px.scatter(
-                plot_df, x=xColumn, y=yColumn, color=classColoumn,
-                color_discrete_map=color_map,
-                category_orders={classColoumn: list(color_map)},
+            fig = scatter(
+                plot_df, **xyz, color=classColoumn,
+                color_discrete_map=palette,
+                category_orders={classColoumn: list(palette)},
             )
 
-        if not withLegendTitle:
-            legend_title = None
-
+        # Fonts and colours come from the "scatter_axes" template.
+        axis = dict(showgrid=show_axes, gridcolor="rgba(0,0,0,0.15)",
+                    zeroline=False, showticklabels=show_axes,
+                    visible=True, showline=show_axes,
+                    ticks="outside" if show_axes else "")
+        size = dict(width=1000, height=800)
+        if zColumn is None:
+            # Axes span exactly the data (no autorange padding); the figure stays 1000x800.
+            # equal_aspect: 1 data unit on y == 1 on x, and constrain="domain" shrinks the
+            # plot box rather than padding the range. Otherwise the plot box fills the
+            # figure and x and y scale independently.
+            (x0, x1), (y0, y1) = (plot_df[c].agg(["min", "max"]) for c in (xColumn, yColumn))
+            # A shrunk domain is pinned bottom-right (default: centred), so the plot box
+            # always ends at paper x=1, y=0, where the legend is anchored.
+            fit = dict(constrain="domain")
+            lock = dict(scaleanchor="x", scaleratio=1) if equal_aspect else {}
+            axes = dict(xaxis={**axis, **fit, "constraintoward": "right", "range": [x0, x1]},
+                        yaxis={**axis, **fit, "constraintoward": "bottom",
+                               "range": [y0, y1], **lock},
+                        xaxis_title=xaxis_title, yaxis_title=yaxis_title)
+        else:  # 3-D axes live on the scene; true x/y/z proportions, or a cube
+            axes = dict(scene=dict(
+                xaxis={**axis, "title": xaxis_title},
+                yaxis={**axis, "title": yaxis_title},
+                zaxis={**axis, "title": zaxis_title},
+                aspectmode="data" if equal_aspect else "cube",
+            ))
         fig.update_layout(
-            xaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
-                       visible=True, showline=show_axes, linecolor="black",
-                       ticks="outside" if show_axes else "", tickfont=dict(color="black"),
-                       range=list(axis_range) if axis_range is not None else None),
-            yaxis=dict(showgrid=False, zeroline=False, showticklabels=show_axes,
-                       visible=True, showline=show_axes, linecolor="black",
-                       ticks="outside" if show_axes else "", tickfont=dict(color="black"),
-                       range=list(axis_range) if axis_range is not None else None),
+            **axes,
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="rgba(0,0,0,0)",
+            template="plotly+scatter_axes",
             showlegend=True,
+            # touching the plot's right edge, bottoms aligned (same placement as
+            # CustomMatplotlib.simpleScatter)
             legend=dict(font=dict(size=16), yanchor="bottom", xanchor="left",
                         bgcolor="rgba(255,255,255,0.7)", bordercolor="black",
                         borderwidth=1, x=1, y=0),
-            width=1000, height=800,
+            **size,
+            # no white border; axis automargin still makes room for ticks/titles and
+            # the outside legend widens the right margin itself
+            margin=dict(l=0, r=0, t=0, b=0, pad=0),
             legend_title_text=legend_title,
-            xaxis_title=xaxis_title, yaxis_title=yaxis_title,
         )
+        fig.update_traces(marker=dict(size=marker_size, opacity=opacity))
+        return fig
 
-        fig.update_traces(marker=dict(size=kwargs.get(
-            "markerSize", 3), opacity=kwargs.get("markerOpacity", 0.8)))
-        return self._returnPlotlyFigure(
-            fig, save_dir, f"{classColoumn}_{legend_title}.svg", show)
+    @classmethod
+    def visualiseCoord(
+            cls, points: dict, title="", labels=None, save_dir=None,
+            classMapping=None, backend: Literal["seaborn", "plotly"] = "seaborn",
+            **subplots_kwargs
+    ):
+        """Scatter of *points* (``{"x": ..., "y": ...}``, plus ``"z"`` for 3-D with plotly)
+        coloured by *labels* (or ``points["hue"]``).
+
+        ``backend="seaborn"`` draws with ``CustomMatplotlib.simpleScatter`` and returns a
+        matplotlib Figure. ``backend="plotly"`` routes through :meth:`specialScatter` and
+        returns a plotly Figure; *subplots_kwargs* then go to ``specialScatter``
+        (e.g. ``heatmap=True`` for continuous values, ``plotly_kwargs``,
+        ``background_color="black"`` for label-0 points).
+        """
+        labels = points.get("hue") if labels is None else labels
+        if backend == "seaborn":
+            # hue goes through labels: left in points, seaborn maps the integer
+            # codes to a continuous colormap and the Glasbey palette is never used
+            coords = {k: v for k, v in points.items() if k != "hue"}
+            return CustomMatplotlib.simpleScatter(
+                coords, labels, title=title, save_dir=save_dir,
+                color_space=type(MoBie_coloring.GlasbeyARGBLut()), classMapping=classMapping,
+                **subplots_kwargs,
+            )[0]
+
+        coords = {k: np.asarray(points[k]) for k in ("x", "y", "z") if k in points}
+        label_col = "label"
+        df = pd.DataFrame({
+            **coords,
+            label_col: np.zeros(len(coords["x"]), dtype=int) if labels is None else np.asarray(labels),
+        })
+        fig = cls.from_dataframe(
+            df,
+            embeddings=np.column_stack(list(coords.values())),  # scatter needs no embeddings
+            gtclassColumn=label_col,
+            instancelabelColumn=label_col,
+            classMapping=classMapping,
+            leiden=False,
+            plot_backend="plotly",
+        ).specialScatter(
+            "x", "y", classColoumn=label_col, save_dir=save_dir,
+            **({"zColumn": "z"} if "z" in coords else {}), **subplots_kwargs,
+        )
+        # automargin: the zero top margin grows to fit the title instead of clipping it
+        return fig.update_layout(title_text=title, title_automargin=True) if title else fig
 
     # ------------------------------------------------------------------ #
     # Results & mask                                                       #
     # ------------------------------------------------------------------ #
 
     def saveDataFrame(self, suffix: str = "_analyzed", extension: str = ".csv") -> str:
-        stem = pathlib.Path(
-            self.df_path).stem if self.df_path is not None else "dataframe"
-        save_dir = self.save_dir if self.save_dir is not None else "."
-        out_path = os.path.join(save_dir, f"{stem}{suffix}{extension}")
+        stem = pathlib.Path(self.df_path).stem if self.df_path is not None else "dataframe"
+        out_path = os.path.join(self.save_dir or ".", f"{stem}{suffix}{extension}")
         self.results_df.to_csv(out_path)
         print(f"Dataframe saved to: {out_path}")
         return out_path
-
-    def generateMask(self, maskVolumePath, resolution=0.5, n_iterations=10,
-                     n_neighbors=15, distance_metric: str = "euclidean", classColoumn=None) -> str:
-        """Paint *maskVolumePath*'s instance labels with a column of class values."""
-        import skimage.io
-
-        if not hasattr(self, "predLabels"):
-            # Was `self.clustering(...)`, which is the ClusteringConfig dataclass --
-            # not callable, so this path raised TypeError whenever it was reached.
-            self.cluster(resolution=resolution, n_iterations=n_iterations,
-                         n_neighbors=n_neighbors, distance_metric=distance_metric)
-
-        # Defaulting to classColumn means the no-argument call works; it used to
-        # fall through every branch and raise.
-        column = classColoumn if classColoumn is not None else self.classColumn
-        if column in self.results_df.columns:
-            # results_df carries predictions for *all* instances, including those
-            # without a ground-truth label.  (The first two branches of the old
-            # chain had identical bodies behind a redundant guard.)
-            values = self.results_df[column].to_numpy()
-        elif column == self.gtColumn:
-            values = self.gtlabels
-        else:
-            raise ValueError(
-                f"Column {column!r} not found in results DataFrame. "
-                f"Available: {self.results_df.columns.tolist()}")
-
-        maskVol = skimage.io.imread(maskVolumePath)
-        mapping_array = np.zeros(maskVol.max() + 1, dtype=np.uint16)
-        mapping_array[self.instancelabels] = values.astype(int)
-        maskVol = mapping_array[maskVol]
-        fileName = os.path.basename(maskVolumePath).replace(
-            ".tif", f"_{column}.tif")
-        save_dir = self.save_dir if self.save_dir is not None else os.path.dirname(
-            maskVolumePath)
-        path = os.path.join(save_dir, fileName)
-        skimage.io.imsave(path, maskVol.astype(np.int16))
-        print(f"Result saved to: {path}")
-        return path
 
     # ------------------------------------------------------------------ #
     # Utilities                                                            #
@@ -1231,17 +1131,10 @@ class EmbeddingAnalysis:
 
     @staticmethod
     def concatColumnDF(df1, df2) -> pd.DataFrame:
-        """Add *df2*'s columns to *df1*, aligned on *df1*'s index.
-
-        Columns already in *df1* are replaced in place, so calling ``UMAPResults``
-        (or ``pca``) twice updates the existing coordinate columns rather than
-        appending a second set.  The old loop assigned ``.values`` column by
-        column, which silently misaligns rows whenever the two frames carry
-        different indices -- it worked only because every caller happened to build
-        *df2* with ``df1``'s index.
-        """
-        aligned = df2.set_axis(df1.index)
-        return df1.assign(**{c: aligned[c] for c in aligned.columns})
+        result = df1.copy()
+        for col in df2.columns:
+            result[col] = df2[col].values
+        return result
 
     def concatDF(self, df) -> pd.DataFrame:
         self.results_df = self.concatColumnDF(self.results_df, df)
@@ -1253,101 +1146,91 @@ class EmbeddingAnalysis:
         Yields n entries per class ordered highest-confidence first.
         class_name is resolved via classMapping when available.
         """
-        if getattr(self, "classifier", None) is None:
-            raise RuntimeError(
-                "No classifier was trained, so there are no per-class confidences. "
-                "Construct with a classifier_method (not None) and a gtColumn, or "
-                "call classify() first."
-            )
         mapping = self.classMapping or {}
         return [
             (mapping.get(cls, cls), lbl)
             for cls in self.classifier.classes_
-            for lbl in self.instancelabels[self.results_df[f"proba_{cls}"].argsort()[-1:-n - 1:-1]]
+            for lbl in self.instancelabels[
+                np.argsort(self.results_df[f"proba_{cls}"].to_numpy())[::-1][:n]]
         ]
 
-    def _classSamples(self, max_samples: int, seed: int = 42) -> dict:
-        """Per-class embedding blocks, subsampled to at most *max_samples* rows."""
-        rng = np.random.default_rng(seed)
-        blocks = {}
+    def _class_subsamples(self, max_samples: int) -> list[np.ndarray]:
+        """Embeddings of each mapped class (sorted by class key), capped at *max_samples*."""
+        rng = np.random.default_rng(42)
+        subsamples = []
         for c in sorted(self.classMapping):
             emb = self.embeddings[self.gtlabels == c]
             if len(emb) > max_samples:
                 emb = emb[rng.choice(len(emb), max_samples, replace=False)]
-            blocks[c] = emb
-        return blocks
+            subsamples.append(emb)
+        return subsamples
 
-    def _pairwiseClassHeatmap(self, pairFn, title: str, max_samples: int = 500,
-                              show: bool = False, prepareFn=None) -> Figure:
-        """Symmetric class x class heatmap of *pairFn* over prepared class blocks.
+    def _plot_pairwise_class_heatmap(self, per_class: list, distance, title: str) -> Figure:
+        """Fill a symmetric class×class matrix with ``distance(a, b)`` and plot it."""
+        n = len(per_class)
+        matrix = np.zeros((n, n))
+        for i, j in itertools.combinations(range(n), 2):
+            matrix[i, j] = matrix[j, i] = distance(per_class[i], per_class[j])
 
-        *prepareFn* runs once per class rather than once per pair.  Besides sharing
-        the skeleton of the two public heatmaps, that removes a hidden O(k^2) cost:
-        the Gromov-Wasserstein version used to recompute each class's cost matrix
-        once for every partner class.
-        """
-        blocks = self._classSamples(max_samples)
-        if prepareFn is not None:
-            blocks = {c: prepareFn(X) for c, X in blocks.items()}
-        classes = list(blocks)
-
-        matrix = np.zeros((len(classes), len(classes)))
-        for i, j in itertools.combinations(range(len(classes)), 2):
-            matrix[i, j] = matrix[j, i] = pairFn(blocks[classes[i]], blocks[classes[j]])
-
-        names = [self.classMapping[c] for c in classes]
+        class_names = [self.classMapping[c] for c in sorted(self.classMapping)]
         fig, _ = CustomMatplotlib.simpleHeatmap(
-            matrix, xticklabels=names, yticklabels=names,
-            title=title, save_dir=self.save_dir,
+            matrix,
+            xticklabels=class_names,
+            yticklabels=class_names,
+            title=title,
+            save_dir=self.save_dir,
         )
-        return self._returnFigure(fig, show)
+        return fig
 
-    def _plotClassDiagnostics(self) -> None:
-        """Draw both class-distance heatmaps, skipping any whose deps are missing.
-
-        ``__init__`` used to call the two methods directly, so a missing optional
-        package (POT, for Gromov-Wasserstein) broke construction outright.
-        """
-        try:
-            self.plot_gromov_wasserstein_heatmap()
-        except ImportError as exc:
-            warnings.warn(f"Skipping Gromov-Wasserstein heatmap: {exc}",
-                          UserWarning, stacklevel=2)
-        self.plot_kl_divergence_heatmap()
-
-    def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500, show: bool = False) -> Figure:
+    def plot_gromov_wasserstein_heatmap(self, max_samples: int = 500) -> Figure:
         """Compute and plot pairwise Gromov-Wasserstein distances between classes."""
         import ot
 
-        def prepare(X):
+        def _metric_space(X):
+            # Normalised intra-class cost matrix + uniform weights, computed once per class.
             C = ot.dist(X, X)
-            return C / (C.max() + 1e-12), np.full(len(X), 1 / len(X))
+            C /= C.max() + 1e-12
+            return C, ot.unif(len(X))
 
-        def gromovWasserstein(p, q):
-            (Ci, pi), (Cj, pj) = p, q
-            return ot.gromov.gromov_wasserstein2(
-                Ci, Cj, pi, pj, "square_loss", verbose=False)
+        spaces = [_metric_space(X) for X in self._class_subsamples(max_samples)]
+        return self._plot_pairwise_class_heatmap(
+            spaces,
+            lambda a, b: ot.gromov.gromov_wasserstein2(
+                a[0], b[0], a[1], b[1], "square_loss", verbose=False),
+            "Gromov-Wasserstein Distance Between Classes",
+        )
 
-        return self._pairwiseClassHeatmap(
-            gromovWasserstein, "Gromov-Wasserstein Distance Between Classes",
-            max_samples, show, prepareFn=prepare)
-
-    def plot_kl_divergence_heatmap(self, max_samples: int = 500, show: bool = False) -> Figure:
+    def plot_kl_divergence_heatmap(self, max_samples: int = 500) -> Figure:
         """Compute and plot pairwise symmetrised KL divergence between classes (Gaussian approximation via LedoitWolf)."""
-        def symmetrisedKL(p, q):
-            return (_klDivergence(*p, *q) + _klDivergence(*q, *p)) / 2
+        def _gaussian(X):
+            # (mean, cov, inv(cov), logdet(cov)), computed once per class.
+            cov = LedoitWolf().fit(X).covariance_
+            return X.mean(axis=0), cov, np.linalg.inv(cov), np.linalg.slogdet(cov)[1]
 
-        return self._pairwiseClassHeatmap(
-            symmetrisedKL, "Symmetrised KL Divergence Between Classes",
-            max_samples, show,
-            prepareFn=lambda X: (X.mean(axis=0), LedoitWolf().fit(X).covariance_))
+        def _kl(p, q):
+            mu_p, cov_p, _, logdet_p = p
+            mu_q, _, inv_q, logdet_q = q
+            diff = mu_q - mu_p
+            return 0.5 * (
+                    np.einsum("ij,ji->", inv_q, cov_p)  # trace(inv_q @ cov_p)
+                    + diff @ inv_q @ diff
+                    - len(mu_p)
+                    + logdet_q - logdet_p
+            )
+
+        gaussians = [_gaussian(X) for X in self._class_subsamples(max_samples)]
+        return self._plot_pairwise_class_heatmap(
+            gaussians,
+            lambda p, q: (_kl(p, q) + _kl(q, p)) / 2,
+            "Symmetrised KL Divergence Between Classes",
+        )
 
     def plot_dendrogram(
-        self,
-        metric: str = "cosine",
-        linkage: str = "average",
-        save_dir: str = None,
-        show: bool = False,
+            self,
+            metric: str = "cosine",
+            linkage: str = "average",
+            save_dir: str = None,
+            show: bool = False,
     ):
         """Hierarchical clustering dendrogram of class centroids in embedding space.
 
@@ -1372,43 +1255,16 @@ class EmbeddingAnalysis:
         plotly.graph_objects.Figure
         """
         import plotly.figure_factory as ff
-        from scipy.spatial.distance import pdist
         import scipy.cluster.hierarchy as sch
+        from scipy.spatial.distance import pdist
 
-        # TODO: For later to colour the branches
-        # import plotly.graph_objects as go
-        #
-        # leaf_df = pd.DataFrame({"class": classes})
-        # color_map = self.computePlotlyColours(leaf_df, "class")  # relabels leaf_df in place
-        #
-        # fig = ff.create_dendrogram(
-        #     centroids,
-        #     orientation="left",
-        #     labels=leaf_df["class"].tolist(),
-        #     distfun=lambda X: pdist(X, metric=metric),
-        #     linkagefun=lambda d: sch.linkage(d, method=linkage),
-        # )
-        # # Leaves sit at distance 0; mark each with its class colour.
-        # leaves = fig.layout.yaxis
-        # fig.add_trace(go.Scatter(
-        #     x=np.zeros(len(leaves.tickvals)), y=leaves.tickvals, mode="markers",
-        #     marker=dict(color=[color_map[t] for t in leaves.ticktext],
-        #                 size=14, symbol="square"),
-        #     hovertext=leaves.ticktext, hoverinfo="text", showlegend=False,
-        # ))
-
-
-        classes = sorted(np.unique(self.traingt))
-        centroids = np.stack([
-            self.trainEmbeddings[self.traingt == c].mean(axis=0)
-            for c in classes
-        ])
-        labels = [str(self.classMapping.get(int(c), int(c))) for c in classes]
+        classes = np.unique(self.traingt)
+        centroids = np.stack([self.trainEmbeddings[self.traingt == c].mean(axis=0) for c in classes])
 
         fig = ff.create_dendrogram(
             centroids,
             orientation="left",
-            labels=labels,
+            labels=[self._class_name(c) for c in classes],
             distfun=lambda X: pdist(X, metric=metric),
             linkagefun=lambda d: sch.linkage(d, method=linkage),
         )
@@ -1420,24 +1276,32 @@ class EmbeddingAnalysis:
             xaxis=dict(title=f"{metric} distance"),
             yaxis=dict(title=""),
         )
+        fig.update_layout(**self.plotly_kwargs)
 
-        return self._returnPlotlyFigure(
-            fig, save_dir or self.save_dir, "dendrogram.svg", show)
+        save_dir = save_dir or self.save_dir
+        if save_dir:
+            out = os.path.join(save_dir, "dendrogram.svg")
+            fig.write_image(out, format="svg")
+            print(f"[plot_dendrogram] Saved to {out}")
+
+        if show:  # see specialScatter: never render from a logging path
+            fig.show()
+        return fig
 
     # ------------------------------------------------------------------ #
     # Trajectory analysis (PAGA + diffusion pseudotime)                   #
     # ------------------------------------------------------------------ #
 
     def trajectory(
-        self,
-        n_neighbors: int = 15,
-        n_dcs: int = 10,
-        resolution: float = 0.5,
-        root_group: str = None,
-        distance_metric: str = "euclidean",
-        color_by: str = None,
-        save_dir: str = None,
-        use_gt: bool = False,
+            self,
+            n_neighbors: int = 15,
+            n_dcs: int = 10,
+            resolution: float = 0.5,
+            root_group: str = None,
+            distance_metric: str = "euclidean",
+            color_by: str = None,
+            save_dir: str = None,
+            use_gt: bool = False,
     ) -> pd.DataFrame:
         """Trajectory analysis via PAGA + diffusion pseudotime (scanpy).
 
@@ -1468,7 +1332,7 @@ class EmbeddingAnalysis:
             Distance metric for the k-NN graph.
         color_by:
             Column in ``self.data_df`` used to colour the UMAP panels.
-            Defaults to ``self.gtColumn`` when available, else ``"dpt_pseudotime"``.
+            Defaults to ``self.gtclassColumn`` when available, else ``"dpt_pseudotime"``.
         save_dir:
             Directory in which to save the figure.  Defaults to
             ``self.save_dir``.
@@ -1487,15 +1351,11 @@ class EmbeddingAnalysis:
         # ── 1. Build AnnData from scaled embeddings ───────────────────────
         adata = ad.AnnData(X=self.embeddings.astype(np.float32))
         if color_by is None:
-            color_by = self.gtColumn if self._has_gt else "dpt_pseudotime"
+            color_by = self.gtclassColumn if self._has_gt else "dpt_pseudotime"
 
         # Carry group labels into obs so scanpy can colour by them
-        if self._has_gt and self.gtColumn in self.data_df.columns:
-            adata.obs[self.gtColumn] = (
-                self.data_df[self.gtColumn]
-                .astype(str)
-                .values
-            )
+        if self._has_gt:
+            adata.obs[self.gtclassColumn] = self.data_df[self.gtclassColumn].astype(str).values
 
         # ── 2. k-NN graph ─────────────────────────────────────────────────
         sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=None,
@@ -1504,9 +1364,9 @@ class EmbeddingAnalysis:
         # ── 3a. Group definition: GT labels or Leiden clustering ───────────
         if use_gt and self._has_gt:
             gt_labels = (
-                self.data_df[self.gtColumn]
+                self.data_df[self.gtclassColumn]
                 .map(lambda v: self.classMapping.get(int(v), str(v))
-                     if pd.notna(v) and v != 0 else "unlabelled")
+                if pd.notna(v) and v != 0 else "unlabelled")
                 .astype(str)
             )
             adata.obs["leiden_trajectory"] = pd.Categorical(gt_labels)
@@ -1520,67 +1380,68 @@ class EmbeddingAnalysis:
         sc.pl.paga(adata, show=False, plot=False)
 
         # ── 4. UMAP for visualisation ─────────────────────────────────────
-        # Reuse an already-computed UMAP when available (avoids recomputation).
-        # Fall back to a PAGA-initialised UMAP otherwise.
-        if "UMAP x" in self.data_df.columns and "UMAP y" in self.data_df.columns:
-            adata.obsm["X_umap"] = self.data_df[["UMAP x", "UMAP y"]].to_numpy()
+        # Reuse the UMAP stored by visualiseUMAP (in results_df) when available;
+        # fall back to a PAGA-initialised UMAP otherwise.
+        if {"UMAP x", "UMAP y"} <= set(self.results_df.columns):
+            adata.obsm["X_umap"] = self.results_df[["UMAP x", "UMAP y"]].to_numpy()
         else:
             sc.tl.umap(adata, init_pos="paga", random_state=42)
 
         # ── 5. Diffusion map + pseudotime ─────────────────────────────────
         sc.tl.diffmap(adata, n_comps=n_dcs)
 
-        # Determine root cell: cell in root_group with lowest DC1 value
-        groups = adata.obs["leiden_trajectory"].values
+        groups = adata.obs["leiden_trajectory"].astype(str).to_numpy()
         dc1 = adata.obsm["X_diffmap"][:, 1]
         unique_groups = np.unique(groups)
 
+        def _lowest_median_group() -> str:
+            medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
+            return str(min(medians, key=medians.get))
+
         if root_group is None:
-            group_medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
-            root_group = str(min(group_medians, key=group_medians.get))
+            root_group = _lowest_median_group()
             print(f"[trajectory] Auto-selected root group: {root_group}")
         elif root_group not in unique_groups:
-            # root_group may be a gtColumn value rather than a Leiden label —
+            # root_group may be a gtclassColumn value rather than a Leiden label —
             # find the Leiden cluster most enriched for that value.
-            gt_col = self.gtColumn if self._has_gt else None
-            leiden_resolved = None
-            if gt_col is not None and gt_col in self.data_df.columns:
-                gt_vals = self.data_df[gt_col].astype(str).values
+            if self._has_gt:
+                gt_vals = self.data_df[self.gtclassColumn].astype(str).to_numpy()
                 enrichment = {
                     g: (gt_vals[groups == g] == str(root_group)).mean()
                     for g in unique_groups
                 }
-                leiden_resolved = max(enrichment, key=enrichment.get)
+                resolved = max(enrichment, key=enrichment.get)
                 print(
                     f"[trajectory] '{root_group}' not a Leiden label; "
-                    f"resolved to group '{leiden_resolved}' "
-                    f"(enrichment {enrichment[leiden_resolved]:.2f})."
+                    f"resolved to group '{resolved}' "
+                    f"(enrichment {enrichment[resolved]:.2f})."
                 )
-            if leiden_resolved is None:
+            else:
                 print(
                     f"[trajectory] Warning: root_group='{root_group}' not found "
                     f"in Leiden labels {list(unique_groups)}. Falling back to auto."
                 )
-                group_medians = {g: np.median(dc1[groups == g]) for g in unique_groups}
-                leiden_resolved = str(min(group_medians, key=group_medians.get))
-            root_group = leiden_resolved
+                resolved = _lowest_median_group()
+            root_group = resolved
 
+        # Root cell: the cell in root_group with the lowest DC1 value
         root_mask = groups == root_group
-        dc1_vals = adata.obsm["X_diffmap"][root_mask, 1]
-        root_idx = int(np.where(root_mask)[0][np.argmin(dc1_vals)])
+        root_idx = int(np.flatnonzero(root_mask)[np.argmin(dc1[root_mask])])
         adata.uns["iroot"] = root_idx
         sc.tl.dpt(adata, n_dcs=n_dcs)
 
         # ── 6. Write results back to data_df / results_df ─────────────────
         umap_coords = adata.obsm["X_umap"]
-        self.data_df["leiden_trajectory"] = adata.obs["leiden_trajectory"].astype(str).to_numpy()
-        self.data_df["dpt_pseudotime"] = adata.obs["dpt_pseudotime"].to_numpy()
-        self.data_df["traj_umap_x"] = umap_coords[:, 0]
-        self.data_df["traj_umap_y"] = umap_coords[:, 1]
-        self.results_df["leiden_trajectory"] = adata.obs["leiden_trajectory"].astype(str).to_numpy()
-        self.results_df["dpt_pseudotime"] = adata.obs["dpt_pseudotime"].to_numpy()
-        self.results_df["traj_umap_x"] = umap_coords[:, 0]
-        self.results_df["traj_umap_y"] = umap_coords[:, 1]
+        pseudotime = adata.obs["dpt_pseudotime"].to_numpy()
+        traj_columns = {
+            "leiden_trajectory": groups,
+            "dpt_pseudotime": pseudotime,
+            "traj_umap_x": umap_coords[:, 0],
+            "traj_umap_y": umap_coords[:, 1],
+        }
+        for df in (self.data_df, self.results_df):
+            for col, values in traj_columns.items():
+                df[col] = values
 
         # Store adata so plot_trajectory can reuse it without recomputing
         self._traj_adata = adata
@@ -1588,18 +1449,16 @@ class EmbeddingAnalysis:
         self._traj_root_group = root_group
 
         print(f"[trajectory] Root cell index: {root_idx}  (group '{root_group}')")
-        print(f"[trajectory] Pseudotime range: "
-              f"{adata.obs['dpt_pseudotime'].min():.3f} – "
-              f"{adata.obs['dpt_pseudotime'].max():.3f}")
+        print(f"[trajectory] Pseudotime range: {pseudotime.min():.3f} – {pseudotime.max():.3f}")
 
         return self.data_df
 
     def plot_trajectory(
-        self,
-        save_dir: str = None,
-        paga_threshold: float = 0.05,
-        show: bool = False,
-        **trajectory_kwargs,
+            self,
+            save_dir: str = None,
+            paga_threshold: float = 0.05,
+            show: bool = False,
+            **trajectory_kwargs,
     ):
         """Build and return an interactive Plotly figure of the trajectory results.
 
@@ -1608,7 +1467,7 @@ class EmbeddingAnalysis:
         * **Top-left** – UMAP coloured by Leiden group with the PAGA
           connectivity graph superimposed (edges scaled by weight, nodes at
           cluster centroids).
-        * **Top-right** – UMAP coloured by ``self.gtColumn`` (only when a
+        * **Top-right** – UMAP coloured by ``self.gtclassColumn`` (only when a
           ground-truth column is available and differs from pseudotime).
         * **Bottom-left** – UMAP coloured by diffusion pseudotime.
         * **Bottom-right** – Violin plot of pseudotime per Leiden group.
@@ -1637,16 +1496,17 @@ class EmbeddingAnalysis:
         color_by = self._traj_color_by
         df = self.data_df
 
-        ux = df["traj_umap_x"].values
-        uy = df["traj_umap_y"].values
-        groups = df["leiden_trajectory"].astype(str).values
-        pseudotime = df["dpt_pseudotime"].values
-        unique_groups = sorted(np.unique(groups))
+        ux = df["traj_umap_x"].to_numpy()
+        uy = df["traj_umap_y"].to_numpy()
+        groups = df["leiden_trajectory"].astype(str).to_numpy()
+        pseudotime = df["dpt_pseudotime"].to_numpy()
+        # PAGA connectivities are indexed in the categorical order of the groups,
+        # so node i of the graph must be unique_groups[i].
+        unique_groups = [str(g) for g in adata.obs["leiden_trajectory"].cat.categories]
+        group_masks = {g: groups == g for g in unique_groups}
 
-        # Shared palette — tab20 avoids the grey-for-0 override in specialScatter
-        palette = sns.color_palette("tab20", len(unique_groups))
-        group_color = {g: f"rgb{tuple(int(c * 255) for c in palette[i])}"
-                       for i, g in enumerate(unique_groups)}
+        # Shared palette; offset 1 because Leiden group 0 is a real group, not background.
+        group_color = _glasbey_rgb_palette(unique_groups, offset=1)
 
         has_extra = self._has_gt and color_by != "dpt_pseudotime"
 
@@ -1665,9 +1525,7 @@ class EmbeddingAnalysis:
         )
 
         # ── Panel 1: UMAP (Leiden) with PAGA overlay ──────────────────────
-        # Scatter points
-        for g in unique_groups:
-            mask = groups == g
+        for g, mask in group_masks.items():
             fig.add_trace(go.Scatter(
                 x=ux[mask], y=uy[mask],
                 mode="markers",
@@ -1678,23 +1536,22 @@ class EmbeddingAnalysis:
             ), row=1, col=1)
 
         # PAGA edges superimposed
-        conn = np.array(adata.uns["paga"]["connectivities"].todense())
-        node_x = [ux[groups == g].mean() for g in unique_groups]
-        node_y = [uy[groups == g].mean() for g in unique_groups]
+        conn = adata.uns["paga"]["connectivities"].toarray()
+        node_x = [ux[mask].mean() for mask in group_masks.values()]
+        node_y = [uy[mask].mean() for mask in group_masks.values()]
 
-        for i in range(len(unique_groups)):
-            for j in range(i + 1, len(unique_groups)):
-                w = float(conn[i, j])
-                if w < paga_threshold:
-                    continue
-                fig.add_trace(go.Scatter(
-                    x=[node_x[i], node_x[j], None],
-                    y=[node_y[i], node_y[j], None],
-                    mode="lines",
-                    line=dict(width=w * 10, color="rgba(255,255,255,0.55)"),
-                    showlegend=False,
-                    hoverinfo="skip",
-                ), row=1, col=1)
+        for i, j in itertools.combinations(range(len(unique_groups)), 2):
+            w = float(conn[i, j])
+            if w < paga_threshold:
+                continue
+            fig.add_trace(go.Scatter(
+                x=[node_x[i], node_x[j], None],
+                y=[node_y[i], node_y[j], None],
+                mode="lines",
+                line=dict(width=w * 10, color="rgba(255,255,255,0.55)"),
+                showlegend=False,
+                hoverinfo="skip",
+            ), row=1, col=1)
 
         # PAGA nodes (same colors as scatter, larger markers + labels)
         fig.add_trace(go.Scatter(
@@ -1711,13 +1568,11 @@ class EmbeddingAnalysis:
             hovertemplate="Group %{text}<extra></extra>",
         ), row=1, col=1)
 
-        # ── Panel 2 (optional): UMAP coloured by gtColumn ─────────────────
+        # ── Panel 2 (optional): UMAP coloured by gtclassColumn ─────────────────
         if has_extra:
-            gt_vals = df[color_by].astype(str).values
+            gt_vals = df[color_by].astype(str).to_numpy()
             unique_gt = sorted(np.unique(gt_vals))
-            gt_palette = sns.color_palette("Set2", len(unique_gt))
-            gt_color = {v: f"rgb{tuple(int(c * 255) for c in gt_palette[i])}"
-                        for i, v in enumerate(unique_gt)}
+            gt_color = _glasbey_rgb_palette(unique_gt)
             for v in unique_gt:
                 mask = gt_vals == v
                 fig.add_trace(go.Scatter(
@@ -1746,8 +1601,7 @@ class EmbeddingAnalysis:
         ), row=2, col=1)
 
         # ── Panel 4: Violin – pseudotime per Leiden group ─────────────────
-        for g in unique_groups:
-            mask = groups == g
+        for g, mask in group_masks.items():
             fig.add_trace(go.Violin(
                 y=pseudotime[mask],
                 name=f"Group {g}",
@@ -1767,35 +1621,24 @@ class EmbeddingAnalysis:
             template="plotly_dark",
             legend=dict(itemsizing="constant", font=dict(size=10)),
         )
-        for row in (1, 2):
-            for col in (1, 2):
-                fig.update_xaxes(showgrid=False, showticklabels=False, row=row, col=col)
-                fig.update_yaxes(showgrid=False, showticklabels=False, row=row, col=col)
+        fig.update_layout(**self.plotly_kwargs)
+        fig.update_xaxes(showgrid=False, showticklabels=False)
+        fig.update_yaxes(showgrid=False, showticklabels=False)
 
-        return self._returnPlotlyFigure(
-            fig, save_dir or self.save_dir, "trajectory_plotly.html", show)
+        save_dir = save_dir or self.save_dir
+        if save_dir:
+            out = os.path.join(save_dir, "trajectory_plotly.html")
+            fig.write_html(out)
+            print(f"[plot_trajectory] Saved to {out}")
+
+        if show:  # see specialScatter: never render from a logging path
+            fig.show()
+        return fig
 
     def getRowsByLabel(self, label):
         return self.data_df[self.data_df[MOBIE_LABEL_KEY] == label]
 
     def get_array_from_df(self, column):
-        """Deprecated alias for :func:`dl_utils.util.getArrayFromDF`."""
-        return getArrayFromDF(self.data_df, column)
+        return np.array(self.data_df[column].tolist())
 
-    def load_png_for_nucleus(self, nucleus_id, patches_dir) -> str:
-        npy_filename = os.path.join(
-            patches_dir, f"nucleus_hr_{nucleus_id}.npy")
-        if os.path.exists(npy_filename):
-            try:
-                input_vol = np.load(npy_filename)
-                mid_z = input_vol[input_vol.shape[0] // 2]
-                mid_z = ((mid_z - mid_z.min()) / (mid_z.max() -
-                         mid_z.min()) * 255).astype(np.uint8)
-                img = Image.fromarray(mid_z).resize((200, 200))
-                buffered = BytesIO()
-                img.save(buffered, format="PNG")
-                data_url = _png_buffer_to_data_url(buffered)
-                return f'<img src="{data_url}" width="200" height="200">'
-            except Exception as e:
-                return f"Error creating image: {e}"
-        return "No image available"
+

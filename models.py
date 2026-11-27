@@ -10,31 +10,25 @@ import torch
 import torch.nn as nn
 import pytorch_lightning as pl
 import yaml
-from yamlfix import fix_files
 from torch.utils.data.dataloader import default_collate
 
-from .constants import LOSS_KEY
-from .util import save_model as _save_model, load_model as _load_model, OneCycleLR, CosineScheduler
+from constants import LOSS_KEY
+from util import save_model as _save_model, load_model as _load_model, OneCycleLR, CosineScheduler
+import re
+import torch
+from torch.optim.lr_scheduler import OneCycleLR
 
 logger = logging.getLogger(__name__)
 
-def _install_print_tee(save_dir: str) -> None:
-    """Mirror all print() calls to *log_path*, following the same closure
-    pattern as util.print_for_distributed."""
-    import builtins
-    import functools
-    builtin_print = builtins.print
-    log_path = os.path.join(save_dir, "print.txt")
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
-    log_file = open(log_path, "a", buffering=1)
+# Module-path pieces that mark a "layer" in common architectures:
+#   PTv3/Sonata: enc.enc2.block1   ViT: blocks.3   Swin/ConvNeXt: stages.0.blocks.2
+#   ResNet: layer3   HF BERT: encoder.layer.5   GPT-2: h.7   CLIP: resblocks.4
+# Numbered submodules *inside* a block (fc1, norm1, conv1) are not matched.
+_BLOCK_RE = re.compile(
+    r"(?:^|\.)(?:enc|dec|stages?|blocks?|layers?|levels?|resblocks|h)\.?\d+(?=\.)"
+)
 
-    @functools.wraps(builtin_print)
-    def _tee_print(*args, **kwargs):
-        builtin_print(*args, **kwargs)
-        builtin_print(*args, **{**kwargs, "file": log_file})
 
-    builtins.print = _tee_print
-    
 class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     """Masked Autoencoder with VisionTransformer backbone"""
 
@@ -43,7 +37,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
 
     def __init__(
         self,
-        save_dir: str,
         backbone : Optional[Union[torch.nn, pl.LightningModule]],
         version_name: str,
         accelerator: str,
@@ -76,9 +69,10 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.batch_size = batch_size
         self.accelerator = accelerator
         self.version_name = version_name
-        self.save_dir = save_dir
         self.no_weight_decay_keywords = tuple(no_weight_decay_keywords or ())
-        self.save_hyperparameters()
+        # logger=False: the trainer logs its full config (incl. modelConfig) as the
+        # run's hparams; checkpoints still store these.
+        self.save_hyperparameters(logger=False)
 
 
         torch.set_float32_matmul_precision("medium")
@@ -89,7 +83,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         # validation_step appends a dict here; on_validation_epoch_end reduces it.
         self.validation_step_outputs: list[dict] = []
 
-        #_install_print_tee(save_dir)
 
     def log(self, *args, **kwargs):
         super().log(*args, **kwargs)
@@ -101,18 +94,17 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             raise ValueError("collate_fn received a batch of all-None items — check __getitem__ for errors")
         return default_collate(batch, *args, **kwargs)
 
-
-    def attachValidationMetadata(self, objects: "pd.DataFrame") -> None:
-        """Push the object table down from the trainer, ahead of the first epoch.
-
-        The trainer's ``getTrainValDataloader`` is the one place holding both the
-        un-wrapped dataset and the model, so the table is handed over there instead of
-        being fetched back up out of ``trainer.val_dataloaders -> Subset -> .source``.
-        The *full* table is passed, not the validation slice: the probe addresses rows
-        by the position each sample carries as its label, and ``Subset`` preserves those
-        positions. A module driven outside that path calls this itself.
-        """
-        self.validation_metadata = objects
+    # ------------------------------------------------------------------
+    # Validation contract
+    # ------------------------------------------------------------------
+    # The only hard contract is the *type* validation_step returns/accumulates:
+    # a per-batch dict whose (all-optional) keys are
+    #   LOSS_KEY, EMBED_DICT_EMBED, "coord", LABEL_KEY, "metrics dict".
+    # on_validation_epoch_end is deliberately NOT a fixed pipeline — subclasses
+    # may override it entirely, extend it via super(), or just call
+    # reduce_validation_outputs() to fold the per-batch dicts into one. This keeps
+    # each model free to define its own epoch-end while sharing the buffer and the
+    # reduction utility.
 
     def validation_step(self, batch, batch_idx) -> dict:
         """Default validation step: run shared_step, log, accumulate, return.
@@ -137,9 +129,8 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         self.validation_step_outputs.append(output)
         return output
 
-    def on_validation_epoch_end(self) -> None:
+    def on_validation_epoch_start(self) -> None:
         self.validation_step_outputs.clear()
-
 
     def reduce_validation_outputs(self, outputs: Union[list, None] = None) -> dict:
         """Fold the per-batch validation dicts into a single dict.
@@ -198,17 +189,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
     def get_device(self):
         return next(self.parameters()).device
 
-    def set_save_dir(self):
-
-        dirName = (self.__class__.__name__,)
-
-        if isinstance(self.version_name, str) and self.version_name != "":
-            dirName = dirName + (f"{self.version_name}",)
-
-        self.save_dir = os.path.join(self.save_dir, *dirName)
-
-        os.makedirs(self.save_dir, exist_ok=True)
-
     @staticmethod
     def getConfig(path):
         with open(path, "r") as f:
@@ -226,13 +206,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
 
     def load_model(self, args, model_without_ddp, optimizer, loss_scaler):
         _load_model(args, model_without_ddp, optimizer, loss_scaler)
-
-    def saveConfig(self):
-        path = os.path.join(self.save_dir, self.__class__.__name__)
-        filpath = f"{path}.yaml"
-        with open(filpath, "w") as file:
-            yaml.dump(self.config, file)
-        fix_files([filpath])
 
     def initialize_weights(self):
         self.apply(self._init_weights)
@@ -269,21 +242,42 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         total_size_gb = total_size_bytes / (1024**3)
         logger.info("Model memory size: %.4f GB", total_size_gb)
 
-    def compute_batch_memory_usage(self, sample):
-        """
-        Compute the approximate memory usage of a single batch during training.
+    def compute_batch_memory_usage(self, batch_shape: tuple[int, ...]) -> float:
+        """GB of one training pass on a dummy batch of shape ``batch_shape``.
 
-        Parameters:
-        - sample: Input batch tensors.
-
-        Returns:
-        - Total memory usage in gigabytes (GB).
+        Lightning's ``ModelSummary`` runs ``forward`` on ``example_input_array`` (a zero
+        batch of that shape) and records the output size of every layer. A training pass
+        holds the parameters (``model_size``), their gradients (one per trainable
+        parameter) and the output of every leaf module, kept for backward. Optimizer state
+        and allocator overhead are not counted, so it is a lower bound. ``forward`` must
+        take one tensor.
         """
-        input_memory = sum(x.element_size() * x.nelement() for x in sample)
-        param_memory = sum(p.element_size() * p.nelement() for p in self.parameters())
-        activation_memory = input_memory * 2
-        total_memory = input_memory + param_memory + activation_memory
-        logger.info("Batch in memory during training: %.4f GB", total_memory / (1024 ** 3))
+        from pytorch_lightning.utilities.model_summary import ModelSummary
+
+        previous = self.example_input_array
+        self.example_input_array = torch.zeros(batch_shape, device=self.device)
+        try:
+            summary = ModelSummary(self, max_depth=-1)
+        finally:
+            self.example_input_array = previous
+
+        # leaf outputs only (parents re-report their children's); "?" = size unknown
+        leaves = {name for name, module in self.named_modules() if next(module.children(), None) is None}
+        outputs = [
+            size for name, size in zip(summary.layer_names, summary.out_sizes)
+            if name in leaves and size != "?"
+        ]
+        n_activations = sum(
+            sum(map(np.prod, size)) if size and isinstance(size[0], list) else np.prod(size)
+            for size in outputs
+        )
+        bytes_per_value = next(self.parameters()).element_size()
+        total_gb = (
+            summary.model_size * 1e6  # MB of parameters
+            + (summary.trainable_parameters + n_activations) * bytes_per_value
+        ) / 1e9
+        logger.info("One training pass on a %s batch: %.4f GB", tuple(batch_shape), total_gb)
+        return total_gb
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -334,22 +328,84 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
             for b in range(depths[e])
         ]
 
-    def _layer_decay_param_dicts(self) -> list[dict]:
-        """Layer-decay entries for the backbone, plus the decoder when enabled.
 
-        The decoder entries only exist when ``decoder_layer_decay`` is set. Without
-        them — and with the default ``freeze_encoder=True``, which empties every backbone
-        group — ``configure_optimizers`` ends up with a single group and layer-wise decay
-        is a no-op for the whole model.
+
+
+
+
+    def layer_decay_param_groups(self,
+                                 model : torch.nn.Module,
+                                 base_lr,
+                                 weight_decay,              # = min weight decay
+                                 layer_decay,
+                                 max_weight_decay=None,     # new
+                                 block_regex=_BLOCK_RE,
+                                 no_weight_decay_keys=(),
+                                 verbose=True,
+
+    ):
+        """Model-agnostic layer-wise LR decay (MAE/BEiT style).
+
+        - Each unique deepest block prefix (e.g. 'enc.enc2.block1') becomes one
+          layer, numbered in module registration order (normally the forward order).
+        - Unmatched params seen before the first block (embeddings/stem) -> layer 0.
+        - Unmatched params seen after it (final norm, heads)            -> top layer.
+        - lr = base_lr * layer_decay ** (num_layers - layer_id)
+        - Biases and 1-D params (norms) get no weight decay.
         """
-        entries = self._block_decay_entries(
-            self._LAYER_DECAY_SCOPE,
-            self.backbone.enc_depths,
-            self.lr,
-            self.layer_decay,
-        )
+        named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
 
-        return entries
+        skip = set(no_weight_decay_keys)
+        if hasattr(model, "no_weight_decay"):  # timm convention
+            skip |= set(model.no_weight_decay())
+
+        # 1) deepest block-like prefix per param, ordered by first appearance
+        prefix_of, layer_of_prefix = {}, {}
+        for n, _ in named:
+            matches = list(block_regex.finditer(n))
+            if matches:
+                pre = n[: matches[-1].end()]
+                prefix_of[n] = pre
+                layer_of_prefix.setdefault(pre, len(layer_of_prefix) + 1)
+        num_layers = len(layer_of_prefix) + 1  # +1 = head bucket
+
+        # 2) bucket params by (layer_id, apply_wd)
+        groups, seen_block = {}, False
+        for n, p in named:
+            if n in prefix_of:
+                lid, seen_block = layer_of_prefix[prefix_of[n]], True
+            else:
+                lid = num_layers if seen_block else 0
+            no_wd = p.ndim <= 1 or n.endswith(".bias") or any(k in n for k in skip)
+            key = (lid, no_wd)
+            if key not in groups:
+                scale = layer_decay ** (num_layers - lid)
+                wd_min = 0.0 if no_wd else weight_decay
+                wd_max = 0.0 if no_wd else (
+                    weight_decay if max_weight_decay is None else max_weight_decay
+                )
+                groups[key] = {
+                    "params": [],
+                    "lr": base_lr * scale,
+                    "lr_scale": scale,
+                    "weight_decay": wd_min,
+                    "minweight_decay": wd_min,
+                    "maxweight_decay": wd_max,
+                    "layer_id": lid,
+                }
+
+            groups[key]["params"].append(p)
+
+        out = [groups[k] for k in sorted(groups)]
+        if verbose:
+            inv = {v: k for k, v in layer_of_prefix.items()}
+            for g in out:
+                name = {0: "<embed/stem>", num_layers: "<head/norm>"}.get(
+                    g["layer_id"], inv.get(g["layer_id"])
+                )
+                print(f"layer {g['layer_id']:>3} {name:<28} lr_scale={g['lr_scale']:.4f} "
+                      f"wd={g['weight_decay']:<6} n={len(g['params'])}")
+        return out
 
     def _is_no_decay(self, name: str, param: torch.Tensor) -> bool:
         """Whether ``param`` should be exempt from weight decay.
@@ -363,85 +419,27 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         )
 
     def configure_optimizers(self):
-
         self._total_steps = int(self.trainer.estimated_stepping_batches)
 
-        param_dicts = self._layer_decay_param_dicts()
-
-        # Each LR level owns TWO groups: one that weight-decays and one that does not.
-        # `apply_wd_schedule` is a private marker read back by on_before_optimizer_step,
-        # which would otherwise re-apply the ramped WD to the exempt group every step and
-        # undo the split. torch.optim keeps unknown param_group keys untouched.
-        def _pair(lr: float) -> tuple[dict, dict]:
-            return (
-                {
-                    "params": [],
-                    "lr": lr,
-                    "minweight_decay": self.minweight_decay,
-                    "apply_wd_schedule": True,
-                },
-                {
-                    "params": [],
-                    "lr": lr,
-                    "minweight_decay": 0.0,
-                    "apply_wd_schedule": False,
-                },
-            )
-
-        # Level 0 = default (unmatched): the freshly-initialised SAM stack (feat_proj,
-        # prompt_encoder, mask_decoder) plus any non-block params, all at full lr.
-        # Levels 1..N = one per param_dict entry.
-        levels: list[tuple[dict, dict]] = [_pair(self.lr)]
-        levels += [_pair(d["lr"]) for d in param_dicts]
-
-        for n, p in self.named_parameters():
-            # freeze_encoder sets requires_grad=False on the whole backbone, so this is
-            # also what keeps the frozen encoder out of the optimizer entirely.
-            if not p.requires_grad:
-                continue
-            level = 0
-            for i, d in enumerate(param_dicts):
-                if n.startswith(str(d["scope"])) and str(d["keyword"]) in n:
-                    level = i + 1
-                    break
-            levels[level][1 if self._is_no_decay(n, p) else 0]["params"].append(p)
-
-        # Flatten and drop empty groups so max_lr length stays consistent (every block
-        # group is empty when freeze_encoder is on, as is any no-decay group when
-        # no_weight_decay_keywords is empty and the level holds only weight matrices).
-        layer_groups = [g for pair in levels for g in pair if g["params"]]
-        assert (
-            layer_groups
-        ), "no trainable parameters — freeze_encoder froze everything?"
-        lrs = [g["lr"] for g in layer_groups]
-        n_no_decay = sum(
-            len(g["params"]) for g in layer_groups if not g["apply_wd_schedule"]
-        )
-        print(
-            f"{type(self).__name__}: {len(layer_groups)} param group(s), "
-            f"lr {min(lrs):.3g}..{max(lrs):.3g} (base {self.lr}, "
-            f"layer decay {self.layer_decay}, decoder layer decay "
-            f"{self.decoder_layer_decay}), {n_no_decay} param(s) exempt from weight "
-            f"decay, freeze_encoder={self.freeze_encoder}"
+        layer_groups = self.layer_decay_param_groups(
+            self.student,
+            base_lr=self.lr,
+            weight_decay=self.minweight_decay,
+            max_weight_decay=self.maxweight_decay,
+            layer_decay=self.layer_decay,
         )
 
-        optimizer = torch.optim.AdamW(
-            layer_groups, lr=self.lr, weight_decay=self.minweight_decay
-        )
+        optimizer = torch.optim.AdamW(layer_groups, lr=self.lr)
 
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=lrs,
+            max_lr=[g["lr"] for g in layer_groups],
             pct_start=self.warmup_ratio,
             anneal_strategy="cos",
             div_factor=self.lr_div_factor,
             final_div_factor=self.lr_final_div_factor,
             total_steps=self._total_steps,
         )
-
-        # interval="step": OneCycleLR is sized in optimizer steps
-        # (estimated_stepping_batches); Lightning's default "epoch" interval would
-        # advance it once per epoch and pin the LR near the warmup value.
         return [optimizer], [{"scheduler": scheduler, "interval": "step"}]
 
     def on_train_start(self) -> None:
@@ -456,6 +454,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         # Fast-forward on resume so the ramp picks up where the checkpoint left off.
         self.weight_decay_scheduler.iter = self.trainer.global_step
         self.minweight_decay = self.minweight_decay
+
 
     def on_before_optimizer_step(self, optimizer):
         """Advance the WD ramp and write it to every non-exempt group.
@@ -476,17 +475,6 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         for group in optimizer.param_groups:
             if group.get("apply_wd_schedule", True):
                 group["minweight_decay"] = self.minweight_decay
-        # Guarded: the hook must stay callable with a bare optimizer and no Trainer
-        # (unit tests, manual stepping). self.log needs Lightning's result collection.
-        if getattr(self.trainer, "loggers", None):
-            self.log(
-                "params/minweight_decay",
-                self.minweight_decay,
-                on_step=True,
-                on_epoch=False,
-                logger=True,
-                batch_size=self.batch_size,
-            )
 
     @abstractmethod
     def _is_global_zero(self):
@@ -573,7 +561,8 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _log_probe_results(self, pred_labels, gt_labels_bin):
+    def _F1_Accuracy(self, pred_labels: torch.Tensor, gt_labels_bin: np.ndarray,
+                     tag : str ="Validation"):
         """Phase 5 — compute metrics, log F1, and run the full visual analysis."""
         pass
 
@@ -586,7 +575,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def _validate_linear_probe(self, emb, save_dir):
+    def _validation_log_linear_probe(self, emb, save_dir):
         """Fit + log the SegHead linear probe on the configured npc_jonas crop.
 
         Loads the fixed probe crop from :attr:`_VAL_PROBE` (falling back to
@@ -603,6 +592,7 @@ class BaseModelClass(pl.LightningModule, metaclass=ABCMeta):
         safe to call alongside a model's other epoch-end logging.
         """
         pass
+
 
     @abstractmethod
     def predict_step(self, point_dict, batch_idx):

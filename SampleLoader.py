@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from collections import deque
 from functools import cached_property, partial
 from logging import Logger
@@ -134,3 +136,15 @@ class SampleLoaderBioImage(DataLoader):
         validated_files = (fp for fp in (file_path,))
 
         return validated_files if generator else deque(validated_files)
+
+
+def read_localization_file(file: Union[str, Path]) -> pd.DataFrame:
+    """Load an SMLM localization file as a DataFrame.
+
+    Verbatim behaviour of the former ``SMLMDataset.file2Dataframe``: delegate to
+    ``SampleLoaderBioImage.loadData`` and coerce non-DataFrame results to a DataFrame.
+    """
+    data = SampleLoaderBioImage.loadData(file)
+    if not isinstance(data, pd.DataFrame):
+        data = pd.DataFrame(data)
+    return data
