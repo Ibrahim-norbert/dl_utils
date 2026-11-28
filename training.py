@@ -370,7 +370,7 @@ class BaseClassTrainerAndPredictor(Trainer):
 
 
         strategy = self._resolve_strategy(use_fsdp, fsdpConfig)
-        self.device = "cuda"
+        self.device = "cpu"
         super().__init__(
             accelerator=self.device,
             strategy="auto",

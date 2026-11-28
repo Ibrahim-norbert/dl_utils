@@ -241,7 +241,7 @@ class BaseVolumeDataset(BaseDataset):
 
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
                  resolution: Optional[List[int]] = None,
-                 n_jobs: int = 1,
+                 n_jobs: int = 6,
                  **kwargs) -> None:
         # Assigned before super(), whose __init__ validates the sample paths — the
         # multi-directory subclass validates against these very attributes.
