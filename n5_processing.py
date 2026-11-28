@@ -251,12 +251,22 @@ class BaseVolumeDataset(BaseDataset):
         self.n_jobs: int = n_jobs
         super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
                          **kwargs)
+        # Mappers written on Windows carry `\` separators, which POSIX treats as part of a
+        # filename — collapsing the hierarchy into one key segment. Normalised before
+        # anything (sampleRoot, keys, loads) reads the paths.
+        for column in self.pathColumns():
+            self.sampleMapperDF[column] = self.sampleMapperDF[column].map(
+                lambda path: str(util.fix_path(path)))
         assert self.CHANNEL_COLUMN in self.sampleMapperDF.columns, f"The {self.CHANNEL_COLUMN} column is not in the sampleMapper dataframe."
 
         assert os.path.basename(self.save_dir) == self.sampleDatasetName, f"The saving directory must have the same basename as the dataset name: {os.path.basename(self.save_dir)} == {self.sampleDatasetName}"
         assert self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].nunique() == self.sampleMapperDF.shape[0], (
             f"The sample mapper must have unique paths for column: {self.SAMPLE_PATH_COLUMN}"
         )
+
+    def pathColumns(self) -> Tuple[str, ...]:
+        """Mapper columns holding file paths."""
+        return (self.SAMPLE_PATH_COLUMN,)
 
     def generateN5keys(self, pathColumn : str, sampletypekey: str) -> pd.Index:
         keys = pd.Index([self.sampleN5Key(row[pathColumn], sampletypekey=sampletypekey, channel=self.channelOf(row))
@@ -533,10 +543,12 @@ class BaseVolumeDataset(BaseDataset):
                       validate: Optional[Callable] = None) -> None:
         """Write every sample's *pathColumn* volume at its *typeKey*, ``n_jobs`` at a time.
 
+        Keys always derive from the raw sample path, so every role (raw, mask, ...) of a
+        sample lands in the same group whatever directory its own file lives in.
         Each sample writes only its own dataset directory; the groups above it are shared,
         so they are created here, up front, and the workers never race on them.
         """
-        keys: pd.Index = self.generateN5keys(pathColumn, typeKey)
+        keys: pd.Index = self.generateN5keys(self.SAMPLE_PATH_COLUMN, typeKey)
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
             for key in keys:
                 self.requireGroup(n5File, key.rpartition("/")[0])
@@ -583,6 +595,9 @@ class BaseMaskDataset(BaseVolumeDataset):
     N5_MASK_KEY: str = "mask"
     # Nearest-neighbour: interpolating between label IDs invents objects.
     MASK_INTERPOLATION_ORDER: int = 0
+
+    def pathColumns(self) -> Tuple[str, ...]:
+        return super().pathColumns() + (self.SAMPLE_MASK_PATH_COLUMN,)
     # NOTE: No idea why we use this
     # Distinct storage levels of a raw volume. toUint16 stretches EVERY volume over this
     # full range, so it is the one bin grid every sample already shares. Kept apart from
