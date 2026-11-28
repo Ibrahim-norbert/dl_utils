@@ -263,6 +263,10 @@ class BaseVolumeDataset(BaseDataset):
         assert self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].nunique() == self.sampleMapperDF.shape[0], (
             f"The sample mapper must have unique paths for column: {self.SAMPLE_PATH_COLUMN}"
         )
+        # Keys are pure path arithmetic: every instance derives them, so none has to read
+        # them back from a mapper that run() would otherwise overwrite.
+        self.sampleMapperDF[self.N5_KEY_COLUMN] = self.generateN5keys(
+            self.SAMPLE_PATH_COLUMN, self.N5_RAW_KEY).to_numpy()
 
     def pathColumns(self) -> Tuple[str, ...]:
         """Mapper columns holding file paths."""
@@ -284,12 +288,12 @@ class BaseVolumeDataset(BaseDataset):
         """
         1. Creates directory in self.save_dir.
         2. Creates N5 folder from volumes living in self.sampleRoot
-        3. Remove UNAMED column created by index=False save of dataframe
+        3. Writes the key-annotated mapper to :attr:`sampleMapperOutPath`. The input mapper
+           is left untouched: a subclass may have filtered it (e.g. to one channel).
         """
         os.makedirs(self.datasetDir, exist_ok=True)
         self.createDatasetN5File()
         self.write_index(self.sampleMapperDF, self.sampleMapperOutPath)
-        self.sampleMapperDF.to_csv(self.sampleMapperDFPath)
         logger.info("N5 dataset ready: %s (%d samples) — index: %s",
                     self.n5Path, len(self.sampleMapperDF), self.sampleMapperOutPath)
 
@@ -539,16 +543,16 @@ class BaseVolumeDataset(BaseDataset):
             self.writeN5Dataset(n5File, key, volume, channel)
             logger.info("Wrote %s <- %s", key, path)
 
-    def __writeKeys__(self, pathColumn: str, typeKey: str, order: int, keyColumn: str,
+    def __writeKeys__(self, pathColumn: str, order: int, keyColumn: str,
                       validate: Optional[Callable] = None) -> None:
-        """Write every sample's *pathColumn* volume at its *typeKey*, ``n_jobs`` at a time.
+        """Write every sample's *pathColumn* volume at its *keyColumn* key, ``n_jobs`` at a time.
 
         Keys always derive from the raw sample path, so every role (raw, mask, ...) of a
         sample lands in the same group whatever directory its own file lives in.
         Each sample writes only its own dataset directory; the groups above it are shared,
         so they are created here, up front, and the workers never race on them.
         """
-        keys: pd.Index = self.generateN5keys(self.SAMPLE_PATH_COLUMN, typeKey)
+        keys = self.sampleMapperDF[keyColumn]  # derived at construction
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
             for key in keys:
                 self.requireGroup(n5File, key.rpartition("/")[0])
@@ -556,11 +560,10 @@ class BaseVolumeDataset(BaseDataset):
         Parallel(n_jobs=self.n_jobs)(
             delayed(self.writeKeyVolume)(key, row[pathColumn], order, self.channelOf(row), validate)
             for key, (_, row) in zip(keys, self.sampleMapperDF.iterrows()))
-        self.sampleMapperDF[keyColumn] = keys.to_numpy()
 
     def __writeKeyVolumes__(self) -> None:
-        self.__writeKeys__(self.SAMPLE_PATH_COLUMN, self.N5_RAW_KEY,
-                           self.RAW_INTERPOLATION_ORDER, self.N5_KEY_COLUMN)
+        self.__writeKeys__(self.SAMPLE_PATH_COLUMN, self.RAW_INTERPOLATION_ORDER,
+                           self.N5_KEY_COLUMN)
 
     def createDatasetN5File(self) -> None:
         """Store the volumes as n5 files for RAM saving chunked based signal loading"""
@@ -613,6 +616,8 @@ class BaseMaskDataset(BaseVolumeDataset):
                          save_dir=save_dir, resolution=resolution,
                          **kwargs)
         self.features: tuple[str] = features
+        self.sampleMapperDF[self.N5_MASK_KEY_COLUMN] = self.generateN5keys(
+            self.SAMPLE_PATH_COLUMN, self.N5_MASK_KEY).to_numpy()
 
 
 
@@ -654,8 +659,8 @@ class BaseMaskDataset(BaseVolumeDataset):
 
     def __writeKeyMask__(self) -> None:
         """Same as :meth:`__writeKeyVolumes__`, each mask checked against its raw volume."""
-        self.__writeKeys__(self.SAMPLE_MASK_PATH_COLUMN, self.N5_MASK_KEY,
-                           self.MASK_INTERPOLATION_ORDER, self.N5_MASK_KEY_COLUMN,
+        self.__writeKeys__(self.SAMPLE_MASK_PATH_COLUMN, self.MASK_INTERPOLATION_ORDER,
+                           self.N5_MASK_KEY_COLUMN,
                            validate=self.assertPairsWithRaw)
 
 
@@ -985,9 +990,14 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
 
     @cached_property
     def objectDFPath(self) -> str:
-        """Return the path to the cleaned nucleus-table JSON file.
+        """Return the path to the cleaned object-table JSON file.
+
+        Named after the channels the mapper holds as well as the dataset: each channel
+        segments its own objects, so a one-channel instance must not load another's table.
         """
-        return util.get_savedf_path(self.objectDFDir, typie=self.sampleDatasetName)
+        channels = sorted(self.sampleMapperDF[self.CHANNEL_COLUMN].astype(str).unique())
+        return util.get_savedf_path(self.objectDFDir,
+                                    typie="_".join([self.sampleDatasetName, *channels]))
 
 
     def experimentRelativeDir(self, samplePath)->str:
