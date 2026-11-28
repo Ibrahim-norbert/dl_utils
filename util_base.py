@@ -11,8 +11,8 @@ import yaml
 # Import the module (not the values) so that NUCL_TABLE / LM_DF are read at call
 # time. These constants start as None and are reassigned elsewhere at runtime;
 # `from .constants import NUCL_TABLE` would bind the None value permanently.
-from constants import MOBIE_LABEL_KEY
-import constants
+from .constants import MOBIE_LABEL_KEY
+
 
 
 dfFileNamePrefix = "bbox"
@@ -280,7 +280,7 @@ def merge_with_nucl_table(df: pd.DataFrame) -> pd.DataFrame:
     assert "modality" in df.columns, \
         f"Please specify modality in {dfFileNamePrefix}: {list(df.columns)}"
 
-    left_df = constants.NUCL_TABLE if "EM" in df["modality"].unique() else constants.LM_DF
+    left_df = NUCL_TABLE if "EM" in df["modality"].unique() else LM_DF
     if left_df is None:
         raise RuntimeError(
             "constants.NUCL_TABLE / constants.LM_DF is not populated; "

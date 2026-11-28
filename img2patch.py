@@ -5,7 +5,7 @@ import skimage.io
 from patsy.state import Standardize
 from sklearn.preprocessing import StandardScaler
 
-from constants import MOBIE_LABEL_KEY
+from .constants import MOBIE_LABEL_KEY
 
 # Column layout for BBoxes arrays: [label, z_min, z_max, y_min, y_max, x_min, x_max]
 BBOX_LABEL_IDX = 0

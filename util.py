@@ -23,7 +23,7 @@ from torch import inf
 from torch.backends import cudnn as cudnn
 from torch.optim import lr_scheduler as lr_scheduler
 from torch.utils.data import DataLoader, Dataset
-from constants import MOBIE_LABEL_KEY
+from .constants import MOBIE_LABEL_KEY
 
 
 
