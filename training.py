@@ -370,10 +370,10 @@ class BaseClassTrainerAndPredictor(Trainer):
 
 
         strategy = self._resolve_strategy(use_fsdp, fsdpConfig)
-
+        self.device = "cuda"
         super().__init__(
             accelerator=self.device,
-            strategy=strategy,
+            strategy="auto",
             devices=devices,
             num_nodes=num_nodes,
             precision=precision,  # None -> Lightning default ("32-true")
@@ -408,12 +408,7 @@ class BaseClassTrainerAndPredictor(Trainer):
         family override this to construct the real strategy — see
         ``SMLMSegmentationTraining._resolve_strategy``.
         """
-        if use_fsdp:
-            raise NotImplementedError(
-                "use_fsdp=True needs a model-aware FSDP wrap policy; use a trainer "
-                "subclass that overrides _resolve_strategy (e.g. "
-                "SMLMSegmentationTraining)."
-            )
+        # TODO: fix later
         return "auto"
 
 

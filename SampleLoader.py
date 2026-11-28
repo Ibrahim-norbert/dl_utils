@@ -13,7 +13,7 @@ from plyfile import PlyData
 import data_loader.data_loader as data_loader
 from data_loader import DataLoader, Extensions, DLoaderException
 from data_loader.data_loader import _SpecialDictRepr
-
+from .util import fix_path
 
 def load_ply(path):
     with open(path, "rb") as f:
@@ -75,6 +75,7 @@ class SampleLoaderBioImage(DataLoader):
 
     @classmethod
     def loadData(cls, path) -> Any:
+        path = fix_path(path)
         files: _SpecialDictRepr = cls.dataObject(path, total_workers=1).file
         # `path` resolves to a single file, so there is exactly one entry.
         output = next(iter(files.values()), None)

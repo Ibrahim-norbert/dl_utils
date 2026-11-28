@@ -25,7 +25,7 @@ class BaseDataset:
     SAMPLE_PATH_COLUMN: str = "sample_path"
     SAMPLE_LABEL_COLUMN: str = f"sample_{MOBIE_LABEL_KEY}"
 
-    def __init__(self, sampleMapperDFPath: str, **kwargs) -> None:
+    def __init__(self, sampleMapperDFPath: str, save_dir, **kwargs) -> None:
 
         self.sampleMapperDFPath = sampleMapperDFPath
 
@@ -40,11 +40,45 @@ class BaseDataset:
             "Ensure sample mapper does not have duplicates"
         )
         self.samples: np.ndarray = self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN].to_numpy()
-
+        self.save_dir = save_dir
         pl.seed_everything(42, workers=True)
 
     def __len__(self) -> int:
         return self.samples.size
+
+    @classmethod
+    def requiredColumns(cls) -> Tuple[str, ...]:
+        """Columns every sample-mapper row must fill; subclasses extend this."""
+        return (cls.SAMPLE_PATH_COLUMN,)
+
+    @classmethod
+    def collectSampleMappers(cls, root: Union[str, Path],
+                             pattern: str = "sample_mapper_crop.csv",
+                             outPath: Optional[Union[str, Path]] = None) -> pd.DataFrame:
+        """Recreate one sample mapper from the per-directory mappers found below ``root``.
+
+        Every file matching ``pattern`` at any depth is concatenated; rows missing one of
+        :meth:`requiredColumns` are dropped. Per-file sample labels restart at 0, so
+        colliding labels are renumbered. With ``outPath`` the result is also written via
+        :meth:`write_index`, ready to pass as ``sampleMapperDFPath``.
+        """
+        exclude = Path(outPath).resolve() if outPath else None
+        paths = sorted(p for p in Path(root).rglob(pattern) if p.resolve() != exclude)
+        if not paths:
+            raise FileNotFoundError(f"No '{pattern}' found below {root}")
+
+        df = pd.concat(map(cls.read_index, paths), ignore_index=True)
+        n = len(df)
+        df = df.dropna(subset=list(cls.requiredColumns())).reset_index(drop=True)
+        if cls.SAMPLE_LABEL_COLUMN in df and df[cls.SAMPLE_LABEL_COLUMN].duplicated().any():
+            logger.warning("Duplicate %s across mappers - renumbering", cls.SAMPLE_LABEL_COLUMN)
+            df[cls.SAMPLE_LABEL_COLUMN] = np.arange(len(df))
+        logger.info("Collected %d mappers below %s: %d rows (%d dropped for missing %s)",
+                    len(paths), root, len(df), n - len(df), cls.requiredColumns())
+
+        if outPath:
+            cls.write_index(df, str(outPath))
+        return df
 
 
     @staticmethod

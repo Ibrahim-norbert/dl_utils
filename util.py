@@ -26,7 +26,12 @@ from torch.utils.data import DataLoader, Dataset
 from .constants import MOBIE_LABEL_KEY
 
 
+import re
+from pathlib import Path
 
+def fix_path(p: str | Path) -> Path:
+    """Turn any run of / or \\ separators into a single '/'."""
+    return Path(re.sub(r"[\\/]+", "/", str(p)))
 
 def getArrayFromDF(df, column):
     """Extracts and converts a column from a DataFrame to a NumPy array."""

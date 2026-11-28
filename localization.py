@@ -13,9 +13,9 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import default_collate
-from constants import MOBIE_LABEL_KEY
-from SampleLoader import read_localization_file
-from SampleTypes import Vertices
+from .constants import MOBIE_LABEL_KEY
+from .SampleLoader import read_localization_file
+from .SampleTypes import Vertices
 
 X_COLUMN_CANDIDATES = ("xnm", "x [nm]", "x[nm]", "x[pix]", "x", "X")
 Y_COLUMN_CANDIDATES = ("ynm", "y [nm]", "y[nm]", "y[pix]", "y", "Y")

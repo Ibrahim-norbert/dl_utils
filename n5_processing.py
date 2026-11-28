@@ -34,12 +34,12 @@ from scipy.ndimage import binary_fill_holes
 from skimage.transform import resize
 from xarray.util.generate_ops import inplace
 
-from dl_utils import img2patch as img2ps, util, MOBIE_LABEL_KEY
-from dl_utils.SampleLoader import SampleLoaderBioImage
-from dl_utils.datasets import BaseDataset
-from dl_utils.util import getArrayFromDF
-from dl_utils.util_base import save2DFcolumn
-from dl_utils.vizualizations import CustomMatplotlib
+from . import img2patch as img2ps, util, MOBIE_LABEL_KEY
+from .SampleLoader import SampleLoaderBioImage
+from .datasets import BaseDataset
+from .util import getArrayFromDF
+from .util_base import save2DFcolumn
+from .vizualizations import CustomMatplotlib
 import fsspec
 
 
@@ -248,7 +248,7 @@ class BaseVolumeDataset(BaseDataset):
                          **kwargs)
         assert self.CHANNEL_COLUMN in self.sampleMapperDF.columns, f"The {self.CHANNEL_COLUMN} column is not in the sampleMapper dataframe."
 
-        assert os.path.basename(self.save_dir) == self.sampleDatasetName, f"The saving directory must have the same basename as the dataset name: {self.save_dir} == {self.sampleDatasetName}"
+        assert os.path.basename(self.save_dir) == self.sampleDatasetName, f"The saving directory must have the same basename as the dataset name: {os.path.basename(self.save_dir)} == {self.sampleDatasetName}"
         assert self.sampleMapperDF[self.SAMPLE_PATH_COLUMN].nunique() == self.sampleMapperDF.shape[0], (
             f"The sample mapper must have unique paths for column: {self.SAMPLE_PATH_COLUMN}"
         )
@@ -372,22 +372,22 @@ class BaseVolumeDataset(BaseDataset):
 
     # ---- Writing -----------------------------------------------------
 
-    @staticmethod
-    def toUint16(volume: np.ndarray, normalise: bool) -> np.ndarray:
-        """Cast to the storage dtype, min-max stretching intensities when *normalise*.
-
-        Label volumes are never stretched: their values are identities, not intensities.
-        """
-        ceiling = np.iinfo(np.uint16).max
-        if normalise:
-            # TODO: Just use Sklearn minmax but only on raw image not any masks
-            low, high = float(volume.min()), float(volume.max())
-            volume = ((volume - low) / (high - low) if high > low
-                      else np.zeros_like(volume)) * ceiling
-        if volume.min() < 0 or volume.max() > ceiling:
-            raise ValueError(
-                f"Volume range [{volume.min()}, {volume.max()}] does not fit uint16")
-        return volume.astype(np.uint16)
+    # @staticmethod
+    # def toUint16(volume: np.ndarray, normalise: bool) -> np.ndarray:
+    #     """Cast to the storage dtype, min-max stretching intensities when *normalise*.
+    #
+    #     Label volumes are never stretched: their values are identities, not intensities.
+    #     """
+    #     ceiling = np.iinfo(np.uint16).max
+    #     if normalise:
+    #         # TODO: Just use Sklearn minmax but only on raw image not any masks
+    #         low, high = float(volume.min()), float(volume.max())
+    #         volume = ((volume - low) / (high - low) if high > low
+    #                   else np.zeros_like(volume)) * ceiling
+    #     if volume.min() < 0 or volume.max() > ceiling:
+    #         raise ValueError(
+    #             f"Volume range [{volume.min()}, {volume.max()}] does not fit uint16")
+    #     return volume.astype(np.uint16)
 
     def resampleVolume(self, volume: np.ndarray, resolutions: list[int],
                        interpolationOrder: int = 0,
@@ -426,22 +426,26 @@ class BaseVolumeDataset(BaseDataset):
         min_res: int = min(resolutions)
         resolutions = np.array(resolutions) / min_res
 
-        logger.debug("Pre-resampled dimension: %s", volume.shape)
+        print("Pre-resampled dimension: %s", volume.shape)
 
         if all(res == 1 for res in resolutions):
-            logger.debug("Isotropic resolution detected. Skipping resizing.")
+            print("Isotropic resolution detected. Skipping resizing.")
             return volume, min_res
 
         newShape = tuple(int(round(size * res)) for size, res in zip(volume.shape, resolutions))
-        volume = resize(volume, newShape, order=interpolationOrder, preserve_range=True,
-                        anti_aliasing=interpolationOrder > 0 if antiAliasing is None else antiAliasing)
-
-        logger.debug("Resampled dimension: %s", volume.shape)
+        dtype = volume.dtype
+        volume = resize(volume, newShape, order=interpolationOrder,
+                        preserve_range=True, anti_aliasing=False)
+        if np.issubdtype(dtype, np.integer):
+            volume = np.rint(volume)  # clip=True already bounds it to the input range
+        volume = volume.astype(dtype)
+        print("Resampled dimension: %s", volume.shape)
         return volume, min_res
 
     @staticmethod
     def loadFromSamplePath(path: str) -> np.ndarray:
         """Load a 3-D TIFF volume from *path*."""
+
         volume : np.ndarray = SampleLoaderBioImage.loadData(path)
         assert isinstance(volume, np.ndarray), (f"BaseVolumeDataset currently only supports loading {np.ndarray.__class__}"
          + f" not {volume.__class__} from {path}")
@@ -465,7 +469,7 @@ class BaseVolumeDataset(BaseDataset):
 
         resampled, _ = self.resampleVolume(volume, self.resolution, interpolationOrder)
 
-        return {"volume": self.toUint16(resampled, normalise=False)}
+        return {"volume": resampled}
 
     @staticmethod
     def requireGroup(n5File, groupKey: str):
@@ -607,7 +611,7 @@ class BaseMaskDataset(BaseVolumeDataset):
                 logger.warning("Resampling %s dropped %d label(s): %s",
                                sampleVolumePath, lost.size, lost[:10])
 
-        return {"volume": self.toUint16(resampled, normalise=not isLabels)}
+        return {"volume": resampled}
 
     # def _statsFromMask(self, rawVol : np.ndarray, maskVol : np.ndarray, feaures: tuple[str]) -> pd.DataFrame:
     #     """Region statistics of **one** volume: a row per labelled object, or a single row for
