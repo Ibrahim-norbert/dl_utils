@@ -27,6 +27,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union, Hashable
 import numpy as np
 import pandas as pd
 import z5py
+from joblib import Parallel, delayed
 from IPython.core.oinspect import object_info
 from matplotlib import pyplot as plt
 from numpy import ndarray, dtype
@@ -240,10 +241,14 @@ class BaseVolumeDataset(BaseDataset):
 
     def __init__(self, sampleMapperDFPath: str, save_dir: str,
                  resolution: Optional[List[int]] = None,
+                 n_jobs: int = 1,
                  **kwargs) -> None:
         # Assigned before super(), whose __init__ validates the sample paths — the
         # multi-directory subclass validates against these very attributes.
         self.resolution: List[int] = list(resolution or self.DEFAULT_RESOLUTION)
+        # joblib convention: 1 = serial, -1 = every allocated CPU. Each worker holds one
+        # TIF plus its float64 resampled copy, so RAM bounds this, not cores.
+        self.n_jobs: int = n_jobs
         super().__init__(sampleMapperDFPath=sampleMapperDFPath, save_dir=save_dir,
                          **kwargs)
         assert self.CHANNEL_COLUMN in self.sampleMapperDF.columns, f"The {self.CHANNEL_COLUMN} column is not in the sampleMapper dataframe."
@@ -506,35 +511,44 @@ class BaseVolumeDataset(BaseDataset):
         dataset[:] = volume
         dataset.attrs["channel"] = channel
 
-    def __writeKeyVolumes__(self) -> None:
+    def writeKeyVolume(self, key: str, path: str, order: int, channel: str,
+                       validate: Optional[Callable] = None) -> None:
+        """Preprocess and write one sample, unless *key* is already in the N5.
 
+        *validate* ``(n5File, key, volume)`` still runs on a resumed key (with ``None``):
+        it reads metadata only, and skipping it would leave an existing dataset unchecked.
         """
-        1. Create N5 key for each sample
-        2. Preprocess volume
-        3. Write to N5 dataset if it does not already exist
-        """
-
-        sampleKeys : pd.Index = self.generateN5keys(self.SAMPLE_PATH_COLUMN, self.N5_RAW_KEY)
-
         with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
-            for N5key, (i, row) in zip(sampleKeys, self.sampleMapperDF.iterrows()):
-                if self.containsKey(n5File, N5key):
-                    # TODO: Need to add a validation method ensuring data exists indeed
-                    # # Still validated: the check reads metadata only, and skipping it on
-                    # # resume meant an existing dataset was never checked against its pair.
-                    # if validate is not None:
-                    #     validate(n5File, key, None)
-                    logger.debug("Already in N5, skipping: %s", N5key)
-                    continue
-                print(f"Writing {N5key} of indx {i} keys to N5 file {self.n5Path}")
-                volume: np.ndarray = self.preprocessVolume(row[self.SAMPLE_PATH_COLUMN], self.RAW_INTERPOLATION_ORDER)["volume"]
-                #
-                # if validate is not None:
-                #     validate(n5File, key, volume)
-                self.writeN5Dataset(n5File, N5key, volume, self.channelOf(row))
-                logger.info("Wrote %s <- %s", N5key, row[self.SAMPLE_PATH_COLUMN])
+            exists = self.containsKey(n5File, key)
+            volume = None if exists else self.preprocessVolume(path, order)["volume"]
+            if validate is not None:
+                validate(n5File, key, volume)
+            if exists:
+                logger.debug("Already in N5, skipping: %s", key)
+                return
+            self.writeN5Dataset(n5File, key, volume, channel)
+            logger.info("Wrote %s <- %s", key, path)
 
-        self.sampleMapperDF[self.N5_KEY_COLUMN] = sampleKeys.to_numpy()
+    def __writeKeys__(self, pathColumn: str, typeKey: str, order: int, keyColumn: str,
+                      validate: Optional[Callable] = None) -> None:
+        """Write every sample's *pathColumn* volume at its *typeKey*, ``n_jobs`` at a time.
+
+        Each sample writes only its own dataset directory; the groups above it are shared,
+        so they are created here, up front, and the workers never race on them.
+        """
+        keys: pd.Index = self.generateN5keys(pathColumn, typeKey)
+        with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
+            for key in keys:
+                self.requireGroup(n5File, key.rpartition("/")[0])
+        # Processes (loky), not threads: TIF decoding does not reliably release the GIL.
+        Parallel(n_jobs=self.n_jobs)(
+            delayed(self.writeKeyVolume)(key, row[pathColumn], order, self.channelOf(row), validate)
+            for key, (_, row) in zip(keys, self.sampleMapperDF.iterrows()))
+        self.sampleMapperDF[keyColumn] = keys.to_numpy()
+
+    def __writeKeyVolumes__(self) -> None:
+        self.__writeKeys__(self.SAMPLE_PATH_COLUMN, self.N5_RAW_KEY,
+                           self.RAW_INTERPOLATION_ORDER, self.N5_KEY_COLUMN)
 
     def createDatasetN5File(self) -> None:
         """Store the volumes as n5 files for RAM saving chunked based signal loading"""
@@ -624,33 +638,10 @@ class BaseMaskDataset(BaseVolumeDataset):
     #     return df
 
     def __writeKeyMask__(self) -> None:
-        """
-        Same as in self.__writeVolume__ but includes self.assertPairsWithRaw validation
-        """
-
-        keys = self.generateN5keys(self.SAMPLE_MASK_PATH_COLUMN, sampletypekey=self.N5_MASK_KEY)
-
-        with z5py.File(self.n5Path, "a", use_zarr_format=False) as n5File:
-            for key, (_, row) in zip(keys, self.sampleMapperDF.iterrows()):
-                if self.containsKey(n5File, key):
-                    # Still validated: the check reads metadata only, and skipping it on
-                    # resume meant an existing dataset was never checked against its pair.
-                    self.assertPairsWithRaw(n5File, key, None)
-                    logger.debug("Already in N5, skipping: %s", key)
-                    continue
-
-                prepared_dict: dict = self.preprocessVolume(row[self.SAMPLE_MASK_PATH_COLUMN], self.MASK_INTERPOLATION_ORDER)
-
-                volume: np.ndarray = prepared_dict.pop("volume")
-
-                self.assertPairsWithRaw(n5File, key, volume)
-
-                self.writeN5Dataset(n5File, key, volume, self.channelOf(row))
-
-                logger.info("Wrote %s <- %s", key, row[self.SAMPLE_MASK_PATH_COLUMN])
-
-
-        self.sampleMapperDF[self.N5_MASK_KEY_COLUMN] = keys.to_numpy()
+        """Same as :meth:`__writeKeyVolumes__`, each mask checked against its raw volume."""
+        self.__writeKeys__(self.SAMPLE_MASK_PATH_COLUMN, self.N5_MASK_KEY,
+                           self.MASK_INTERPOLATION_ORDER, self.N5_MASK_KEY_COLUMN,
+                           validate=self.assertPairsWithRaw)
 
 
 

@@ -12,6 +12,7 @@ authors = [{ name = "Ibrahim Norbert Mansaray" }]
 # Runtime deps are intentionally kept light here; the heavy ML stack
 # (torch, pytorch_lightning, etc.) is provided by the host environment.
 dependencies = [
+    "joblib",
     "numpy",
     "pandas",
     "matplotlib",
