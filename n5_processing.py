@@ -39,7 +39,7 @@ from . import img2patch as img2ps, util, MOBIE_LABEL_KEY
 from .SampleLoader import SampleLoaderBioImage
 from .datasets import BaseDataset
 from .util import getArrayFromDF
-from .util_base import save2DFcolumn
+from .util_base import save2DFcolumn, get_savedf_path
 from .vizualizations import CustomMatplotlib
 import fsspec
 
@@ -996,7 +996,7 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
         segments its own objects, so a one-channel instance must not load another's table.
         """
         channels = sorted(self.sampleMapperDF[self.CHANNEL_COLUMN].astype(str).unique())
-        return util.get_savedf_path(self.objectDFDir,
+        return get_savedf_path(self.objectDFDir,
                                     typie="_".join([self.sampleDatasetName, *channels]))
 
 
@@ -1010,7 +1010,7 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
 
         dirs = f"{self.objectDFDir}{self.experimentRelativeDir(samplePath)}"
 
-        path = util.get_savedf_path(dirs,
+        path = get_savedf_path(dirs,
                                     typie=sampleFileName) # #training_processed/tables/single_volume/bbox_sampleFileName.json
 
         return path
