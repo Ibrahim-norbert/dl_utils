@@ -1065,13 +1065,11 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
 
         # TODO: Not sur how changing samplePath to maskPath will change df object mapper saving
 
-        dfpaths = []
-
-        for i, row in self.sampleMapperDF.iterrows():
-
-            dfPath : str = self.generateSingleSampleObjectDF(row, self.overrideObjectDF)
-
-            dfpaths.append(dfPath)
+        # One table per sample, each written to its own file: parallel like __writeKeys__,
+        # processes (loky) since every worker reads and labels a whole volume.
+        dfpaths = Parallel(n_jobs=self.n_jobs)(
+            delayed(self.generateSingleSampleObjectDF)(row, self.overrideObjectDF)
+            for _, row in self.sampleMapperDF.iterrows())
 
         self.objectMapperDF: pd.DataFrame = pd.concat([SampleLoaderBioImage.loadData(p) for p in dfpaths], axis=0)
 
