@@ -912,14 +912,18 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
         
         self.overrideObjectDF : bool = overrideObjectDF
 
-        if not os.path.exists(self.objectDFPath) or self.overrideObjectDF:
+        if not self.confirmDatasetN5File:
+            # The table is read off the N5: until run() writes it, index nothing, so
+            # len() == 0 tells callers to run() (see representationlearning.builders).
+            self.objectMapperDF = pd.DataFrame()
+        elif not os.path.exists(self.objectDFPath) or self.overrideObjectDF:
             # Attempt to obtain the bboxs to construct objectMapperDF
             print(f"Did not find an objectMapperDF at the following path, thus generating anew: {self.objectDFPath}")
             self.__generateObjectMappingDF__()
 
         else:
             print(f"Utilizing objectMapperDF at the following path:\n{self.objectDFPath}")
-            self.objectMapperDF = SampleLoaderBioImage.loadData(self.objectDFPath)
+            self.objectMapperDF = self.indexByMultiLabel(SampleLoaderBioImage.loadData(self.objectDFPath))
 
 
 
@@ -1002,7 +1006,9 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
         return path
 
     def sampleTransformObjectDF(self, sample_label: int):
-        sample_idx : int = self.sampleMapperDF.loc[self.sampleMapperDF[self.SAMPLE_LABEL_COLUMN] == sample_label].index[0]
+        # Positional: the readers below go through sampleDFRow (.iloc), and a filtered
+        # mapper's index labels are not positions.
+        sample_idx : int = self.sample2Index(sample_label)
         image: np.ndarray = super().get_hr_vol(sample_idx)
         # TODO: Continue here to implement with image intensity
         dataFrameObject = mask2BBOXDF(super().get_hr_mask(sample_idx), image, self.features)
@@ -1063,14 +1069,21 @@ class BaseObjectBBOXDataset(MultiDirectoryN5Dataset):
 
         self.removeSegmentationErrors()
 
-        keys = [self.SAMPLE_LABEL_COLUMN, self.OBJECT_LABEL_COLUMN]
-
-        # drop=False keeps the columns, so row[SAMPLE_LABEL_COLUMN] still works
-        self.objectMapperDF.set_index(pd.MultiIndex.from_frame(self.objectMapperDF[keys]), inplace=True)
-
-        assert self.objectMapperDF.index.is_unique, "duplicate (sample_label, object_label) pairs"
+        self.objectMapperDF = self.indexByMultiLabel(self.objectMapperDF)
 
         self.objectMapperDF.to_json(self.objectDFPath, orient="records")
+
+    def indexByMultiLabel(self, table: pd.DataFrame) -> pd.DataFrame:
+        """Index *table* by (sample label, object label).
+
+        Needed on load too: ``orient="records"`` persists no index, so a reloaded table
+        otherwise falls back to a RangeIndex and ``index2MultiLabel`` returns ints.
+        """
+        keys = [self.SAMPLE_LABEL_COLUMN, self.OBJECT_LABEL_COLUMN]
+        # drop=False keeps the columns, so row[SAMPLE_LABEL_COLUMN] still works
+        table = table.set_index(pd.MultiIndex.from_frame(table[keys]))
+        assert table.index.is_unique, "duplicate (sample_label, object_label) pairs"
+        return table
 
     def sampleDF2ObjectDFMerge(self):
         assert isinstance(self.objectMapperDF, pd.DataFrame), f"We need objectMapperDF to be an dataframe not : {type(self.objectMapperDF)}"
